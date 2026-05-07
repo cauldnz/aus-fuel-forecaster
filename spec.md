@@ -344,19 +344,30 @@ Note on leakage: v1 uses Historical Weather (ERA5 reanalysis) across the full sp
 ### 7.7 Demographic block (`sa2_*`) — the augmentor block
 
 ```
-sa2_median_age
-sa2_median_household_income_weekly
-sa2_total_population
-sa2_pct_drive_to_work
-sa2_motor_vehicles_per_dwelling
-sa2_pct_renters
-sa2_pct_employed_full_time
-sa2_pct_aged_65_plus
-sa2_seifa_irsd_score
-sa2_pct_one_parent_family
+sa2_median_age                        # G02.Median_age_persons (direct)
+sa2_median_household_income_weekly    # G02.Median_tot_hhd_inc_weekly (direct)
+sa2_total_population                  # G01.Tot_P_P (direct)
+sa2_seifa_irsd_score                  # ABS SEIFA 2021 SA2 IRSD score (separate fetch + join)
+sa2_pct_drive_to_work                 # DERIVED — see §7.7.1
+sa2_motor_vehicles_per_dwelling       # DERIVED
+sa2_pct_renters                       # DERIVED
+sa2_pct_employed_full_time            # DERIVED
+sa2_pct_aged_65_plus                  # DERIVED
+sa2_pct_one_parent_family             # DERIVED
 ```
 
 This block is the *only* difference between Model A and Model B.
+
+#### 7.7.1 Deferred derived variables
+
+Phase 3 v1 ships the 4 unambiguous columns (3 augmentor-direct + SEIFA). The 6 DERIVED percentages are stubbed with nulls plus a clear `_compute_derived_percentages()` framework in `build.enrich_census` so each can be filled in later. Reasons:
+
+- Each derivation needs a numerator/denominator pair from the right GCP table, and the denominator choice is non-obvious (e.g. `pct_drive_to_work` denominator is "persons aged 15+ in employed labour force", not "total population"). Getting it wrong silently distorts the cross-sectional distribution.
+- The 200-column GCP tables (G46A, G43, G33, G31) make field-code archaeology a non-trivial spike per derivation.
+- [abs-census-augmentor#11](https://github.com/cauldnz/abs-census-augmentor/issues/11) proposes native derived-variable support upstream — once that lands, our local code is throwaway.
+- The EDA notebook (Phase 7) will identify which derivations matter most for the U91 model, so prioritising them then is more efficient than spiking all six now.
+
+For each deferred derivation, `build.enrich_census` writes a null column with the spec'd name; LightGBM handles nulls natively, so Model B simply has slightly less SA2 signal than spec-final until the derivations are filled in.
 
 ### 7.8 Target
 
@@ -599,9 +610,10 @@ Each phase produces a runnable artefact and a testable outcome. Designed for seq
 - Acceptance: `data/interim/stations.parquet` and `data/interim/fuel_daily.parquet` exist with the schemas in §6
 
 ### Phase 3 — Census enrichment (1 session)
-- `build.enrich_census` — wrapper around `abs-census-augmentor` for the 10 variables
-- Add SEIFA (separate ABS source if augmentor doesn't expose it natively)
-- Acceptance: `data/interim/stations.parquet` has all 10 `sa2_*` columns populated for ≥ 95% of stations
+- `build.enrich_census` — wrapper around `abs-census-augmentor`'s spatial-join + enrichment path (uses pre-resolved lat/lon from Phase 2). Ships the 4 unambiguous columns: `sa2_median_age`, `sa2_median_household_income_weekly`, `sa2_total_population`, plus `sa2_code` / `sa2_name`.
+- `fetch.seifa` — auto-download ABS SEIFA 2021 SA2 IRSD scores; cache to `data/raw/seifa_2021_sa2.parquet`. Joined into stations during enrichment to add `sa2_seifa_irsd_score`.
+- 6 DERIVED percentages (§7.7.1) stubbed with nulls + `TODO(spec)` markers. Filled in later, EDA-driven.
+- Acceptance: `data/interim/stations.parquet` has the 4 ship-now `sa2_*` columns + `sa2_code` / `sa2_name` populated for ≥ 95% of stations. The 6 deferred columns exist but are null.
 
 ### Phase 4 — Feature build (1 session)
 - `build.panel_grid` — assemble the (station, fuel, date) grid
@@ -638,12 +650,18 @@ To be resolved during implementation, not blocking spec sign-off:
 2. **SEIFA join key** — does `abs-census-augmentor` expose SEIFA, or do we join independently after the augmentor pass? Resolved in Phase 3.
 3. **Brand canonicalisation** ✅ resolved Phase 2: `data/static/brand_aliases.csv` is the canonical mapping. Unmapped brand strings produce a WARNING log and pass through verbatim — never fail. Initial seed built from Aug 2024 + Dec 2025 + Feb 2026 monthly archives. **Both** `brand_raw` and `brand_canonical` are persisted to `stations.parquet` so the model can pick up franchisee-vs-corporate pricing signal that would otherwise be erased.
 
-   **Sub-question (open):** how do we identify franchisees vs corporate sites? Patterns like `EG Ampol` (Euro Garages franchisee) vs `Ampol Foodary` (corporate sub-brand) carry plausible pricing signal but the labelling has to come from somewhere. Options:
-   - Hand-curate `data/static/brand_franchisee_rules.csv` with a `raw_brand → is_franchisee` mapping. Researched from press releases, brand websites, ABN lookups. Manageable — there are <30 distinct major-brand-affiliated raw strings.
-   - Defer entirely: expose `brand_raw` only and let the model learn the difference implicitly via category-level effects. Simpler but loses the explicit `is_franchisee` feature.
-   - Hybrid: ship the rules file with confident-cases populated, leave the rest blank → null `is_franchisee` for unconfirmed.
+   **Sub-question (open):** how do we identify franchisees vs corporate sites? Patterns like `EG Ampol` (Euro Garages franchisee) vs `Ampol Foodary` (corporate sub-brand) carry plausible pricing signal — and the *cross-brand* hypothesis is more interesting still: a franchisee's pricing behaviour may resemble other franchisees more than it resembles their own brand's corporate sites. So a single `stn_is_franchisee` boolean (and possibly a `stn_franchisee_operator` categorical, e.g. "EG", "EBM") could be a stronger signal than `stn_brand_raw` alone.
 
-   Recommend the hybrid approach: a small rules file with the obvious cases (EG, EBM, Coles Express historically a Shell franchisee, etc.) and explicit nulls everywhere else. Implement during Phase 4 feature engineering, not Phase 2.
+   **Research path** (Phase 4-ish, not blocking earlier work):
+   - Build `data/static/brand_franchisee_rules.csv` with `raw_brand → is_franchisee, operator`. Sources:
+     - Press releases / annual reports of major franchisee operators (EG Group, EBM, Reddy Express's history with Shell)
+     - Australian Franchise Council registry (if accessible)
+     - Brand-name pattern matching as a fallback: `^EG ` / `^EBM ` / `... Mobil 1 ...` etc. as proxies
+     - ABN lookups against operator names if FuelCheck ever exposes operator metadata (it doesn't currently)
+   - Schema: `raw_brand,is_franchisee,operator,confidence` — confidence in {`confirmed`, `pattern_match`, `inferred`} so analysts can filter to high-confidence only.
+   - The cross-brand `operator` column lets feature engineering build aggregates like "median price among EG-operated sites within 10 km".
+
+   For Phase 2 / 3, ship `brand_raw` + `brand_canonical` only and defer `is_franchisee` to a dedicated research pass before Phase 4 feature build.
 4. **Petrol cycle as a sanity check** — should `01_eda.ipynb` verify the cycle is endogenously captured by lag features (e.g., by training a tiny model on lag features alone and inspecting predictions on a held-out station)? Nice-to-have.
 5. **Crisis-period reporting** — confirm whether the test (crisis) fold is reported in the headline `comparison.md` or only as a sub-section. Suggest sub-section to keep the headline numbers comparable to a "normal world" baseline.
 

@@ -16,6 +16,13 @@ dependencies = [
     "requests>=2.32",
     "tenacity>=8.2",
     "yfinance>=0.2.40",
+    # Excel reading — the RBA F11.1 historical periods (1983-2022) are
+    # only published as legacy .xls files, so xlrd is required by
+    # fetch.audusd. NSW FuelCheck publishes most monthly archives as .xlsx,
+    # which pandas reads via openpyxl. Spec hint claimed CSVs throughout;
+    # reality differs for both feeds.
+    "xlrd>=2.0",
+    "openpyxl>=3.1",
     # Calendar
     "holidays>=0.50",
     # ML

@@ -53,7 +53,8 @@ fetch-tier1:
 	$(PYTHON) -m $(PKG).fetch.brent --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/brent.parquet
 	$(PYTHON) -m $(PKG).fetch.audusd --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/audusd.parquet
 	$(PYTHON) -m $(PKG).fetch.traffic --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/traffic
-	$(PYTHON) -m $(PKG).fetch.weather --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/weather
+# TODO(phase2): weather fetch needs station lat/lons from clean.fuelcheck — re-enable after Phase 2.
+#	$(PYTHON) -m $(PKG).fetch.weather --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/weather
 
 fetch-tier2:
 	$(PYTHON) -m $(PKG).fetch.cash_rate --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/cash_rate.parquet

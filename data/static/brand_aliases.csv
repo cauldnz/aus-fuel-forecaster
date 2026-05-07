@@ -9,7 +9,7 @@ BP,BP,true
 BP Travel Centre,BP,true
 Coles Express,Coles Express,true
 Costco,Costco,false
-EG Ampol,EG Ampol,false
+EG Ampol,Ampol,true
 Liberty,Liberty,false
 Metro Petroleum,Metro,false
 Metro,Metro,false
@@ -31,3 +31,44 @@ Lowes Petroleum,Lowes,false
 Matilda,Matilda,false
 Pacific Petroleum,Pacific,false
 X Convenience,X Convenience,false
+Ampol Foodary,Ampol,true
+Ampol Breeze,Ampol,true
+EBM Ampol,Ampol,true
+Reddy Express,Reddy Express,true
+Metro Fuel,Metro,false
+ASTRON,Astron,false
+Pearl Energy,Pearl Energy,false
+Enhance,Enhance,false
+U-Go,U-Go,false
+Ultra Petroleum,Ultra,false
+Prime,Prime,false
+Arko Energy,Arko Energy,false
+Lowes,Lowes,false
+AUS Petroleum,AUS Petroleum,false
+Transwest Fuels,Transwest,false
+Inland Petroleum,Inland Petroleum,false
+IOR Group,IOR,false
+Mobil 1 Carlingford Car Care,Mobil,false
+South West,South West,false
+Calvi Petrol,Calvi,false
+EZ Fuel,EZ Fuel,false
+NPG Retail,NPG,false
+Supreme Fuel,Supreme,false
+Coral Petroleum,Coral,false
+APW,APW,false
+Woodham Petroleum,Woodham,false
+APCO,APCO,false
+Payless Fuel,Payless,false
+Powerfuel,Powerfuel,false
+HopeFuel,HopeFuel,false
+Bargo Petroleum,Bargo,false
+Infinity,Infinity,false
+Highland Fuels,Highland,false
+Roo Petroleum,Roo,false
+Boost Fuel,Boost,false
+Rural Fuel,Rural,false
+Greens Mandurama,Independent,false
+Bendalong General Store,Independent,false
+Tinonee General Store,Independent,false
+Budget,Budget,false
+Westside,Westside,false

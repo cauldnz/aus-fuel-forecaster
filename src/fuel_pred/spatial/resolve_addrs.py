@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -50,16 +51,58 @@ logger = logging.getLogger(__name__)
 
 GEOCODED_COLUMNS: tuple[str, ...] = ("lat", "lon", "geocoder", "mb_code")
 
+# G-NAF parquet is published to s3://minus34.com/opendata/ (ap-southeast-2).
+# The default virtual-hosted URL `minus34.com.s3.amazonaws.com` triggers a
+# certificate hostname mismatch (S3's wildcard cert is `*.s3.amazonaws.com`,
+# not `*.s3.amazonaws.com` *plus* a leading `.com.`). Forcing path-style via
+# the regional endpoint sidesteps this and is faster (no cross-region hop).
+GNAF_S3_HTTPS_ENDPOINT: str = "https://s3.ap-southeast-2.amazonaws.com"
+
+
+_CROSS_STREET_RE: re.Pattern[str] = re.compile(
+    r"\s+(cnr|corner|c/o)\b.*?(?=,|$)", flags=re.IGNORECASE
+)
+
+
+def _clean_street(street: str) -> str:
+    """Strip cross-street annotations that break Nominatim parsing.
+
+    FuelCheck addresses often include `Cnr Ross St`, `Corner of X & Y`, etc.
+    These are useful for human navigation but cause Nominatim to return zero
+    hits where the same address without the annotation resolves cleanly.
+    The match stops at a comma so suburb/postcode that follows is preserved.
+    """
+    return _CROSS_STREET_RE.sub("", street).strip()
+
 
 def _format_address(row: pd.Series) -> str:
-    """Build a single address string from FuelCheck columns."""
-    parts = [
-        str(row.get("address", "") or ""),
-        str(row.get("suburb", "") or ""),
-        f"NSW {row.get('postcode', '') or ''}".strip(),
-        "Australia",
-    ]
-    return ", ".join(p.strip() for p in parts if p.strip())
+    """Build a single address string from FuelCheck columns.
+
+    FuelCheck's `address` column is *inconsistent*: some rows are
+    street-only ("78 Great Western Hwy Cnr Ross St"), others already
+    contain the full address ("1 Braidwood Rd, GOULBURN NSW 2580").
+    Naively appending suburb/state/postcode duplicates everything in the
+    second case and produces strings Nominatim refuses to parse.
+
+    Strategy: take the address column as authoritative, strip
+    cross-street annotations, then append suburb / postcode only when
+    they aren't already present (case-insensitive substring check).
+    State is left to whatever the address itself carries — many FuelCheck
+    stations sit in ACT despite being on a NSW dataset.
+    """
+    raw = str(row.get("address", "") or "").strip()
+    cleaned = _clean_street(raw)
+    suburb = str(row.get("suburb", "") or "").strip()
+    postcode = str(row.get("postcode", "") or "").strip()
+
+    parts: list[str] = [cleaned] if cleaned else []
+    lower = cleaned.lower()
+    if suburb and suburb.lower() not in lower:
+        parts.append(suburb)
+    if postcode and postcode not in cleaned:
+        parts.append(postcode)
+    parts.append("Australia")
+    return ", ".join(p for p in parts if p)
 
 
 def _ensure_geocoded_columns(stations: pd.DataFrame) -> pd.DataFrame:
@@ -92,6 +135,7 @@ def _build_geocoders(
             mode="remote",
             release="latest",
             data_dir=cache_dir / "gnaf",
+            s3_https_endpoint=GNAF_S3_HTTPS_ENDPOINT,
         )
         gnaf = GnafGeocoder(data_source=data_source)
     else:
@@ -110,18 +154,25 @@ def _build_geocoders(
     return gnaf, nominatim
 
 
-def _geocode_one(address: str, gnaf: object, nominatim: object) -> dict[str, Any]:
-    """Try G-NAF first, fall back to Nominatim. Returns row-update dict."""
-    result = gnaf.geocode(address)  # type: ignore[attr-defined]
-    if result.is_success:
-        return {
-            "lat": result.lat,
-            "lon": result.lon,
-            "geocoder": "gnaf",
-            "mb_code": result.mb_code,
-        }
+def _geocode_one(
+    address: str, gnaf: object | None, nominatim: object
+) -> dict[str, Any]:
+    """Try G-NAF first, fall back to Nominatim. Returns row-update dict.
 
-    logger.debug("G-NAF miss for %r — falling back to Nominatim", address)
+    ``gnaf=None`` means G-NAF is disabled for this run (e.g. the remote
+    parquet view failed to initialise) and every address goes to Nominatim.
+    """
+    if gnaf is not None:
+        result = gnaf.geocode(address)  # type: ignore[attr-defined]
+        if result.is_success:
+            return {
+                "lat": result.lat,
+                "lon": result.lon,
+                "geocoder": "gnaf",
+                "mb_code": result.mb_code,
+            }
+        logger.debug("G-NAF miss for %r — falling back to Nominatim", address)
+
     fallback = nominatim.geocode(address)  # type: ignore[attr-defined]
     if fallback.is_success:
         return {
@@ -131,6 +182,29 @@ def _geocode_one(address: str, gnaf: object, nominatim: object) -> dict[str, Any
             "mb_code": fallback.mb_code,
         }
     return {"lat": pd.NA, "lon": pd.NA, "geocoder": pd.NA, "mb_code": pd.NA}
+
+
+def _try_gnaf_warmup(gnaf: object) -> object | None:
+    """Force G-NAF to open its remote view; return None if it can't.
+
+    The augmentor opens the DuckDB connection lazily on first ``geocode()``,
+    so a misconfigured remote bucket only blows up mid-loop. Probing here
+    surfaces the failure early and lets the caller fall through to a
+    Nominatim-only run with a clear warning.
+    """
+    try:
+        # A nonsense address still forces the connection to open and the
+        # parquet view's schema to be validated.
+        gnaf.geocode("__warmup__")  # type: ignore[attr-defined]
+    except Exception as exc:
+        logger.warning(
+            "G-NAF init failed (%s: %s) — running Nominatim-only for this session. "
+            "See https://github.com/cauldnz/abs-census-augmentor/issues/8 for upstream tracking.",
+            type(exc).__name__,
+            exc,
+        )
+        return None
+    return gnaf
 
 
 def resolve(
@@ -178,6 +252,12 @@ def resolve(
     gnaf, nominatim = _build_geocoders(
         cache_dir, user_agent, nominatim_factory=nominatim_factory, gnaf_factory=gnaf_factory
     )
+
+    # Probe G-NAF up-front so a broken remote view fails fast — and the run
+    # can degrade to Nominatim-only rather than dying mid-loop. We skip the
+    # probe when a test factory injected its own G-NAF stub.
+    if gnaf_factory is None:
+        gnaf = _try_gnaf_warmup(gnaf)
 
     gnaf_hits = 0
     nominatim_hits = 0

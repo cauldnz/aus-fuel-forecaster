@@ -28,6 +28,7 @@ import csv
 import hashlib
 import logging
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -46,7 +47,7 @@ CANONICAL_COLUMNS: dict[str, str] = {
     "address": "address",
     "suburb": "suburb",
     "postcode": "postcode",
-    "brand": "brand",
+    "brand": "brand_raw",
     "fuelcode": "fuel_code",
     "fuel_code": "fuel_code",
     "priceupdateddate": "price_updated_date",
@@ -59,7 +60,7 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
     "address",
     "suburb",
     "postcode",
-    "brand",
+    "brand_raw",
     "fuel_code",
     "price_updated_date",
     "price",
@@ -98,28 +99,43 @@ def _hash_station(name: str, address: str, suburb: str, postcode: str) -> str:
 # ----------------------------- Brand canonicalisation -----------------------------
 
 
-def load_brand_aliases(path: Path) -> dict[str, str]:
-    """Load ``raw_brand → canonical_brand`` mapping from the static CSV."""
-    mapping: dict[str, str] = {}
+@dataclass(frozen=True)
+class BrandInfo:
+    """Lookup result for a raw FuelCheck Brand string."""
+
+    canonical: str
+    is_major: bool
+
+
+def load_brand_aliases(path: Path) -> dict[str, BrandInfo]:
+    """Load ``raw_brand → BrandInfo(canonical, is_major)`` from the static CSV."""
+    mapping: dict[str, BrandInfo] = {}
     with path.open(encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
             raw = (row.get("raw_brand") or "").strip()
             canonical = (row.get("canonical_brand") or "").strip()
+            is_major = (row.get("is_major") or "").strip().lower() == "true"
             if raw and canonical:
-                mapping[raw] = canonical
+                mapping[raw] = BrandInfo(canonical=canonical, is_major=is_major)
     return mapping
 
 
-def _canonicalise_brand(raw: str | None, mapping: dict[str, str], unmapped: set[str]) -> str:
-    """Map a raw brand string to its canonical form; identity-fall-through."""
+def _canonicalise_brand(
+    raw: str | None, mapping: dict[str, BrandInfo], unmapped: set[str]
+) -> BrandInfo:
+    """Map a raw brand string to (canonical, is_major); identity-fall-through.
+
+    Unmapped raws pass through with `canonical=raw` and `is_major=False`,
+    and are recorded in `unmapped` for a single end-of-run WARNING.
+    """
     if raw is None or pd.isna(raw):
-        return "Independent"
+        return BrandInfo(canonical="Independent", is_major=False)
     raw_str = str(raw).strip()
     if raw_str in mapping:
         return mapping[raw_str]
     unmapped.add(raw_str)
-    return raw_str
+    return BrandInfo(canonical=raw_str, is_major=False)
 
 
 # ----------------------------- Per-month processing -----------------------------
@@ -141,12 +157,15 @@ def _parse_price_date(series: pd.Series) -> pd.Series:
     return parsed.dt.tz_convert(None).dt.date
 
 
-def _process_month(path: Path, brand_map: dict[str, str], unmapped: set[str]) -> pd.DataFrame:
+def _process_month(
+    path: Path, brand_map: dict[str, BrandInfo], unmapped: set[str]
+) -> pd.DataFrame:
     """Load one monthly Parquet, normalise, return a long-form rows frame.
 
-    Output columns: ``station_id, name, address, suburb, postcode, brand,
-    fuel_code, date, price``. One row per FuelCheck event (no aggregation
-    yet — that happens after concatenation across months).
+    Output columns: ``station_id, name, address, suburb, postcode,
+    brand_raw, brand_canonical, brand_is_major, fuel_code, date, price``.
+    Both raw and canonical brand are preserved — see CLAUDE.md memory
+    "Preserve raw alongside normalised". One row per FuelCheck event.
     """
     raw = pd.read_parquet(path)
     df = _normalise_columns(raw)
@@ -159,7 +178,15 @@ def _process_month(path: Path, brand_map: dict[str, str], unmapped: set[str]) ->
     df["station_id"] = df.apply(
         lambda r: _hash_station(r["name"], r["address"], r["suburb"], r["postcode"]), axis=1
     )
-    df["brand"] = df["brand"].apply(lambda b: _canonicalise_brand(b, brand_map, unmapped))
+    df["brand_raw"] = df["brand_raw"].astype(str).str.strip()
+    canonicals: list[str] = []
+    is_majors: list[bool] = []
+    for raw in df["brand_raw"].tolist():
+        info = _canonicalise_brand(raw, brand_map, unmapped)
+        canonicals.append(info.canonical)
+        is_majors.append(info.is_major)
+    df["brand_canonical"] = canonicals
+    df["brand_is_major"] = is_majors
     df["fuel_code"] = df["fuel_code"].astype(str).str.strip().str.upper()
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
     df = df[df["price"].notna()].copy()
@@ -172,7 +199,9 @@ def _process_month(path: Path, brand_map: dict[str, str], unmapped: set[str]) ->
         "address",
         "suburb",
         "postcode",
-        "brand",
+        "brand_raw",
+        "brand_canonical",
+        "brand_is_major",
         "fuel_code",
         "date",
         "price",
@@ -197,7 +226,9 @@ def _build_stations_roster(events: pd.DataFrame) -> pd.DataFrame:
             address=("address", "last"),
             suburb=("suburb", "last"),
             postcode=("postcode", "last"),
-            brand=("brand", "last"),
+            brand_raw=("brand_raw", "last"),
+            brand_canonical=("brand_canonical", "last"),
+            brand_is_major=("brand_is_major", "last"),
             first_seen=("date", "min"),
             last_seen=("date", "max"),
         )
@@ -292,7 +323,9 @@ def clean(
             address=("address", "last"),
             suburb=("suburb", "last"),
             postcode=("postcode", "last"),
-            brand=("brand", "last"),
+            brand_raw=("brand_raw", "last"),
+            brand_canonical=("brand_canonical", "last"),
+            brand_is_major=("brand_is_major", "last"),
             first_seen=("first_seen", "min"),
             last_seen=("last_seen", "max"),
         )

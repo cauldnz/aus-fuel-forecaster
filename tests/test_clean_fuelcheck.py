@@ -57,18 +57,28 @@ def test_station_id_differs_for_different_addresses() -> None:
 def test_brand_aliasing_canonicalises_known_variants(aliases_path: Path) -> None:
     mapping = cf.load_brand_aliases(aliases_path)
     unmapped: set[str] = set()
-    assert cf._canonicalise_brand("Caltex", mapping, unmapped) == "Ampol"
-    assert cf._canonicalise_brand("EG Ampol", mapping, unmapped) == "Ampol"
-    assert cf._canonicalise_brand("Ampol", mapping, unmapped) == "Ampol"
-    assert cf._canonicalise_brand("BP", mapping, unmapped) == "BP"
+    assert cf._canonicalise_brand("Caltex", mapping, unmapped).canonical == "Ampol"
+    assert cf._canonicalise_brand("EG Ampol", mapping, unmapped).canonical == "Ampol"
+    assert cf._canonicalise_brand("Ampol", mapping, unmapped).canonical == "Ampol"
+    assert cf._canonicalise_brand("BP", mapping, unmapped).canonical == "BP"
     assert unmapped == set()
+
+
+def test_brand_is_major_flag_preserved(aliases_path: Path) -> None:
+    """`is_major` must come through alongside the canonical name."""
+    mapping = cf.load_brand_aliases(aliases_path)
+    unmapped: set[str] = set()
+    assert cf._canonicalise_brand("BP", mapping, unmapped).is_major is True
+    assert cf._canonicalise_brand("Independent", mapping, unmapped).is_major is False
 
 
 def test_unknown_brand_passes_through_and_is_recorded(aliases_path: Path) -> None:
     mapping = cf.load_brand_aliases(aliases_path)
     unmapped: set[str] = set()
     new = "Brand-We-Have-Never-Seen"
-    assert cf._canonicalise_brand(new, mapping, unmapped) == new
+    info = cf._canonicalise_brand(new, mapping, unmapped)
+    assert info.canonical == new
+    assert info.is_major is False
     assert new in unmapped
 
 
@@ -180,7 +190,10 @@ def test_clean_concatenates_multiple_months(tmp_path: Path, aliases_path: Path) 
     assert roster["last_seen"].max() == dt.date(2024, 9, 3)
 
 
-def test_caltex_consolidates_to_ampol(tmp_path: Path, aliases_path: Path) -> None:
+def test_caltex_consolidates_to_ampol_but_preserves_raw(
+    tmp_path: Path, aliases_path: Path
+) -> None:
+    """`brand_canonical` collapses Caltex to Ampol; `brand_raw` keeps Caltex."""
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
     _write(_sample_month("2024/08/", brand="Caltex"), raw_dir / "2024-08.parquet")
@@ -190,8 +203,28 @@ def test_caltex_consolidates_to_ampol(tmp_path: Path, aliases_path: Path) -> Non
     cf.clean(raw_dir, out, stations, brand_aliases=aliases_path)
 
     roster = pd.read_parquet(stations)
-    # Both stations had Caltex / Caltex; the aliases collapse both to Ampol.
-    assert (roster["brand"] == "Ampol").all()
+    # Both stations had Caltex / Caltex.
+    assert (roster["brand_canonical"] == "Ampol").all()
+    assert (roster["brand_raw"] == "Caltex").all()
+    # `is_major` propagates from the alias CSV (Caltex,Ampol,true).
+    assert roster["brand_is_major"].all()
+
+
+def test_stations_roster_has_full_brand_schema(tmp_path: Path, aliases_path: Path) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    _write(_sample_month("2024/08/"), raw_dir / "2024-08.parquet")
+
+    out = tmp_path / "fuel_daily.parquet"
+    stations = tmp_path / "stations.parquet"
+    cf.clean(raw_dir, out, stations, brand_aliases=aliases_path)
+
+    roster = pd.read_parquet(stations)
+    expected = {"brand_raw", "brand_canonical", "brand_is_major"}
+    assert expected <= set(roster.columns)
+    # The legacy single `brand` column should NOT be present (we'd be
+    # destroying signal — see CLAUDE.md memory).
+    assert "brand" not in roster.columns
 
 
 def test_warn_on_unmapped_brand(

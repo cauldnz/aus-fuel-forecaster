@@ -180,12 +180,15 @@ One row per unique service station ever observed in FuelCheck.
 | `address` | string | Address (latest) |
 | `suburb` | string | |
 | `postcode` | string | |
-| `brand` | string | Standardised brand (see §7.5) |
+| `brand_raw` | string | Original `Brand` string from FuelCheck — preserved verbatim because franchisee-vs-corporate distinctions (e.g. `EG Ampol` vs `Ampol Foodary`) carry pricing signal. See §7.5. |
+| `brand_canonical` | string | Standardised brand after `data/static/brand_aliases.csv` mapping (see §7.5). |
+| `brand_is_major` | bool | True for the five "major" brand families: Ampol/Caltex, BP, Shell, 7-Eleven, Coles Express + Reddy Express. Looked up by `brand_raw` in the alias CSV; identity-mapped raws default to False. |
 | `lat` | float64 | From G-NAF (preferred) or Nominatim (fallback) |
 | `lon` | float64 | |
 | `geocoder` | string | `'gnaf'` or `'nominatim'` |
-| `sa2_code` | string | 2021 ASGS SA2 code from spatial join |
-| `sa2_name` | string | |
+| `mb_code` | string | Mesh Block code from G-NAF (when available); enables the augmentor's MB→SA2 fast-path. Null for Nominatim hits. |
+| `sa2_code` | string | 2021 ASGS SA2 code from spatial join (added in Phase 3). |
+| `sa2_name` | string | (added in Phase 3) |
 | `first_seen` | date | First date in FuelCheck data |
 | `last_seen` | date | Last date in FuelCheck data |
 
@@ -280,31 +283,49 @@ The petrol cycle is *not* explicitly encoded — it should emerge from the lag b
 
 ### 7.4 Demand context block (`ctx_*`)
 
+Traffic features come from the **top-N nearest TfNSW counters** to the station — not just the single nearest. This captures the local demand environment: a station near a freight corridor + a school-bus route + a residential street has a different demand profile than a station near three suburban arterials of similar volume.
+
 ```
-ctx_traffic_nearest_station_lag_1     # daily count from nearest TfNSW counter
-ctx_traffic_nearest_station_lag_7
-ctx_traffic_distance_km               # haversine distance to assigned counter
+ctx_traffic_top1_distance_km          # haversine distance to closest counter
+ctx_traffic_top2_distance_km
+ctx_traffic_top3_distance_km
+ctx_traffic_top1_lag_1                # daily count from closest counter
+ctx_traffic_top1_lag_7
+ctx_traffic_top2_lag_1
+ctx_traffic_top2_lag_7
+ctx_traffic_top3_lag_1
+ctx_traffic_top3_lag_7
+ctx_traffic_5km_radius_count          # number of counters within 5 km
+```
+
+`spatial.nearest` (Phase 2) builds a `(station_id, counter_rank, counter_id, distance_km)` table for ranks 1..N (default N=3). `build.make_features` joins counters' daily totals on `(counter_id, date)`.
+
+If the *closest* counter is > 50 km away, all `ctx_traffic_top*` columns are null for that station.
+
+```
 ctx_consumer_confidence_lag_7         # ANZ-RM, forward-filled to daily
 ctx_asx200_lag_1                      # close
 ctx_cash_rate                         # current value, forward-filled (slow-moving)
 ```
 
-If a fuel station's nearest traffic counter is > 50 km away, `ctx_traffic_*` columns are null for that station.
-
 ### 7.5 Static station block (`stn_*`)
 
-Computed once per station, broadcast across the time index:
+Computed once per station, broadcast across the time index. Brand is exposed at multiple levels of granularity so the model can learn franchisee-vs-corporate pricing differences (which a single canonical column would erase):
 
 ```
-stn_brand                             # categorical, standardised
-stn_brand_is_major                    # bool: Coles Express, 7-Eleven, BP, Caltex/Ampol, Shell
+stn_brand_raw                         # categorical, original FuelCheck Brand string (high cardinality)
+stn_brand_canonical                   # categorical, post-alias (e.g. "Ampol")
+stn_brand_is_major                    # bool: Coles Express, Reddy Express, 7-Eleven, BP, Caltex/Ampol, Shell
+stn_is_franchisee                     # bool, see §13 Q3 — derived from brand_raw via a static rules file
 stn_competitors_within_2km            # int, count of distinct station_ids within 2 km
 stn_competitors_within_5km            # int
 stn_distance_to_sydney_terminal_km    # haversine to Botany terminal
 stn_is_metro                          # bool, derived from SA2 urbanisation classification
 ```
 
-Brand standardisation lives in `data/static/brand_aliases.csv` — a manually maintained mapping from raw `Brand` strings to canonical names. The CSV must be kept up to date when new brands appear.
+Brand standardisation lives in `data/static/brand_aliases.csv` — a manually maintained mapping from raw `Brand` strings to canonical names + an `is_major` flag. The CSV must be kept up to date when new brands appear; `clean.fuelcheck` logs a WARNING for any unmapped brand seen in the data.
+
+`stn_is_franchisee` is derived per `brand_raw` from a separate static rules file (`data/static/brand_franchisee_rules.csv`) that lists known franchisee patterns (e.g. `EG Ampol`, `EBM Ampol` are EG Group / EBM franchisees of Ampol; `Ampol Foodary` is corporate). The rules file is research-derived and starts small — see §13 Q3.
 
 ### 7.6 Weather block (`wx_*`)
 
@@ -615,7 +636,14 @@ To be resolved during implementation, not blocking spec sign-off:
 
 1. **AIP TGP historical backfill** — is there any retrievable archive, or only forward scraping? If forward only, the `upstream_tgp_*` features will be heavily null in early years. Acceptable given tier-2 status.
 2. **SEIFA join key** — does `abs-census-augmentor` expose SEIFA, or do we join independently after the augmentor pass? Resolved in Phase 3.
-3. **Brand canonicalisation** ✅ resolved Phase 2: `data/static/brand_aliases.csv` is the canonical mapping. Unmapped brand strings produce a WARNING log and pass through verbatim — never fail. Initial seed built from Aug 2024 + Dec 2025 + Feb 2026 monthly archives.
+3. **Brand canonicalisation** ✅ resolved Phase 2: `data/static/brand_aliases.csv` is the canonical mapping. Unmapped brand strings produce a WARNING log and pass through verbatim — never fail. Initial seed built from Aug 2024 + Dec 2025 + Feb 2026 monthly archives. **Both** `brand_raw` and `brand_canonical` are persisted to `stations.parquet` so the model can pick up franchisee-vs-corporate pricing signal that would otherwise be erased.
+
+   **Sub-question (open):** how do we identify franchisees vs corporate sites? Patterns like `EG Ampol` (Euro Garages franchisee) vs `Ampol Foodary` (corporate sub-brand) carry plausible pricing signal but the labelling has to come from somewhere. Options:
+   - Hand-curate `data/static/brand_franchisee_rules.csv` with a `raw_brand → is_franchisee` mapping. Researched from press releases, brand websites, ABN lookups. Manageable — there are <30 distinct major-brand-affiliated raw strings.
+   - Defer entirely: expose `brand_raw` only and let the model learn the difference implicitly via category-level effects. Simpler but loses the explicit `is_franchisee` feature.
+   - Hybrid: ship the rules file with confident-cases populated, leave the rest blank → null `is_franchisee` for unconfirmed.
+
+   Recommend the hybrid approach: a small rules file with the obvious cases (EG, EBM, Coles Express historically a Shell franchisee, etc.) and explicit nulls everywhere else. Implement during Phase 4 feature engineering, not Phase 2.
 4. **Petrol cycle as a sanity check** — should `01_eda.ipynb` verify the cycle is endogenously captured by lag features (e.g., by training a tiny model on lag features alone and inspecting predictions on a held-out station)? Nice-to-have.
 5. **Crisis-period reporting** — confirm whether the test (crisis) fold is reported in the headline `comparison.md` or only as a sub-section. Suggest sub-section to keep the headline numbers comparable to a "normal world" baseline.
 

@@ -65,7 +65,12 @@ def stations_in(tmp_path: Path) -> Path:
 
 
 def _addr(suburb: str, postcode: str, address: str) -> str:
-    return f"{address}, {suburb}, NSW {postcode}, Australia"
+    """Mirror what `_format_address` produces from FuelCheck's columns.
+
+    The street-only fixture inputs add suburb + postcode but no state — the
+    state comes from whatever the FuelCheck `address` column already carries.
+    """
+    return f"{address}, {suburb}, {postcode}, Australia"
 
 
 def test_gnaf_resolves_all_addresses(tmp_path: Path, stations_in: Path) -> None:
@@ -243,15 +248,118 @@ def test_failure_leaves_lat_lon_null(tmp_path: Path, stations_in: Path) -> None:
     assert df["geocoder"].isna().all()
 
 
-def test_format_address_strips_blanks() -> None:
+def test_format_address_appends_missing_suburb_and_postcode() -> None:
+    """Street-only address column: suburb + postcode get appended."""
     row = pd.Series(
         {"address": "1 Main St ", "suburb": "Foo", "postcode": "2000", "name": "X"}
     )
-    assert ra._format_address(row) == "1 Main St, Foo, NSW 2000, Australia"
-    # Missing suburb shouldn't insert a stray comma.
-    row2 = pd.Series({"address": "1 Main St", "suburb": "", "postcode": "2000", "name": "X"})
-    out = ra._format_address(row2)
+    assert ra._format_address(row) == "1 Main St, Foo, 2000, Australia"
+
+
+def test_format_address_avoids_duplicating_suburb_and_postcode() -> None:
+    """Full-form address column: don't append suburb/postcode that's already there."""
+    row = pd.Series(
+        {
+            "address": "1 Braidwood Rd, GOULBURN NSW 2580",
+            "suburb": "GOULBURN",
+            "postcode": "2580",
+            "name": "X",
+        }
+    )
+    assert ra._format_address(row) == "1 Braidwood Rd, GOULBURN NSW 2580, Australia"
+
+
+def test_format_address_preserves_non_nsw_state_in_address_column() -> None:
+    """ACT stations carry their state in the address column — don't override."""
+    row = pd.Series(
+        {
+            "address": "41 Federal Hwy, Lyneham ACT 2602",
+            "suburb": "Lyneham",
+            "postcode": "2602",
+            "name": "X",
+        }
+    )
+    out = ra._format_address(row)
+    assert "ACT" in out
+    assert "NSW" not in out
+
+
+def test_format_address_strips_blanks() -> None:
+    """Missing suburb shouldn't insert a stray double-comma."""
+    row = pd.Series({"address": "1 Main St", "suburb": "", "postcode": "2000", "name": "X"})
+    out = ra._format_address(row)
     assert ", , " not in out
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("78 Great Western Hwy Cnr Ross St", "78 Great Western Hwy"),
+        ("78 Great Western Hwy CNR Ross St", "78 Great Western Hwy"),
+        ("100 King St corner of Smith St", "100 King St"),
+        ("1 Main St c/o Service Rd", "1 Main St"),
+        ("1 Main St", "1 Main St"),  # no annotation — passthrough
+    ],
+)
+def test_clean_street_strips_cross_street_annotations(raw: str, expected: str) -> None:
+    assert ra._clean_street(raw) == expected
+
+
+def test_format_address_drops_cross_street_in_full_pipeline() -> None:
+    """End-to-end: cross-street annotation in the address column gets stripped."""
+    row = pd.Series(
+        {
+            "address": "78 Great Western Hwy Cnr Ross St",
+            "suburb": "Glenbrook",
+            "postcode": "2773",
+            "name": "Ampol Foodary",
+        }
+    )
+    assert ra._format_address(row) == "78 Great Western Hwy, Glenbrook, 2773, Australia"
+
+
+class _BrokenGnaf:
+    """A G-NAF stub that always raises — simulates the upstream issue #8."""
+
+    def geocode(self, address: str) -> FakeResult:  # pragma: no cover - never returns
+        raise RuntimeError("G-NAF remote view is missing required columns")
+
+
+def test_falls_back_to_nominatim_when_gnaf_warmup_fails(
+    tmp_path: Path,
+    stations_in: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When G-NAF init fails, the run continues with Nominatim-only."""
+    addr_s1 = _addr("Mascot", "2020", "1 Botany Rd")
+    addr_s2 = _addr("Newtown", "2042", "100 King St")
+    nom = FakeGeocoder(
+        {
+            addr_s1: FakeResult(-33.93, 151.20),
+            addr_s2: FakeResult(-33.90, 151.18),
+        }
+    )
+
+    # _try_gnaf_warmup only triggers when gnaf_factory is None — so we
+    # patch the module-level constructor instead.
+    import fuel_pred.spatial.resolve_addrs as ra_mod
+
+    monkeypatch_built = ra_mod._build_geocoders
+
+    def fake_build(*args: object, **kwargs: object) -> tuple[object, object]:
+        return _BrokenGnaf(), nom
+
+    ra_mod._build_geocoders = fake_build  # type: ignore[assignment]
+    try:
+        out = tmp_path / "stations_out.parquet"
+        with caplog.at_level("WARNING", logger="fuel_pred.spatial.resolve_addrs"):
+            ra.resolve(stations_in, out, cache_dir=tmp_path / "cache")
+    finally:
+        ra_mod._build_geocoders = monkeypatch_built  # type: ignore[assignment]
+
+    df = pd.read_parquet(out)
+    assert (df["geocoder"] == "nominatim").all()
+    assert any("G-NAF init failed" in rec.message for rec in caplog.records)
 
 
 def test_in_place_overwrite_is_atomic(tmp_path: Path, stations_in: Path) -> None:

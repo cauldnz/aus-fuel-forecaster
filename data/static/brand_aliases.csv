@@ -1,0 +1,33 @@
+raw_brand,canonical_brand,is_major
+7-Eleven,7-Eleven,true
+7 Eleven,7-Eleven,true
+Ampol,Ampol,true
+Caltex,Ampol,true
+Caltex Woolworths,Ampol,true
+Ampol Woolworths,Ampol,true
+BP,BP,true
+BP Travel Centre,BP,true
+Coles Express,Coles Express,true
+Costco,Costco,false
+EG Ampol,EG Ampol,false
+Liberty,Liberty,false
+Metro Petroleum,Metro,false
+Metro,Metro,false
+Mobil,Mobil,false
+Plus Petroleum,Plus Petroleum,false
+Puma Energy,Puma,false
+Puma,Puma,false
+Shell,Shell,true
+Speedway,Speedway,false
+United Petroleum,United,false
+United,United,false
+Westside Petroleum,Westside,false
+Independent,Independent,false
+7-Eleven Mobil,7-Eleven,true
+Better Choice,Better Choice,false
+Astron,Astron,false
+Budget Petrol,Budget,false
+Lowes Petroleum,Lowes,false
+Matilda,Matilda,false
+Pacific Petroleum,Pacific,false
+X Convenience,X Convenience,false

@@ -1,0 +1,54 @@
+year,term,start_date,end_date,division
+# NSW public-school term dates. NSW Department of Education publishes Eastern
+# and Western Division term dates; for v1 we use Eastern Division (covers most
+# of the state including Sydney). Western Division differs by ~1 week for some
+# terms and only matters for far-western NSW stations.
+#
+# Source: https://education.nsw.gov.au/about-us/news-at-det/announcements/future-school-holidays
+# This file MUST be updated when NSW publishes the next year's dates.
+#
+# Comment lines (starting with '#') are filtered out by the loader.
+2016,1,2016-01-27,2016-04-08,eastern
+2016,2,2016-04-26,2016-07-01,eastern
+2016,3,2016-07-18,2016-09-23,eastern
+2016,4,2016-10-10,2016-12-20,eastern
+2017,1,2017-01-30,2017-04-07,eastern
+2017,2,2017-04-26,2017-06-30,eastern
+2017,3,2017-07-17,2017-09-22,eastern
+2017,4,2017-10-09,2017-12-19,eastern
+2018,1,2018-01-30,2018-04-13,eastern
+2018,2,2018-04-30,2018-07-06,eastern
+2018,3,2018-07-23,2018-09-28,eastern
+2018,4,2018-10-15,2018-12-19,eastern
+2019,1,2019-01-29,2019-04-12,eastern
+2019,2,2019-04-30,2019-07-05,eastern
+2019,3,2019-07-22,2019-09-27,eastern
+2019,4,2019-10-14,2019-12-18,eastern
+2020,1,2020-01-28,2020-04-09,eastern
+2020,2,2020-04-27,2020-07-03,eastern
+2020,3,2020-07-20,2020-09-25,eastern
+2020,4,2020-10-12,2020-12-18,eastern
+2021,1,2021-01-27,2021-04-01,eastern
+2021,2,2021-04-19,2021-06-25,eastern
+2021,3,2021-07-12,2021-09-17,eastern
+2021,4,2021-10-05,2021-12-17,eastern
+2022,1,2022-01-28,2022-04-08,eastern
+2022,2,2022-04-26,2022-07-01,eastern
+2022,3,2022-07-18,2022-09-23,eastern
+2022,4,2022-10-10,2022-12-20,eastern
+2023,1,2023-01-27,2023-04-06,eastern
+2023,2,2023-04-26,2023-06-30,eastern
+2023,3,2023-07-17,2023-09-22,eastern
+2023,4,2023-10-09,2023-12-19,eastern
+2024,1,2024-01-30,2024-04-12,eastern
+2024,2,2024-04-29,2024-07-05,eastern
+2024,3,2024-07-22,2024-09-27,eastern
+2024,4,2024-10-14,2024-12-20,eastern
+2025,1,2025-02-06,2025-04-11,eastern
+2025,2,2025-04-29,2025-07-04,eastern
+2025,3,2025-07-22,2025-09-26,eastern
+2025,4,2025-10-14,2025-12-19,eastern
+2026,1,2026-02-04,2026-04-10,eastern
+2026,2,2026-04-28,2026-07-03,eastern
+2026,3,2026-07-21,2026-09-25,eastern
+2026,4,2026-10-13,2026-12-18,eastern

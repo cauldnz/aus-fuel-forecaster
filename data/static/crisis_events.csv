@@ -1,0 +1,18 @@
+date,event_type,description,severity,source
+# 2026 Australian fuel crisis annotations. Informational only — NOT used as
+# features in v1 (would risk look-ahead bias and is not a generalisable signal).
+# Used in 01_eda.ipynb to overlay regime markers on price plots.
+#
+# Dates are best-effort and should be verified against authoritative sources
+# (ACCC media releases, NRMA press, AIP statements) before being relied upon.
+#
+# Comment lines (starting with '#') are filtered out by the loader.
+#
+# severity: low | medium | high
+2026-03-15,supply_warning,NRMA flags rapid retail price escalation amid Hormuz disruption,medium,nrma
+2026-03-20,policy,National fuel supply taskforce established by federal government,high,gov
+2026-04-01,policy,Federal government cuts fuel excise for three months,high,gov
+2026-04-08,ceasefire,Two-week US-Iran ceasefire announced; Brent falls toward $95/bbl,high,news
+2026-04-13,blockade_resumed,US warships blockade Strait of Hormuz,high,news
+2026-04-14,refinery_incident,Australian refinery fire compounds supply pressure,medium,news
+2026-04-30,reserves_update,National petrol reserves reported at 46 days; diesel pressure persists,medium,gov

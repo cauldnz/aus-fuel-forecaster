@@ -11,6 +11,20 @@ import pandas as pd
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _disable_tenacity_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make tenacity retries instant.
+
+    The ``@retry`` decorator captures ``wait_exponential`` at import time, so
+    patching the symbol is too late. tenacity defaults to ``time.sleep`` for
+    waiting between attempts; replacing it here keeps real-failure tests
+    instant without changing behaviour under a happy-path mock.
+    """
+    import time as time_module
+
+    monkeypatch.setattr(time_module, "sleep", lambda *_a, **_kw: None)
+
+
 @pytest.fixture
 def tmp_data_dir(tmp_path: Path) -> Path:
     """A tmp dir with the standard data/raw, data/interim, data/processed layout."""

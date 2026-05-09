@@ -599,9 +599,9 @@ Each phase produces a runnable artefact and a testable outcome. Designed for seq
 ### Phase 1 — Tier 1 fetchers ✅ (PR #1, claude/upbeat-wu-8bc435)
 - `fetch.fuelcheck` — download monthly archives from data.nsw.gov.au, write **one Parquet per month** as `data/raw/fuelcheck/<YYYY-MM>.parquet` (concatenation deferred to the cleaner; preserves drift-affected raw schema)
 - `fetch.brent`, `fetch.audusd`, `fetch.traffic` — implemented per §5.1.1-5.1.3
-- `fetch.weather` — deferred to Phase 2 (needs station lat/lons from `clean.fuelcheck`)
+- `fetch.weather` — split out from Phase 1 because it needs station lat/lons from `clean.fuelcheck`. Lands as a Phase-2-rider after Phase 2's roster is in place; uses Open-Meteo's archive (ERA5) per §7.6 with the documented leakage caveat.
 - Hermetic tests for each fetcher (responses-mocked)
-- Acceptance: `make fetch-tier1` populates `data/raw/` end-to-end on a fresh machine
+- Acceptance: `make fetch-tier1` populates `data/raw/` end-to-end on a fresh machine. `make fetch-weather` runs separately after `make clean-data`.
 
 ### Phase 2 — Cleaning + station roster (1 session)
 - `clean.fuelcheck` — read all monthly Parquets, normalise brand strings via `data/static/brand_aliases.csv`, hash `(name, address, suburb, postcode)` into `station_id`, aggregate per `(station_id, fuel_code, date)` for both U91 and Diesel

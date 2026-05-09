@@ -34,13 +34,13 @@ The project is "done" when all of the following hold:
 - NSW only (FuelCheck)
 - Daily granularity per `(station_id, fuel_code)`
 - Two prediction horizons: `t+1` (primary), `t+1..t+7` (secondary, optional in v1)
-- Two fuels: **U91** (Unleaded 91) and **Diesel** — chosen because they have the longest history, the most stations, and tell different stories (consumer commute vs freight/agriculture)
+- **Forecast target: U91 only** (Unleaded 91). Diesel (`DL`) data is still cleaned and persisted in `fuel_daily.parquet` because cross-fuel lags / co-movement at the same station may be predictive features for U91; see §7.1. The headline A/B comparison and `results/comparison.md` report U91 only.
 - Historical span: **2016-09-01 → most recent complete month**
 - Train on local machine (≤ 32 GB RAM, no GPU required)
 
 **Out of scope (v1)**
 - Other states (VIC, WA FuelWatch)
-- Other fuels (E10, U95, U98, LPG)
+- Forecasting fuels other than U91 (E10, U95, U98, Diesel, LPG). Diesel is still ingested as a candidate feature.
 - Hourly granularity
 - Probabilistic / uncertainty estimates
 - Real-time inference, deployment, web/mobile UI
@@ -98,13 +98,39 @@ Caching philosophy: every fetcher writes to `data/raw/<source>/` with a determin
 
 | Source | URL / API | Format | Granularity | Coverage |
 |---|---|---|---|---|
-| **NSW FuelCheck Price History** | https://data.nsw.gov.au/data/dataset/fuel-check (monthly CSVs) | CSV | per-update events | 2016-09 → present |
+| **NSW FuelCheck Price History** | https://data.nsw.gov.au/data/dataset/fuel-check (CKAN package; one resource per month) | mostly XLSX, some CSV — see §5.1.1 | per-update events | 2016-09 → present |
 | **Brent crude (futures continuous)** | `yfinance` ticker `BZ=F` | OHLCV | daily | 2000-01 → present |
-| **AUD/USD** | RBA F11.1 historical, https://www.rba.gov.au/statistics/historical-data.html | CSV | daily | 1980 → present |
-| **NSW Roads Traffic Volume Counts** | https://opendata.transport.nsw.gov.au/data/dataset/nsw-roads-traffic-volume-counts-api | CKAN API | hourly per station | 2006 → present |
+| **AUD/USD** | RBA F11.1 historical, https://www.rba.gov.au/statistics/historical-data.html#exchange-rates | per-period XLS + one current CSV — see §5.1.2 | daily | 1983 → present (XLS); 2023 → present (CSV) |
+| **NSW Roads Traffic Volume Counts** | https://opendata.transport.nsw.gov.au/data/dataset/nsw-roads-traffic-volume-counts-api | CKAN datastore (stations) + ZIP of CSVs (hourly) — see §5.1.3 | hourly per station | 2006 → present |
 | **Australian public holidays** | `python-holidays` package | code | daily | unbounded |
 | **NSW school terms** | manual `data/static/nsw_school_terms.csv`, sourced from NSW Education term-dates page | CSV | term-boundary dates | 2016 → present |
 | **Open-Meteo weather** | `https://archive-api.open-meteo.com/v1/archive` (Historical Weather, ERA5) and `https://historical-forecast-api.open-meteo.com/v1/forecast` (Historical Forecast) | JSON | daily aggregates per lat/lon | 1940 → present (archive); 2021 → present (forecast) |
+
+#### 5.1.1 NSW FuelCheck — actual resource layout (verified May 2026)
+
+The CKAN package `fuel-check` lists ~115 monthly archives. Names follow `Service Station Price History - <Month> <Year>` or `FuelCheck Price History <MonYYYY>`; URL filenames follow `fuelcheck_pricehistory_<mon><yyyy>.xlsx` or `price_history_checks_<mon><yyyy>.csv`. Format breakdown across the 113 data resources (excluding the FAQ + DQS resources):
+
+- ~94 are `xlsx`
+- 8 are `csv`
+- A handful have an empty `format` field — trust the URL extension (`.csv` or `.xlsx`).
+
+`fetch.fuelcheck` downloads each monthly resource verbatim and writes one Parquet per month (`<YYYY-MM>.parquet`). Schema normalisation is the cleaner's job — column renames have happened over the years (e.g. `ServiceStationName` ↔ `service_station_name`, `PriceUpdatedDate` in `YYYY/MM/DD HH:MM:SS` vs ISO 8601).
+
+#### 5.1.2 RBA F11.1 — actual resource layout (verified May 2026)
+
+The historical-data page lists 11 legacy `.xls` files (one per ~3-year period from 1983-1986 through 2018-2022) plus one rolling `.csv` for 2023-current at `https://www.rba.gov.au/statistics/tables/csv/f11.1-data.csv`. Both formats share the same logical layout — a multi-row preamble (Title / Description / Frequency / Type / Units / blank / Source / Publication date / Series ID) followed by data rows. The "Series ID" row identifies which column carries each series; `FXRUSD` is AUD/USD.
+
+For the project span (2016-09 onwards) we fetch only the three files that overlap: `2014-2017.xls`, `2018-2022.xls`, and the current `.csv`. Older periods are out of scope and intentionally skipped. Reading XLS requires `xlrd>=2.0`; CSV requires the stdlib `csv` module (pandas' C and Python parsers both reject the title row's variable column count).
+
+#### 5.1.3 TfNSW Traffic Volume Counts — actual resource layout (verified May 2026)
+
+The `nsw-roads-traffic-volume-counts-api` package contains:
+
+- **Road Traffic Counts Station Reference (API Generated CSV)** — `datastore_active=true`. Fetch via paginated `datastore_search`. ~1,800 stations with WGS84 lat/lon, road metadata, `quality_rating` (1-5), `permanent_station` flag.
+- **Road Traffic Counts Hourly Permanent (API Generated CSVs)** — `format=ZIP`, *not* a datastore. The single ZIP download contains one or more CSVs with daily-row format (`date`, `daily_total`, `hour_00`..`hour_23`).
+- Plus a yearly summary, a small hourly sample, an API description, and a PDF doc — all ignored by the fetcher.
+
+`fetch.traffic` handles both shapes: datastore pagination for stations, ZIP-extract for hourly. Date-column timestamps in the ZIP are tz-aware (UTC) and must be normalised to naive before range filtering.
 
 ### 5.2 Tier 2 — get if cheap
 
@@ -154,12 +180,15 @@ One row per unique service station ever observed in FuelCheck.
 | `address` | string | Address (latest) |
 | `suburb` | string | |
 | `postcode` | string | |
-| `brand` | string | Standardised brand (see §7.5) |
+| `brand_raw` | string | Original `Brand` string from FuelCheck — preserved verbatim because franchisee-vs-corporate distinctions (e.g. `EG Ampol` vs `Ampol Foodary`) carry pricing signal. See §7.5. |
+| `brand_canonical` | string | Standardised brand after `data/static/brand_aliases.csv` mapping (see §7.5). |
+| `brand_is_major` | bool | True for the five "major" brand families: Ampol/Caltex, BP, Shell, 7-Eleven, Coles Express + Reddy Express. Looked up by `brand_raw` in the alias CSV; identity-mapped raws default to False. |
 | `lat` | float64 | From G-NAF (preferred) or Nominatim (fallback) |
 | `lon` | float64 | |
 | `geocoder` | string | `'gnaf'` or `'nominatim'` |
-| `sa2_code` | string | 2021 ASGS SA2 code from spatial join |
-| `sa2_name` | string | |
+| `mb_code` | string | Mesh Block code from G-NAF (when available); enables the augmentor's MB→SA2 fast-path. Null for Nominatim hits. |
+| `sa2_code` | string | 2021 ASGS SA2 code from spatial join (added in Phase 3). |
+| `sa2_name` | string | (added in Phase 3) |
 | `first_seen` | date | First date in FuelCheck data |
 | `last_seen` | date | Last date in FuelCheck data |
 
@@ -177,6 +206,8 @@ One row per unique service station ever observed in FuelCheck.
 
 Days with zero observations at a station are *not* present (i.e., the panel is unbalanced; rows are inserted only when a price was submitted). The feature builder forward-fills within station up to `max_forward_fill_days` (default 7) before computing lags.
 
+`fuel_daily.parquet` retains both U91 and Diesel rows. Only the U91 rows feed the target (§7.8); the Diesel rows are kept so feature-engineering can construct cross-fuel signals at the same station (e.g. same-day Diesel price as a feature for U91, or U91-minus-Diesel spread). Cross-fuel feature columns live in the lag block — see §7.1.
+
 ### 6.3 `data/processed/features.parquet`
 
 The training-ready matrix. Grain: `(station_id, fuel_code, date)`. Schema documented exhaustively in §7.
@@ -187,7 +218,7 @@ All features are computed in `src/build/make_features.py`, organised into named 
 
 ### 7.1 Lag block (`lag_*`)
 
-Per `(station_id, fuel_code)`:
+Per `(station_id, fuel_code)` — for U91 rows only (the target rows):
 
 ```
 lag_price_1, lag_price_2, lag_price_3, lag_price_7, lag_price_14, lag_price_28
@@ -197,6 +228,19 @@ days_since_last_price_change
 price_minus_28d_min                 # captures cycle phase implicitly
 price_minus_28d_max
 ```
+
+Cross-fuel features (Diesel data joined onto U91 rows by `(station_id, date)`):
+
+```
+xfuel_dl_price_lag_0                 # same-day Diesel price at this station
+xfuel_dl_price_lag_1
+xfuel_u91_minus_dl_lag_1             # spread, often more stable than levels
+xfuel_dl_roll_mean_7
+```
+
+If the station has no Diesel observation on a given day, the cross-fuel
+columns forward-fill up to `max_forward_fill_days`, then null. LightGBM
+handles nulls natively.
 
 All rolling windows use `min_periods=window` to avoid early-life leakage.
 
@@ -239,31 +283,49 @@ The petrol cycle is *not* explicitly encoded — it should emerge from the lag b
 
 ### 7.4 Demand context block (`ctx_*`)
 
+Traffic features come from the **top-N nearest TfNSW counters** to the station — not just the single nearest. This captures the local demand environment: a station near a freight corridor + a school-bus route + a residential street has a different demand profile than a station near three suburban arterials of similar volume.
+
 ```
-ctx_traffic_nearest_station_lag_1     # daily count from nearest TfNSW counter
-ctx_traffic_nearest_station_lag_7
-ctx_traffic_distance_km               # haversine distance to assigned counter
+ctx_traffic_top1_distance_km          # haversine distance to closest counter
+ctx_traffic_top2_distance_km
+ctx_traffic_top3_distance_km
+ctx_traffic_top1_lag_1                # daily count from closest counter
+ctx_traffic_top1_lag_7
+ctx_traffic_top2_lag_1
+ctx_traffic_top2_lag_7
+ctx_traffic_top3_lag_1
+ctx_traffic_top3_lag_7
+ctx_traffic_5km_radius_count          # number of counters within 5 km
+```
+
+`spatial.nearest` (Phase 2) builds a `(station_id, counter_rank, counter_id, distance_km)` table for ranks 1..N (default N=3). `build.make_features` joins counters' daily totals on `(counter_id, date)`.
+
+If the *closest* counter is > 50 km away, all `ctx_traffic_top*` columns are null for that station.
+
+```
 ctx_consumer_confidence_lag_7         # ANZ-RM, forward-filled to daily
 ctx_asx200_lag_1                      # close
 ctx_cash_rate                         # current value, forward-filled (slow-moving)
 ```
 
-If a fuel station's nearest traffic counter is > 50 km away, `ctx_traffic_*` columns are null for that station.
-
 ### 7.5 Static station block (`stn_*`)
 
-Computed once per station, broadcast across the time index:
+Computed once per station, broadcast across the time index. Brand is exposed at multiple levels of granularity so the model can learn franchisee-vs-corporate pricing differences (which a single canonical column would erase):
 
 ```
-stn_brand                             # categorical, standardised
-stn_brand_is_major                    # bool: Coles Express, 7-Eleven, BP, Caltex/Ampol, Shell
+stn_brand_raw                         # categorical, original FuelCheck Brand string (high cardinality)
+stn_brand_canonical                   # categorical, post-alias (e.g. "Ampol")
+stn_brand_is_major                    # bool: Coles Express, Reddy Express, 7-Eleven, BP, Caltex/Ampol, Shell
+stn_is_franchisee                     # bool, see §13 Q3 — derived from brand_raw via a static rules file
 stn_competitors_within_2km            # int, count of distinct station_ids within 2 km
 stn_competitors_within_5km            # int
 stn_distance_to_sydney_terminal_km    # haversine to Botany terminal
 stn_is_metro                          # bool, derived from SA2 urbanisation classification
 ```
 
-Brand standardisation lives in `data/static/brand_aliases.csv` — a manually maintained mapping from raw `Brand` strings to canonical names. The CSV must be kept up to date when new brands appear.
+Brand standardisation lives in `data/static/brand_aliases.csv` — a manually maintained mapping from raw `Brand` strings to canonical names + an `is_major` flag. The CSV must be kept up to date when new brands appear; `clean.fuelcheck` logs a WARNING for any unmapped brand seen in the data.
+
+`stn_is_franchisee` is derived per `brand_raw` from a separate static rules file (`data/static/brand_franchisee_rules.csv`) that lists known franchisee patterns (e.g. `EG Ampol`, `EBM Ampol` are EG Group / EBM franchisees of Ampol; `Ampol Foodary` is corporate). The rules file is research-derived and starts small — see §13 Q3.
 
 ### 7.6 Weather block (`wx_*`)
 
@@ -282,28 +344,43 @@ Note on leakage: v1 uses Historical Weather (ERA5 reanalysis) across the full sp
 ### 7.7 Demographic block (`sa2_*`) — the augmentor block
 
 ```
-sa2_median_age
-sa2_median_household_income_weekly
-sa2_total_population
-sa2_pct_drive_to_work
-sa2_motor_vehicles_per_dwelling
-sa2_pct_renters
-sa2_pct_employed_full_time
-sa2_pct_aged_65_plus
-sa2_seifa_irsd_score
-sa2_pct_one_parent_family
+sa2_median_age                        # G02.Median_age_persons (direct)
+sa2_median_household_income_weekly    # G02.Median_tot_hhd_inc_weekly (direct)
+sa2_total_population                  # G01.Tot_P_P (direct)
+sa2_seifa_irsd_score                  # ABS SEIFA 2021 SA2 IRSD score (separate fetch + join)
+sa2_pct_drive_to_work                 # DERIVED — see §7.7.1
+sa2_motor_vehicles_per_dwelling       # DERIVED
+sa2_pct_renters                       # DERIVED
+sa2_pct_employed_full_time            # DERIVED
+sa2_pct_aged_65_plus                  # DERIVED
+sa2_pct_one_parent_family             # DERIVED
 ```
 
 This block is the *only* difference between Model A and Model B.
 
+#### 7.7.1 Deferred derived variables
+
+Phase 3 v1 ships the 4 unambiguous columns (3 augmentor-direct + SEIFA). The 6 DERIVED percentages are stubbed with nulls plus a clear `_compute_derived_percentages()` framework in `build.enrich_census` so each can be filled in later. Reasons:
+
+- Each derivation needs a numerator/denominator pair from the right GCP table, and the denominator choice is non-obvious (e.g. `pct_drive_to_work` denominator is "persons aged 15+ in employed labour force", not "total population"). Getting it wrong silently distorts the cross-sectional distribution.
+- The 200-column GCP tables (G46A, G43, G33, G31) make field-code archaeology a non-trivial spike per derivation.
+- [abs-census-augmentor#11](https://github.com/cauldnz/abs-census-augmentor/issues/11) proposes native derived-variable support upstream — once that lands, our local code is throwaway.
+- The EDA notebook (Phase 7) will identify which derivations matter most for the U91 model, so prioritising them then is more efficient than spiking all six now.
+
+For each deferred derivation, `build.enrich_census` writes a null column with the spec'd name; LightGBM handles nulls natively, so Model B simply has slightly less SA2 signal than spec-final until the derivations are filled in.
+
 ### 7.8 Target
 
+Built from U91 rows only:
+
 ```
-y_t1     # price_mean at t+1, shifted within (station_id, fuel_code)
-y_t1_t7  # mean(price_mean[t+1..t+7]), shifted within (station_id, fuel_code)
+y_t1     # price_mean at t+1, shifted within (station_id, 'U91')
+y_t1_t7  # mean(price_mean[t+1..t+7]), shifted within (station_id, 'U91')
 ```
 
-Rows where the target is null (end-of-series) are dropped before training.
+Diesel rows in `fuel_daily.parquet` carry no target — they exist solely
+as feature inputs for the U91 cross-fuel block (§7.1). Rows where the
+target is null (end-of-series) are dropped before training.
 
 ## 8. Modeling Specification
 
@@ -519,22 +596,24 @@ Each phase produces a runnable artefact and a testable outcome. Designed for seq
 - CI config (GitHub Actions: ruff, mypy, pytest)
 - This `spec.md` checked in
 
-### Phase 1 — Tier 1 fetchers (1-2 sessions)
-- `fetch.fuelcheck` — download all monthly CSVs from data.nsw.gov.au, concatenate, write `data/raw/fuelcheck/all.parquet`
-- `fetch.brent`, `fetch.audusd`, `fetch.traffic`, `fetch.weather`
+### Phase 1 — Tier 1 fetchers ✅ (PR #1, claude/upbeat-wu-8bc435)
+- `fetch.fuelcheck` — download monthly archives from data.nsw.gov.au, write **one Parquet per month** as `data/raw/fuelcheck/<YYYY-MM>.parquet` (concatenation deferred to the cleaner; preserves drift-affected raw schema)
+- `fetch.brent`, `fetch.audusd`, `fetch.traffic` — implemented per §5.1.1-5.1.3
+- `fetch.weather` — deferred to Phase 2 (needs station lat/lons from `clean.fuelcheck`)
 - Hermetic tests for each fetcher (responses-mocked)
-- Acceptance: `make fetch` populates `data/raw/` end-to-end on a fresh machine
+- Acceptance: `make fetch-tier1` populates `data/raw/` end-to-end on a fresh machine
 
 ### Phase 2 — Cleaning + station roster (1 session)
-- `clean.fuelcheck` — dedupe, normalise brand strings, aggregate to daily
-- `spatial.resolve_addrs` — G-NAF first (using `abs-census-augmentor`'s upcoming remote G-NAF support), Nominatim fallback
-- `clean.traffic` — daily aggregation from hourly
+- `clean.fuelcheck` — read all monthly Parquets, normalise brand strings via `data/static/brand_aliases.csv`, hash `(name, address, suburb, postcode)` into `station_id`, aggregate per `(station_id, fuel_code, date)` for both U91 and Diesel
+- `spatial.resolve_addrs` — uses `abs-census-augmentor` (now `census-augment` import) with `GnafConfig(mode='remote')` + Nominatim fallback. One geocode per `station_id` (not per unique address — see §13 resolved). Idempotent: rows that already have `(lat, lon, geocoder)` populated are skipped unless `--force`. Nominatim responses cached on disk under `data/raw/geocode_cache/` to keep usage polite (Nominatim usage policy: 1 req/sec, no bulk).
+- `clean.traffic` — daily aggregation from hourly. Drop rows from non-permanent stations and `quality_rating < 3` (TfNSW's data-quality scale runs 1-5; ratings 1-2 indicate sparse coverage that produces unreliable daily totals — see the dataset's Data Quality Statement)
 - Acceptance: `data/interim/stations.parquet` and `data/interim/fuel_daily.parquet` exist with the schemas in §6
 
 ### Phase 3 — Census enrichment (1 session)
-- `build.enrich_census` — wrapper around `abs-census-augmentor` for the 10 variables
-- Add SEIFA (separate ABS source if augmentor doesn't expose it natively)
-- Acceptance: `data/interim/stations.parquet` has all 10 `sa2_*` columns populated for ≥ 95% of stations
+- `build.enrich_census` — wrapper around `abs-census-augmentor`'s spatial-join + enrichment path (uses pre-resolved lat/lon from Phase 2). Ships the 4 unambiguous columns: `sa2_median_age`, `sa2_median_household_income_weekly`, `sa2_total_population`, plus `sa2_code` / `sa2_name`.
+- `fetch.seifa` — auto-download ABS SEIFA 2021 SA2 IRSD scores; cache to `data/raw/seifa_2021_sa2.parquet`. Joined into stations during enrichment to add `sa2_seifa_irsd_score`.
+- 6 DERIVED percentages (§7.7.1) stubbed with nulls + `TODO(spec)` markers. Filled in later, EDA-driven.
+- Acceptance: `data/interim/stations.parquet` has the 4 ship-now `sa2_*` columns + `sa2_code` / `sa2_name` populated for ≥ 95% of stations. The 6 deferred columns exist but are null.
 
 ### Phase 4 — Feature build (1 session)
 - `build.panel_grid` — assemble the (station, fuel, date) grid
@@ -569,7 +648,20 @@ To be resolved during implementation, not blocking spec sign-off:
 
 1. **AIP TGP historical backfill** — is there any retrievable archive, or only forward scraping? If forward only, the `upstream_tgp_*` features will be heavily null in early years. Acceptable given tier-2 status.
 2. **SEIFA join key** — does `abs-census-augmentor` expose SEIFA, or do we join independently after the augmentor pass? Resolved in Phase 3.
-3. **Brand canonicalisation** — `data/static/brand_aliases.csv` will need ongoing curation; how to handle new brands gracefully (warn but don't fail)? Implement in Phase 2.
+3. **Brand canonicalisation** ✅ resolved Phase 2: `data/static/brand_aliases.csv` is the canonical mapping. Unmapped brand strings produce a WARNING log and pass through verbatim — never fail. Initial seed built from Aug 2024 + Dec 2025 + Feb 2026 monthly archives. **Both** `brand_raw` and `brand_canonical` are persisted to `stations.parquet` so the model can pick up franchisee-vs-corporate pricing signal that would otherwise be erased.
+
+   **Sub-question (open):** how do we identify franchisees vs corporate sites? Patterns like `EG Ampol` (Euro Garages franchisee) vs `Ampol Foodary` (corporate sub-brand) carry plausible pricing signal — and the *cross-brand* hypothesis is more interesting still: a franchisee's pricing behaviour may resemble other franchisees more than it resembles their own brand's corporate sites. So a single `stn_is_franchisee` boolean (and possibly a `stn_franchisee_operator` categorical, e.g. "EG", "EBM") could be a stronger signal than `stn_brand_raw` alone.
+
+   **Research path** (Phase 4-ish, not blocking earlier work):
+   - Build `data/static/brand_franchisee_rules.csv` with `raw_brand → is_franchisee, operator`. Sources:
+     - Press releases / annual reports of major franchisee operators (EG Group, EBM, Reddy Express's history with Shell)
+     - Australian Franchise Council registry (if accessible)
+     - Brand-name pattern matching as a fallback: `^EG ` / `^EBM ` / `... Mobil 1 ...` etc. as proxies
+     - ABN lookups against operator names if FuelCheck ever exposes operator metadata (it doesn't currently)
+   - Schema: `raw_brand,is_franchisee,operator,confidence` — confidence in {`confirmed`, `pattern_match`, `inferred`} so analysts can filter to high-confidence only.
+   - The cross-brand `operator` column lets feature engineering build aggregates like "median price among EG-operated sites within 10 km".
+
+   For Phase 2 / 3, ship `brand_raw` + `brand_canonical` only and defer `is_franchisee` to a dedicated research pass before Phase 4 feature build.
 4. **Petrol cycle as a sanity check** — should `01_eda.ipynb` verify the cycle is endogenously captured by lag features (e.g., by training a tiny model on lag features alone and inspecting predictions on a held-out station)? Nice-to-have.
 5. **Crisis-period reporting** — confirm whether the test (crisis) fold is reported in the headline `comparison.md` or only as a sub-section. Suggest sub-section to keep the headline numbers comparable to a "normal world" baseline.
 

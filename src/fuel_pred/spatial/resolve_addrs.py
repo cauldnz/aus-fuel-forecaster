@@ -1,13 +1,26 @@
 """Resolve station addresses to lat/lon via G-NAF, falling back to Nominatim.
 
-Reads `stations.parquet` (with at least `address, suburb, postcode`) and
-writes the same parquet with `lat, lon, geocoder` columns populated.
+Reads `stations.parquet` (with at least `name, address, suburb, postcode`)
+and writes the same parquet with `lat, lon, geocoder, mb_code` columns
+populated.
 
-G-NAF is the preferred resolver — much higher hit rate on real Australian
-addresses than Nominatim, no rate limits when used locally. The
-`abs-census-augmentor` package exposes a remote G-NAF lookup
-(see https://github.com/cauldnz/abs-census-augmentor PR queue) which we
-call here. Nominatim is the fallback for misses.
+Geocoding cascade (per spec.md §12 Phase 2):
+
+1. **G-NAF (remote mode)** — `census_augment.GnafGeocoder` streams G-NAF
+   parquet directly from S3 via DuckDB httpfs. No 10 GB local download.
+   Authoritative for Australian addresses; high hit rate on real
+   FuelCheck data.
+2. **Nominatim** — only used for G-NAF misses. Hard-rate-limited to
+   1 req/sec per Nominatim's usage policy. Disk-backed cache avoids
+   re-querying for the same address on subsequent runs.
+
+Idempotency: rows whose `(lat, lon, geocoder)` are already non-null
+are skipped unless `--force`. Re-runs after partial completion (e.g.
+crashed during Nominatim batch) only resolve the unfinished rows.
+
+Geocoding per `station_id` — *not* per unique `(address, suburb,
+postcode)` triple — because the user has decided to model each station
+separately even when address strings collide.
 
 Spec: spec.md §6.1, §12 Phase 2.
 """
@@ -15,23 +28,282 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+# These are runtime-public but the augmentor's submodules don't list them
+# in `__all__`, so mypy strict needs the attribute-defined ignores.
+from census_augment.geocoding.gnaf import (  # type: ignore[attr-defined]
+    GnafDataSource,
+    GnafGeocoder,
+)
+from census_augment.geocoding.nominatim import (  # type: ignore[attr-defined]
+    GeocodeCache,
+    NominatimGeocoder,
+)
+
+from fuel_pred import config
 
 logger = logging.getLogger(__name__)
 
+GEOCODED_COLUMNS: tuple[str, ...] = ("lat", "lon", "geocoder", "mb_code")
 
-def resolve(in_path: Path, out_path: Path) -> None:
-    """Add lat/lon/geocoder columns to the stations parquet (in-place safe)."""
-    raise NotImplementedError("TODO: implement per spec.md Phase 2.")
+# G-NAF parquet is published to s3://minus34.com/opendata/ (ap-southeast-2).
+# The default virtual-hosted URL `minus34.com.s3.amazonaws.com` triggers a
+# certificate hostname mismatch (S3's wildcard cert is `*.s3.amazonaws.com`,
+# not `*.s3.amazonaws.com` *plus* a leading `.com.`). Forcing path-style via
+# the regional endpoint sidesteps this and is faster (no cross-region hop).
+GNAF_S3_HTTPS_ENDPOINT: str = "https://s3.ap-southeast-2.amazonaws.com"
+
+
+_CROSS_STREET_RE: re.Pattern[str] = re.compile(
+    r"\s+(cnr|corner|c/o)\b.*?(?=,|$)", flags=re.IGNORECASE
+)
+
+
+def _clean_street(street: str) -> str:
+    """Strip cross-street annotations that break Nominatim parsing.
+
+    FuelCheck addresses often include `Cnr Ross St`, `Corner of X & Y`, etc.
+    These are useful for human navigation but cause Nominatim to return zero
+    hits where the same address without the annotation resolves cleanly.
+    The match stops at a comma so suburb/postcode that follows is preserved.
+    """
+    return _CROSS_STREET_RE.sub("", street).strip()
+
+
+def _format_address(row: pd.Series) -> str:
+    """Build a single address string from FuelCheck columns.
+
+    FuelCheck's `address` column is *inconsistent*: some rows are
+    street-only ("78 Great Western Hwy Cnr Ross St"), others already
+    contain the full address ("1 Braidwood Rd, GOULBURN NSW 2580").
+    Naively appending suburb/state/postcode duplicates everything in the
+    second case and produces strings Nominatim refuses to parse.
+
+    Strategy: take the address column as authoritative, strip
+    cross-street annotations, then append suburb / postcode only when
+    they aren't already present (case-insensitive substring check).
+    State is left to whatever the address itself carries — many FuelCheck
+    stations sit in ACT despite being on a NSW dataset.
+    """
+    raw = str(row.get("address", "") or "").strip()
+    cleaned = _clean_street(raw)
+    suburb = str(row.get("suburb", "") or "").strip()
+    postcode = str(row.get("postcode", "") or "").strip()
+
+    parts: list[str] = [cleaned] if cleaned else []
+    lower = cleaned.lower()
+    if suburb and suburb.lower() not in lower:
+        parts.append(suburb)
+    if postcode and postcode not in cleaned:
+        parts.append(postcode)
+    parts.append("Australia")
+    return ", ".join(p for p in parts if p)
+
+
+def _ensure_geocoded_columns(stations: pd.DataFrame) -> pd.DataFrame:
+    """Make sure the expected output columns exist (as nullable types)."""
+    out = stations.copy()
+    for col in GEOCODED_COLUMNS:
+        if col not in out.columns:
+            out[col] = pd.NA
+    return out
+
+
+def _row_is_geocoded(row: pd.Series) -> bool:
+    return pd.notna(row.get("lat")) and pd.notna(row.get("lon"))
+
+
+def _build_geocoders(
+    cache_dir: Path,
+    user_agent: str,
+    *,
+    nominatim_factory: object | None = None,
+    gnaf_factory: object | None = None,
+) -> tuple[object, object]:
+    """Construct the G-NAF (remote) and Nominatim geocoders.
+
+    `nominatim_factory` and `gnaf_factory` exist so tests can inject
+    in-memory fakes without hitting the network.
+    """
+    if gnaf_factory is None:
+        data_source = GnafDataSource(
+            mode="remote",
+            release="latest",
+            data_dir=cache_dir / "gnaf",
+            s3_https_endpoint=GNAF_S3_HTTPS_ENDPOINT,
+        )
+        gnaf = GnafGeocoder(data_source=data_source)
+    else:
+        gnaf = gnaf_factory()  # type: ignore[operator]
+
+    if nominatim_factory is None:
+        nom_cache = GeocodeCache(root=cache_dir / "nominatim")
+        nominatim = NominatimGeocoder(
+            user_agent=user_agent,
+            cache=nom_cache,
+            rate_limit_per_second=1.0,
+        )
+    else:
+        nominatim = nominatim_factory()  # type: ignore[operator]
+
+    return gnaf, nominatim
+
+
+def _geocode_one(
+    address: str, gnaf: object | None, nominatim: object
+) -> dict[str, Any]:
+    """Try G-NAF first, fall back to Nominatim. Returns row-update dict.
+
+    ``gnaf=None`` means G-NAF is disabled for this run (e.g. the remote
+    parquet view failed to initialise) and every address goes to Nominatim.
+    """
+    if gnaf is not None:
+        result = gnaf.geocode(address)  # type: ignore[attr-defined]
+        if result.is_success:
+            return {
+                "lat": result.lat,
+                "lon": result.lon,
+                "geocoder": "gnaf",
+                "mb_code": result.mb_code,
+            }
+        logger.debug("G-NAF miss for %r — falling back to Nominatim", address)
+
+    fallback = nominatim.geocode(address)  # type: ignore[attr-defined]
+    if fallback.is_success:
+        return {
+            "lat": fallback.lat,
+            "lon": fallback.lon,
+            "geocoder": "nominatim",
+            "mb_code": fallback.mb_code,
+        }
+    return {"lat": pd.NA, "lon": pd.NA, "geocoder": pd.NA, "mb_code": pd.NA}
+
+
+def _try_gnaf_warmup(gnaf: object) -> object | None:
+    """Force G-NAF to open its remote view; return None if it can't.
+
+    The augmentor opens the DuckDB connection lazily on first ``geocode()``,
+    so a misconfigured remote bucket only blows up mid-loop. Probing here
+    surfaces the failure early and lets the caller fall through to a
+    Nominatim-only run with a clear warning.
+    """
+    try:
+        # A nonsense address still forces the connection to open and the
+        # parquet view's schema to be validated.
+        gnaf.geocode("__warmup__")  # type: ignore[attr-defined]
+    except Exception as exc:
+        logger.warning(
+            "G-NAF init failed (%s: %s) — running Nominatim-only for this session. "
+            "See https://github.com/cauldnz/abs-census-augmentor/issues/8 for upstream tracking.",
+            type(exc).__name__,
+            exc,
+        )
+        return None
+    return gnaf
+
+
+def resolve(
+    in_path: Path,
+    out_path: Path,
+    *,
+    cache_dir: Path | None = None,
+    force: bool = False,
+    user_agent: str = config.USER_AGENT,
+    nominatim_factory: object | None = None,
+    gnaf_factory: object | None = None,
+) -> None:
+    """Add lat/lon/geocoder/mb_code columns to ``stations.parquet``.
+
+    Args:
+        in_path: stations parquet to read.
+        out_path: where to write — safe to set the same as ``in_path``.
+        cache_dir: where the G-NAF + Nominatim caches live. Defaults to
+            ``data/raw/geocode_cache/``.
+        force: if True, re-geocode every row regardless of existing values.
+        user_agent: HTTP User-Agent for Nominatim (per their usage policy).
+        nominatim_factory, gnaf_factory: test seams. When provided,
+            replace the real geocoders with the factory's return value.
+    """
+    cache_dir = cache_dir or (config.DATA_RAW / "geocode_cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    stations = pd.read_parquet(in_path)
+    stations = _ensure_geocoded_columns(stations)
+    logger.info("loaded %d stations from %s", len(stations), in_path)
+
+    if force:
+        to_resolve = stations.index
+    else:
+        to_resolve = stations.index[
+            stations["lat"].isna() | stations["lon"].isna()
+        ]
+    logger.info("resolving %d / %d station addresses", len(to_resolve), len(stations))
+
+    if len(to_resolve) == 0:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        stations.to_parquet(out_path, engine="pyarrow", compression="zstd", index=False)
+        return
+
+    gnaf, nominatim = _build_geocoders(
+        cache_dir, user_agent, nominatim_factory=nominatim_factory, gnaf_factory=gnaf_factory
+    )
+
+    # Probe G-NAF up-front so a broken remote view fails fast — and the run
+    # can degrade to Nominatim-only rather than dying mid-loop. We skip the
+    # probe when a test factory injected its own G-NAF stub.
+    if gnaf_factory is None:
+        gnaf = _try_gnaf_warmup(gnaf)
+
+    gnaf_hits = 0
+    nominatim_hits = 0
+    failures = 0
+    for idx in to_resolve:
+        row = stations.loc[idx]
+        address = _format_address(row)
+        if not address:
+            failures += 1
+            continue
+        update = _geocode_one(address, gnaf, nominatim)
+        for col, val in update.items():
+            stations.at[idx, col] = val
+        provider = update["geocoder"]
+        if pd.isna(provider):
+            failures += 1
+        elif provider == "gnaf":
+            gnaf_hits += 1
+        elif provider == "nominatim":
+            nominatim_hits += 1
+        else:
+            failures += 1
+
+    logger.info(
+        "geocoding done: gnaf=%d nominatim=%d failures=%d",
+        gnaf_hits,
+        nominatim_hits,
+        failures,
+    )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    stations.to_parquet(tmp, engine="pyarrow", compression="zstd", index=False)
+    tmp.replace(out_path)
+    logger.info("wrote %d stations to %s", len(stations), out_path)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--in", dest="in_path", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--cache-dir", type=Path, default=None)
+    parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO)
-    resolve(args.in_path, args.out)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    resolve(args.in_path, args.out, cache_dir=args.cache_dir, force=args.force)
 
 
 if __name__ == "__main__":

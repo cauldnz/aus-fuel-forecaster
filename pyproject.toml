@@ -62,6 +62,12 @@ notebooks = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.metadata]
+# Required by hatchling because our `abs-census-augmentor` dep is a direct
+# git URL reference. Without this, `uv sync` fails with
+# "Dependency #N cannot be a direct reference".
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/fuel_pred"]
 

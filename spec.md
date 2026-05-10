@@ -347,27 +347,27 @@ Note on leakage: v1 uses Historical Weather (ERA5 reanalysis) across the full sp
 sa2_median_age                        # G02.Median_age_persons (direct)
 sa2_median_household_income_weekly    # G02.Median_tot_hhd_inc_weekly (direct)
 sa2_total_population                  # G01.Tot_P_P (direct)
-sa2_seifa_irsd_score                  # ABS SEIFA 2021 SA2 IRSD score (separate fetch + join)
-sa2_pct_drive_to_work                 # DERIVED — see §7.7.1
-sa2_motor_vehicles_per_dwelling       # DERIVED
-sa2_pct_renters                       # DERIVED
-sa2_pct_employed_full_time            # DERIVED
-sa2_pct_aged_65_plus                  # DERIVED
-sa2_pct_one_parent_family             # DERIVED
+sa2_seifa_irsd_score                  # ABS SEIFA 2021 SA2 IRSD score (augmentor SEIFA join)
+sa2_pct_drive_to_work                 # PRESET.pct_drive_to_work
+sa2_motor_vehicles_per_dwelling       # PRESET.motor_vehicles_per_dwelling
+sa2_pct_renters                       # PRESET.pct_renters
+sa2_pct_employed_full_time            # PRESET.pct_employed_full_time
+sa2_pct_aged_65_plus                  # PRESET.pct_aged_65_plus
+sa2_pct_one_parent_family             # PRESET.pct_one_parent_family
 ```
 
 This block is the *only* difference between Model A and Model B.
 
-#### 7.7.1 Deferred derived variables
+#### 7.7.1 Derived variables — RESOLVED
 
-Phase 3 v1 ships the 4 unambiguous columns (3 augmentor-direct + SEIFA). The 6 DERIVED percentages are stubbed with nulls plus a clear `_compute_derived_percentages()` framework in `build.enrich_census` so each can be filled in later. Reasons:
+Originally Phase 3 v1 stubbed the 6 derived percentages with nulls because (a) the right denominator per ratio is non-obvious, (b) the 200-column GCP tables make field-code archaeology a non-trivial spike, and (c) augmentor PRESETs were not yet exposed as first-class pipeline variables. All three blockers have since cleared:
 
-- Each derivation needs a numerator/denominator pair from the right GCP table, and the denominator choice is non-obvious (e.g. `pct_drive_to_work` denominator is "persons aged 15+ in employed labour force", not "total population"). Getting it wrong silently distorts the cross-sectional distribution.
-- The 200-column GCP tables (G46A, G43, G33, G31) make field-code archaeology a non-trivial spike per derivation.
-- [abs-census-augmentor#11](https://github.com/cauldnz/abs-census-augmentor/issues/11) proposes native derived-variable support upstream — once that lands, our local code is throwaway.
-- The EDA notebook (Phase 7) will identify which derivations matter most for the U91 model, so prioritising them then is more efficient than spiking all six now.
+- [abs-census-augmentor#11](https://github.com/cauldnz/abs-census-augmentor/issues/11) → v1.3 shipped curated PRESET specs.
+- [abs-census-augmentor#19](https://github.com/cauldnz/abs-census-augmentor/issues/19) → v1.4.1 ships the spec markdown in the wheel so registries populate on a fresh install.
+- [abs-census-augmentor#18](https://github.com/cauldnz/abs-census-augmentor/pull/18) → v1.4.0 makes `PRESET.<id>` a first-class variable namespace alongside `G\d+.<col>` / `SEIFA.*` / `ERP.*` / `DSS.*` / `ATO.*`.
+- [abs-census-augmentor#23](https://github.com/cauldnz/abs-census-augmentor/issues/23) → v1.4.2 rewrites the PRESETs against the **real** GCP DataPack (the v1.3 PRESETs referenced columns that didn't actually exist; tests passed because synthetic fixtures encoded the same broken names).
 
-For each deferred derivation, `build.enrich_census` writes a null column with the spec'd name; LightGBM handles nulls natively, so Model B simply has slightly less SA2 signal than spec-final until the derivations are filled in.
+`build.enrich_census` now passes all 6 PRESETs as variables to `Pipeline.augment(...)`. All 10 sa2_* columns from §7.7 are populated. Acceptance threshold (≥ 95% non-null on all 10) applies as spec'd. No null-stub framework remains.
 
 ### 7.8 Target
 
@@ -609,10 +609,12 @@ Each phase produces a runnable artefact and a testable outcome. Designed for seq
 - `clean.traffic` — daily aggregation from hourly. Drop rows from non-permanent stations and `quality_rating < 3` (TfNSW's data-quality scale runs 1-5; ratings 1-2 indicate sparse coverage that produces unreliable daily totals — see the dataset's Data Quality Statement)
 - Acceptance: `data/interim/stations.parquet` and `data/interim/fuel_daily.parquet` exist with the schemas in §6
 
-### Phase 3 — Census enrichment (1 session)
-- `build.enrich_census` — wrapper around `abs-census-augmentor`'s spatial-join + enrichment path (uses pre-resolved lat/lon from Phase 2). Ships the 4 unambiguous columns: `sa2_median_age`, `sa2_median_household_income_weekly`, `sa2_total_population`, plus `sa2_code` / `sa2_name`. SEIFA `sa2_seifa_irsd_score` is joined via the augmentor's native `SeifaDataSource` (v1.3+; previously a local `fetch.seifa` module — removed once upstream landed [abs-census-augmentor#10](https://github.com/cauldnz/abs-census-augmentor/issues/10)).
-- 6 DERIVED percentages (§7.7.1) stubbed with nulls + `TODO(spec)` markers. Filled in later, either EDA-driven or via the augmentor's native PRESETs (gated on [abs-census-augmentor#19](https://github.com/cauldnz/abs-census-augmentor/issues/19) — wheel-packaging fix needed before downstream can use the registered specs).
-- Acceptance: `data/interim/stations.parquet` has the 4 ship-now `sa2_*` columns + `sa2_code` / `sa2_name` populated for ≥ 95% of stations. The 6 deferred columns exist but are null.
+### Phase 3 — Census enrichment (1 session) ✅
+- `build.enrich_census` — wraps `census_augment.Pipeline.augment(...)` (uses pre-resolved lat/lon from Phase 2). All 10 §7.7 sa2_* columns are populated:
+  - 3 direct GCP fields (`G01.Tot_P_P`, `G02.Median_age_persons`, `G02.Median_tot_hhd_inc_weekly`)
+  - 6 PRESET derivations (`PRESET.pct_drive_to_work`, `motor_vehicles_per_dwelling`, `pct_renters`, `pct_employed_full_time`, `pct_aged_65_plus`, `pct_one_parent_family`) via augmentor v1.4.2+ — see §7.7.1 for the resolution history.
+  - `sa2_seifa_irsd_score` via the augmentor's native `SeifaDataSource` (v1.3+; previously a local `fetch.seifa` module that's been removed).
+- Acceptance: `data/interim/stations.parquet` has all 10 `sa2_*` columns + `sa2_code` / `sa2_name` populated for ≥ 95% of stations.
 
 ### Phase 4 — Feature build (1 session)
 - `build.panel_grid` — assemble the (station, fuel, date) grid

@@ -77,6 +77,14 @@ packages = ["src/fuel_pred"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# Don't descend into Claude Code's worktree scratch space. Each entry
+# under .claude/worktrees/ is an independent git checkout (often on a
+# different branch with stale code + an older pyproject.toml), and
+# linting them: (a) duplicates findings against files that aren't on
+# main, (b) uses the wrong rule config because ruff picks up nested
+# pyproject.toml files. Same reasoning for .git/ which ruff already
+# excludes by default.
+extend-exclude = [".claude/"]
 
 [tool.ruff.lint]
 select = [
@@ -128,7 +136,7 @@ warn_unused_ignores = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 ignore_missing_imports = true   # for libs without stubs
-exclude = ["notebooks/", "build/", "dist/"]
+exclude = ["notebooks/", "build/", "dist/", "\\.claude/"]
 
 [[tool.mypy.overrides]]
 module = "tests.*"

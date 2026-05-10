@@ -54,9 +54,12 @@ htmlcov/
 .ipynb_checkpoints/
 *.ipynb_checkpoints
 
-# IDE
+# IDE / AI tooling
 .idea/
 .vscode/
+# Claude Code scratch space — embedded git worktrees + agent state.
+# Tools (ruff, mypy) also extend-exclude this in pyproject.toml.
+.claude/
 *.swp
 *.swo
 *~

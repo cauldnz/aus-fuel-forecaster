@@ -10,18 +10,18 @@ import pytest
 
 
 @pytest.mark.skip(reason="TODO: implement once add_lag_features is filled in (Phase 4)")
-def test_lag_1_is_yesterdays_price(synthetic_panel) -> None:  # noqa: ANN001
+def test_lag_1_is_yesterdays_price(synthetic_panel) -> None:
     pass
 
 
 @pytest.mark.skip(reason="TODO")
-def test_rolling_mean_uses_min_periods_window(synthetic_panel) -> None:  # noqa: ANN001
+def test_rolling_mean_uses_min_periods_window(synthetic_panel) -> None:
     """Verify no early-life leakage: rolling_mean_7 is null for first 6 days per station."""
     pass
 
 
 @pytest.mark.skip(reason="TODO")
-def test_target_does_not_leak(synthetic_panel) -> None:  # noqa: ANN001
+def test_target_does_not_leak(synthetic_panel) -> None:
     """y_t1 at date d must equal price_mean at date d+1, never d-1."""
     pass
 

@@ -5,6 +5,18 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Heal the uv cache volume's ownership in case it was created by an older
+# image revision (before the Dockerfile pre-created the dir with vscode
+# ownership). Docker won't re-init a non-empty named volume, so the
+# Dockerfile fix alone leaves pre-existing volumes broken — we chown
+# defensively here. Cheap (one stat + chown of a normally-tiny tree on
+# fresh volumes; trivial on populated ones because ownership is already
+# correct).
+if [ -d "$HOME/.cache/uv" ] && [ "$(stat -c %U "$HOME/.cache/uv")" != "vscode" ]; then
+    echo ">>> repairing /home/vscode/.cache/uv ownership (named-volume init quirk)"
+    sudo chown -R vscode:vscode "$HOME/.cache/uv"
+fi
+
 echo ">>> uv sync (installing project deps)"
 uv sync --extra dev --extra notebooks
 

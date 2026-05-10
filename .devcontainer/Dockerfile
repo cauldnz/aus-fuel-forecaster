@@ -58,3 +58,13 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 ENV UV_PROJECT_ENVIRONMENT=/workspaces/aus-fuel-forecaster/.venv \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never
+
+# Pre-create the uv cache dir with vscode ownership. Docker initialises a
+# fresh named volume by copying the image's mountpoint contents (and their
+# ownership) into the volume; without this, the volume comes up owned by
+# root:root and the vscode user (UID 1000) can't write CACHEDIR.TAG. See
+# `mounts: fuel-pred-uv-cache → /home/vscode/.cache/uv` in devcontainer.json.
+# post-create.sh re-asserts the chown defensively for volumes created
+# before this fix existed.
+RUN mkdir -p /home/vscode/.cache/uv \
+    && chown -R vscode:vscode /home/vscode/.cache

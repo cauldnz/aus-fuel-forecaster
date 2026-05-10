@@ -136,10 +136,10 @@ The `nsw-roads-traffic-volume-counts-api` package contains:
 
 | Source | URL / API | Notes |
 |---|---|---|
-| **AIP Terminal Gate Prices** | https://www.aip.com.au/pricing/terminal-gate-prices | Scrape forward from project start; partial backfill via Wayback if motivated |
-| **RBA cash rate** | RBA F1.1 historical CSV | daily, slow-moving |
+| **AIP Terminal Gate Prices** | https://www.aip.com.au/historical-ulp-and-diesel-tgp-data | The "weekly" XLSX is misnamed — it ships **the full daily TGP back to 2004-01-01** for all 7 capital cities + national avg. We scrape the index page for the latest dated `AIP_TGP_Data_<DD-MMM-YYYY>.xlsx` link, parse the Petrol + Diesel sheets, lift Sydney columns. Forward-only/Wayback backfill from the original spec hint isn't needed — no data gap. |
+| **RBA cash rate** | RBA F1.1 historical CSV (`csv/f1.1-data.csv`, series ID `FIRMMCRT`) | Monthly average; forward-fill to daily in the feature builder. |
 | **ASX 200** | `yfinance` ticker `^AXJO` | daily close |
-| **ANZ-Roy Morgan Consumer Confidence** | https://www.roymorgan.com/findings/anz-roy-morgan-consumer-confidence | weekly Friday release |
+| **~~ANZ-Roy Morgan Consumer Confidence~~** → **RBA Inflation Expectations** | RBA G3 (`csv/g3-data.csv`, series ID `GCONEXP`) | Roy Morgan publishes only HTML tables (no API/CSV/XLS) and gates the historical series behind a commercial offering at `store.roymorgan.com`. Substituting RBA G3 *Consumer Inflation Expectations* (Melbourne Institute survey, quarterly back to 1985) — same signal-direction (consumer macro mood) with a clean, free, machine-readable feed. Forward-fill to daily in the feature builder. |
 | **Singapore Mogas 95** | EIA International Petroleum Weekly | weekly; only add if Brent residuals indicate Singapore-shaped error |
 
 ### 5.3 Tier 3 — explicitly skipped in v1
@@ -303,7 +303,7 @@ ctx_traffic_5km_radius_count          # number of counters within 5 km
 If the *closest* counter is > 50 km away, all `ctx_traffic_top*` columns are null for that station.
 
 ```
-ctx_consumer_confidence_lag_7         # ANZ-RM, forward-filled to daily
+ctx_inflation_expectations_lag_7      # RBA G3 Consumer (GCONEXP), forward-filled — see §5.2
 ctx_asx200_lag_1                      # close
 ctx_cash_rate                         # current value, forward-filled (slow-moving)
 ```
@@ -621,7 +621,7 @@ Each phase produces a runnable artefact and a testable outcome. Designed for seq
 - Acceptance: `data/processed/features.parquet` exists, schema matches §7, no rows where every feature is null
 
 ### Phase 5 — Tier 2 fetchers + features (1 session)
-- `fetch.cash_rate`, `fetch.asx200`, `fetch.consumer_confidence`
+- `fetch.cash_rate`, `fetch.asx200`, `fetch.inflation_expectations` (replaces `consumer_confidence` per §5.2 — Roy Morgan unavailable as a clean feed), `fetch.aip_tgp`
 - AIP TGP scraper (start collecting forward; no historical backfill required)
 - Add corresponding feature columns
 - Acceptance: feature matrix has the new `ctx_*` columns

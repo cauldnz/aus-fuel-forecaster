@@ -41,6 +41,12 @@ class _StubPipeline:
             "sa2_total_population",
             "sa2_median_age",
             "sa2_median_household_income_weekly",
+            "sa2_pct_drive_to_work",
+            "sa2_motor_vehicles_per_dwelling",
+            "sa2_pct_renters",
+            "sa2_pct_employed_full_time",
+            "sa2_pct_aged_65_plus",
+            "sa2_pct_one_parent_family",
         )
         for col in added_cols:
             out[col] = pd.NA
@@ -117,6 +123,13 @@ def lookup() -> dict[tuple[float, float], dict[str, object]]:
             "sa2_total_population": 21573,
             "sa2_median_age": 30,
             "sa2_median_household_income_weekly": 1900,
+            # PRESET derivations (augmentor v1.4.2+).
+            "sa2_pct_drive_to_work": 38.5,
+            "sa2_motor_vehicles_per_dwelling": 0.62,
+            "sa2_pct_renters": 65.85,
+            "sa2_pct_employed_full_time": 63.0,
+            "sa2_pct_aged_65_plus": 14.82,
+            "sa2_pct_one_parent_family": 18.0,
         },
         (-33.65, 151.32): {
             "sa2_code": "122021422",
@@ -124,6 +137,12 @@ def lookup() -> dict[tuple[float, float], dict[str, object]]:
             "sa2_total_population": 13681,
             "sa2_median_age": 46,
             "sa2_median_household_income_weekly": 2400,
+            "sa2_pct_drive_to_work": 47.2,
+            "sa2_motor_vehicles_per_dwelling": 1.85,
+            "sa2_pct_renters": 22.4,
+            "sa2_pct_employed_full_time": 58.1,
+            "sa2_pct_aged_65_plus": 24.8,
+            "sa2_pct_one_parent_family": 8.3,
         },
     }
 
@@ -175,14 +194,19 @@ def test_seifa_irsd_joins_correctly(
     assert int(by_id["s2"]["sa2_seifa_irsd_score"]) == 1102
 
 
-def test_six_derived_columns_are_null_stubs(
+def test_six_preset_derivations_populate(
     tmp_path: Path,
     stations_in: Path,
     seifa_cache_dir: Path,
     seifa_loader,
     lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
-    """Per spec §7.7.1, the 6 derived percentages exist but are null in v1."""
+    """Augmentor v1.4.2 — the 6 PRESET-derived percentages populate per row.
+
+    Previously these were stubbed null per spec §7.7.1; v1.4.2's PRESETs
+    fixed against the real GCP DataPack let us pass them as first-class
+    variables to the augmentor.
+    """
     out = tmp_path / "stations_out.parquet"
     ec.enrich(
         stations_in,
@@ -192,9 +216,45 @@ def test_six_derived_columns_are_null_stubs(
         pipeline_factory=_make_stub_factory(lookup),
     )
     df = pd.read_parquet(out)
-    for col in ec.DEFERRED_DERIVED_COLUMNS:
-        assert col in df.columns, f"missing stub column {col}"
-        assert df[col].isna().all(), f"{col} should be null in v1, got {df[col].tolist()}"
+    derived = (
+        "sa2_pct_drive_to_work",
+        "sa2_motor_vehicles_per_dwelling",
+        "sa2_pct_renters",
+        "sa2_pct_employed_full_time",
+        "sa2_pct_aged_65_plus",
+        "sa2_pct_one_parent_family",
+    )
+    for col in derived:
+        assert col in df.columns, f"missing column {col}"
+        assert df[col].notna().all(), f"{col} should be populated, got {df[col].tolist()}"
+
+
+def test_pipeline_receives_preset_variables(
+    tmp_path: Path,
+    stations_in: Path,
+    seifa_cache_dir: Path,
+    seifa_loader,
+    lookup: dict[tuple[float, float], dict[str, object]],
+) -> None:
+    """The DIRECT_VARIABLES dict passes 6 PRESET refs to the augmentor."""
+    preset_keys = [
+        k for k, v in ec.DIRECT_VARIABLES.items() if str(v).startswith("PRESET.")
+    ]
+    assert sorted(preset_keys) == sorted([
+        "pct_drive_to_work",
+        "motor_vehicles_per_dwelling",
+        "pct_renters",
+        "pct_employed_full_time",
+        "pct_aged_65_plus",
+        "pct_one_parent_family",
+    ])
+    # Each PRESET ref is well-formed (PRESET.<id> matching one we know upstream ships).
+    for k, v in ec.DIRECT_VARIABLES.items():
+        if v.startswith("PRESET."):
+            preset_id = v.split(".", 1)[1]
+            assert preset_id == k, (
+                f"variable key {k!r} should match its PRESET id {preset_id!r}"
+            )
 
 
 def test_idempotent_skip_when_already_enriched(
@@ -304,9 +364,12 @@ def test_partial_enrichment_only_processes_unseen_rows(
         pipeline_factory=lambda: stub,
     )
 
-    # The augmentor only saw s2.
-    assert len(stub.calls) == 1
-    assert list(stub.calls[0]["station_id"]) == ["s2"]
+    # The augmentor only saw s2 — even after the multi-pass split for
+    # the upstream GCP collision workaround, every pass should be
+    # restricted to the un-enriched row.
+    assert len(stub.calls) >= 1
+    for call in stub.calls:
+        assert list(call["station_id"]) == ["s2"]
 
 
 def test_missing_lat_lon_raises(
@@ -381,6 +444,46 @@ def test_acceptance_warns_below_95_percent(
 
     # 1 of 3 enriched = 33%; well below 95%.
     assert any("threshold" in rec.message and "not met" in rec.message for rec in caplog.records)
+
+
+def test_split_for_gcp_collision_passes_through_when_no_collision() -> None:
+    """No collision (e.g. only direct vars or only PRESETs) → single group."""
+    only_direct = {"pop": "G01.Tot_P_P", "age": "G02.Median_age_persons"}
+    assert ec._split_for_gcp_collision(only_direct) == [only_direct]
+
+    only_presets = {
+        "rent": "PRESET.pct_renters",
+        "drive": "PRESET.pct_drive_to_work",
+    }
+    assert ec._split_for_gcp_collision(only_presets) == [only_presets]
+
+
+def test_split_for_gcp_collision_isolates_colliding_direct_var() -> None:
+    """Direct G01.Tot_P_P + PRESET.pct_aged_65_plus splits into 2 groups.
+
+    Workaround for upstream bug — PRESET.pct_aged_65_plus uses G01.Tot_P_P
+    as its denominator, and the augmentor's GCP dispatch crashes when both
+    are requested in one call. See module docstring (UPSTREAM_GCP_COLLISION).
+    """
+    variables = {
+        "pop": "G01.Tot_P_P",
+        "age": "G02.Median_age_persons",
+        "aged": "PRESET.pct_aged_65_plus",
+        "rent": "PRESET.pct_renters",
+    }
+    groups = ec._split_for_gcp_collision(variables)
+    assert len(groups) == 2
+    # All vars accounted for, exactly once.
+    seen = {k for g in groups for k in g}
+    assert seen == set(variables)
+    # The colliding direct ref ('pop') is isolated from the colliding PRESET ('aged').
+    pop_group = next(g for g in groups if "pop" in g)
+    aged_group = next(g for g in groups if "aged" in g)
+    assert pop_group is not aged_group
+    # Non-colliding entries (age, rent) ride along with the PRESETs;
+    # only the colliding direct ref is split out into its own pass.
+    assert "aged" in aged_group and "rent" in aged_group and "age" in aged_group
+    assert pop_group == {"pop": "G01.Tot_P_P"}
 
 
 def test_in_place_overwrite_is_atomic(

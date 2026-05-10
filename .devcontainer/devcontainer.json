@@ -1,0 +1,84 @@
+{
+  "name": "aus-fuel-forecaster",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+
+  // First-attach setup: install project deps via uv. The wheel install of
+  // abs-census-augmentor (a git+https dep) takes ~30s; subsequent attaches
+  // hit the uv cache.
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+
+  // Forward Jupyter's default port so notebooks launched from inside the
+  // container are reachable from the host browser.
+  "forwardPorts": [8888],
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        // Core Python tooling matched to what the project uses.
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "ms-python.mypy-type-checker",
+
+        // Notebook authoring (Phase 7 needs this).
+        "ms-toolsai.jupyter",
+
+        // Quality-of-life for the rest of the repo.
+        "tamasfe.even-better-toml",
+        "yzhang.markdown-all-in-one",
+        "github.vscode-pull-request-github",
+        "github.vscode-github-actions"
+      ],
+
+      "settings": {
+        // Point VS Code at the venv uv creates inside the workspace.
+        "python.defaultInterpreterPath": "/workspaces/aus-fuel-forecaster/.venv/bin/python",
+
+        // Tests: pytest, runs hermetic suite by default.
+        "python.testing.pytestEnabled": true,
+        "python.testing.unittestEnabled": false,
+        "python.testing.pytestArgs": ["tests"],
+
+        // Ruff handles linting + formatting + import sorting.
+        // Mypy runs as a separate type-checker (matches `make typecheck`).
+        "[python]": {
+          "editor.formatOnSave": true,
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit",
+            "source.fixAll": "explicit"
+          }
+        },
+
+        // Mypy uses the project's strict config from pyproject.toml.
+        "mypy-type-checker.importStrategy": "fromEnvironment",
+        "mypy-type-checker.args": ["--config-file=pyproject.toml"],
+
+        // Notebooks live in notebooks/ — keep them top-level in the file
+        // tree.
+        "files.exclude": {
+          "**/__pycache__": true,
+          "**/.pytest_cache": true,
+          "**/.mypy_cache": true,
+          "**/.ruff_cache": true,
+          "**/*.egg-info": true
+        },
+
+        // Terminal: bash by default — matches what `make` expects.
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+
+  // The base image's `vscode` user has UID 1000 + sudo. Matches Codespaces
+  // and most local Docker setups.
+  "remoteUser": "vscode",
+
+  // Persist the uv cache across container rebuilds so re-installing deps
+  // is fast even after a clean rebuild.
+  "mounts": [
+    "source=fuel-pred-uv-cache,target=/home/vscode/.cache/uv,type=volume"
+  ]
+}

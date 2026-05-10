@@ -24,6 +24,12 @@ See [`spec.md`](./spec.md) for the full design specification — it is the sourc
 
 ## Quickstart
 
+### In VS Code (recommended)
+
+A [devcontainer](.devcontainer/devcontainer.json) ships with the repo. With the **Dev Containers** extension installed, opening the project will offer "Reopen in Container" — accept it. The container provides Python 3.11, `uv`, all project deps, and the matching VS Code extensions (Pylance, Ruff, Mypy, Jupyter). First attach takes ~1 min for `uv sync`; subsequent attaches are instant. Works identically in **GitHub Codespaces**.
+
+### On the host
+
 ```bash
 # Setup
 uv sync

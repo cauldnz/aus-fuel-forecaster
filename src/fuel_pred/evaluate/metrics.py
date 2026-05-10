@@ -7,7 +7,6 @@ Spec: spec.md §8.5.
 """
 from __future__ import annotations
 
-import numpy as np
 from numpy.typing import ArrayLike
 
 

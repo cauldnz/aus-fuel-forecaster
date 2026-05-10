@@ -90,14 +90,32 @@ select = [
     "ANN",              # type annotations
 ]
 ignore = [
-    "ANN101",           # missing self type annotation
-    "ANN102",           # missing cls type annotation
+    # ANN101 (missing self) and ANN102 (missing cls) were removed from
+    # ruff in v0.7+; we used to list them here but ruff now warns that
+    # the ignore is a no-op.
     "ANN401",           # allow Any in some narrow cases
+    # Ambiguous-unicode rules (RUF001/002/003) exist primarily to catch
+    # homoglyph attacks in identifiers. They produce a steady stream of
+    # false positives in this repo's English-language prose, where
+    # `×` (multiplication sign), `−` (minus sign), `→` (rightwards arrow)
+    # etc. are typographically correct in chart titles, docs, and
+    # markdown cells. Cost outweighs benefit for our threat model.
+    "RUF001",           # ambiguous-unicode-character-string
+    "RUF002",           # ambiguous-unicode-character-docstring
+    "RUF003",           # ambiguous-unicode-character-comment
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["ANN", "S101"]   # tests don't need full typing
-"notebooks/**/*.py" = ["ANN"]
+# Match both .py and .ipynb under notebooks/ — ruff lints notebooks
+# natively. Notebook cells mix exploratory code with markdown; E501
+# is meaningless for markdown content (line breaks change rendering),
+# so we relax it alongside ANN.
+"notebooks/**" = ["ANN", "E501"]
+# tools/ holds spike scripts and notebook generators (e.g.
+# make_notebooks.py emits markdown cells as inline strings). E501 there
+# would force unreadable concatenations of prose content.
+"tools/**/*.py" = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"

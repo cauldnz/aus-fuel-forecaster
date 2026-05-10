@@ -16,6 +16,17 @@ If you find yourself wanting to deviate from `spec.md`, **stop and propose the c
 4. Open a PR. Reference the spec section. Note any deviations in the description.
 5. If a deviation requires a spec change, edit `spec.md` in the same PR.
 
+### Parallel work via git worktrees
+
+Agents that handle multiple PRs simultaneously may create scratch worktrees under `.claude/worktrees/<branch-slug>/`. That directory is **gitignored** and **excluded from ruff/mypy** — see `.gitignore` and `pyproject.toml`. Don't add lint or test config that bypasses those excludes (e.g. running `ruff check .claude/...` explicitly), or you'll re-introduce the issue tracked in [#17](https://github.com/cauldnz/aus-fuel-forecaster/issues/17): tooling pollution from stale checkouts of older branches.
+
+When you're done with a worktree, clean it up:
+
+```bash
+git worktree remove .claude/worktrees/<slug>
+git worktree prune
+```
+
 ## Code conventions
 
 - **Python 3.11+**. Use modern syntax (`from __future__ import annotations`, `|` unions, `match`).

@@ -230,7 +230,8 @@ def test_upstream_brent_aud_is_ratio() -> None:
     assert out["upstream_brent_aud_lag_0"].iloc[0] == pytest.approx(80.0 / 0.65)
 
 
-def test_upstream_phase5_columns_are_null() -> None:
+def test_upstream_tgp_columns_null_when_aip_missing() -> None:
+    """Without an aip_tgp arg, the TGP columns ship as null per spec §7.2."""
     panel = _panel(
         [{"station_id": "s1", "fuel_code": "U91", "date": "2024-01-01", "price_mean": 200.0,
           "price_min": 199.0, "price_max": 201.0, "n_obs": 1}]
@@ -241,6 +242,38 @@ def test_upstream_phase5_columns_are_null() -> None:
     for col in ("upstream_tgp_sydney_lag_0", "upstream_tgp_sydney_lag_3",
                 "upstream_tgp_sydney_lag_7", "upstream_tgp_minus_brent_aud_lag_7"):
         assert out[col].isna().all()
+
+
+def test_upstream_tgp_populates_when_aip_provided() -> None:
+    """When aip_tgp is passed, upstream_tgp_sydney_lag_* should be set."""
+    panel = _panel(
+        [
+            {
+                "station_id": "s1", "fuel_code": "U91", "date": "2024-01-15",
+                "price_mean": 200.0, "price_min": 199.0, "price_max": 201.0, "n_obs": 1,
+            }
+        ]
+    )
+    brent = pd.DataFrame(
+        {"date": pd.date_range("2024-01-01", periods=15, freq="D").date,
+         "close": list(range(80, 95))}
+    )
+    audusd = pd.DataFrame(
+        {"date": pd.date_range("2024-01-01", periods=15, freq="D").date,
+         "audusd": [0.65 + 0.001 * i for i in range(15)]}
+    )
+    aip = pd.DataFrame(
+        {"date": pd.date_range("2024-01-01", periods=15, freq="D").date,
+         "ulp_sydney": [170.0 + i for i in range(15)],
+         "diesel_sydney": [190.0 + i for i in range(15)]}
+    )
+
+    out = mf.add_upstream_features(panel, brent, audusd, aip_tgp=aip)
+    # 2024-01-15 lag_0 = 184; lag_7 = 177.
+    assert float(out["upstream_tgp_sydney_lag_0"].iloc[0]) == pytest.approx(184.0)
+    assert float(out["upstream_tgp_sydney_lag_7"].iloc[0]) == pytest.approx(177.0)
+    # Margin proxy: tgp_lag_7 - brent_aud_lag_7. Both non-null.
+    assert pd.notna(out["upstream_tgp_minus_brent_aud_lag_7"].iloc[0])
 
 
 # ============================================================
@@ -341,9 +374,52 @@ def test_context_distances_and_radius() -> None:
     assert float(out["ctx_traffic_top2_distance_km"].iloc[0]) == 2.0
     assert float(out["ctx_traffic_top3_distance_km"].iloc[0]) == 3.0
     assert int(out["ctx_traffic_5km_radius_count"].iloc[0]) == 5
-    # Phase 5 columns:
-    for col in ("ctx_consumer_confidence_lag_7", "ctx_asx200_lag_1", "ctx_cash_rate"):
+    # Phase 5 macro columns: null when their upstream isn't passed.
+    for col in (
+        "ctx_inflation_expectations_lag_7",
+        "ctx_asx200_lag_1",
+        "ctx_cash_rate",
+    ):
         assert out[col].isna().all()
+
+
+def test_context_macro_features_populate_from_phase5_inputs() -> None:
+    """When cash_rate / asx200 / inflation_expectations are passed,
+    their values flow into the corresponding ctx_ columns with the
+    right lag and forward-fill semantics."""
+    panel = _panel([
+        {"station_id": "s1", "fuel_code": "U91", "date": "2024-01-15"},
+    ])
+    top_n = pd.DataFrame([
+        {"station_id": "s1", "counter_rank": 1, "counter_id": "c1", "distance_km": 1.0},
+    ])
+    summary = pd.DataFrame([{"station_id": "s1", "stn_n_counters_within_5km": 1}])
+    cash_rate = pd.DataFrame(
+        {"date": [dt.date(2024, 1, 1)], "cash_rate": [4.35]},
+    )
+    asx200 = pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-10", "2024-01-15", freq="D").date,
+            "close": [7400.0, 7410.0, 7420.0, 7430.0, 7440.0, 7450.0],
+        }
+    )
+    inflation_expectations = pd.DataFrame(
+        {"date": [dt.date(2023, 12, 31)], "inflation_expectations": [4.5]},
+    )
+
+    out = mf.add_context_features(
+        panel, top_n, summary, pd.DataFrame(),
+        cash_rate=cash_rate,
+        asx200=asx200,
+        inflation_expectations=inflation_expectations,
+    )
+    # Cash rate forward-fills from 2024-01-01 → 2024-01-15.
+    assert float(out["ctx_cash_rate"].iloc[0]) == pytest.approx(4.35)
+    # ASX 200 lag 1: 2024-01-15 → close at 2024-01-14 = 7440.
+    assert float(out["ctx_asx200_lag_1"].iloc[0]) == pytest.approx(7440.0)
+    # Inflation expectations lag 7: 2024-01-15 minus 7 days = 2024-01-08;
+    # forward-filled from 2023-12-31 → 4.5.
+    assert float(out["ctx_inflation_expectations_lag_7"].iloc[0]) == pytest.approx(4.5)
 
 
 def test_context_50km_cutoff_nulls_traffic_columns() -> None:

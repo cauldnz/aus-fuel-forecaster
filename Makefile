@@ -63,7 +63,8 @@ fetch-weather:
 fetch-tier2:
 	$(PYTHON) -m $(PKG).fetch.cash_rate --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/cash_rate.parquet
 	$(PYTHON) -m $(PKG).fetch.asx200 --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/asx200.parquet
-	$(PYTHON) -m $(PKG).fetch.consumer_confidence --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/consumer_confidence.parquet
+	$(PYTHON) -m $(PKG).fetch.inflation_expectations --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/inflation_expectations.parquet
+	$(PYTHON) -m $(PKG).fetch.aip_tgp --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/aip_tgp.parquet
 
 # ----------------------------- Build -----------------------------
 

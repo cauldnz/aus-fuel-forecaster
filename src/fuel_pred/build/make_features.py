@@ -46,16 +46,12 @@ METRO_SA2_PREFIXES: tuple[str, ...] = (
     "Lake Macquarie",
 )
 
-# Phase 5 columns shipped as nulls per spec §7.2 / §7.4.
-PHASE5_NULL_COLUMNS: tuple[str, ...] = (
-    "upstream_tgp_sydney_lag_0",
-    "upstream_tgp_sydney_lag_3",
-    "upstream_tgp_sydney_lag_7",
-    "upstream_tgp_minus_brent_aud_lag_7",
-    "ctx_consumer_confidence_lag_7",
-    "ctx_asx200_lag_1",
-    "ctx_cash_rate",
-)
+# Phase-5 columns: populated when their fetcher's parquet is present,
+# null otherwise. Each upstream is independently optional — the
+# `_add_macro_feature` helper handles None/missing inputs gracefully.
+# `ctx_consumer_confidence_lag_7` is replaced by
+# `ctx_inflation_expectations_lag_7` (RBA G3) per spec §5.2 / §7.4
+# — Roy Morgan doesn't publish a clean machine-readable feed.
 
 
 # ============================================================
@@ -168,9 +164,22 @@ def _add_cross_fuel_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_upstream_features(
-    df: pd.DataFrame, brent: pd.DataFrame, audusd: pd.DataFrame
+    df: pd.DataFrame,
+    brent: pd.DataFrame,
+    audusd: pd.DataFrame,
+    *,
+    aip_tgp: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Brent + AUD/USD lags, ratios, and changes."""
+    """Brent + AUD/USD + AIP TGP lags, ratios, and changes.
+
+    Args:
+        df: panel rows with at least a `date` column.
+        brent: from fetch.brent (daily OHLC).
+        audusd: from fetch.audusd (daily AUD/USD).
+        aip_tgp: from fetch.aip_tgp (daily Sydney ULP + Diesel TGP).
+            Optional — when None, the `upstream_tgp_*` columns are
+            null per spec §7.2.
+    """
     # Brent: take `close` as the daily series; forward-fill to cover
     # weekends/holidays so date-aligned joins always hit.
     brent_d = (
@@ -187,13 +196,26 @@ def add_upstream_features(
 
     # Build a continuous daily series from the upstream sources' own start
     # to the panel's end so lag_14 of the panel's earliest date is defined.
-    # Using `min(brent_d.index.min(), audusd_d.index.min())` gives the
-    # widest window we can fill from.
     upstream_start = min(brent_d.index.min(), audusd_d.index.min())
     panel_end = max(df["date"].max(), brent_d.index.max(), audusd_d.index.max())
+    if aip_tgp is not None and not aip_tgp.empty:
+        tgp_d = (
+            aip_tgp.assign(date=pd.to_datetime(aip_tgp["date"]).dt.date)
+            .sort_values("date")
+            .set_index("date")[["ulp_sydney"]]
+            .rename(columns={"ulp_sydney": "tgp_sydney"})
+        )
+        upstream_start = min(upstream_start, tgp_d.index.min())
+        panel_end = max(panel_end, tgp_d.index.max())
+    else:
+        tgp_d = None
+
     full_dates = pd.date_range(upstream_start, panel_end, freq="D").date
     daily = pd.DataFrame(index=pd.Index(full_dates, name="date"))
-    daily = daily.join(brent_d, how="left").join(audusd_d, how="left").ffill()
+    daily = daily.join(brent_d, how="left").join(audusd_d, how="left")
+    if tgp_d is not None:
+        daily = daily.join(tgp_d, how="left")
+    daily = daily.ffill()
 
     # Lags off the daily-frequency series (not within station — these are global).
     for n in (0, 1, 3, 7, 14):
@@ -208,18 +230,29 @@ def add_upstream_features(
     daily["upstream_brent_change_14d"] = daily["brent"] - daily["brent"].shift(14)
     daily["upstream_audusd_change_7d"] = daily["audusd"] - daily["audusd"].shift(7)
 
+    if tgp_d is not None:
+        for n in (0, 3, 7):
+            daily[f"upstream_tgp_sydney_lag_{n}"] = daily["tgp_sydney"].shift(n)
+        # Margin proxy per spec §7.2: Sydney TGP minus
+        # Brent / AUDUSD (i.e. retail-imported-cost spread, lag-7).
+        daily["upstream_tgp_minus_brent_aud_lag_7"] = (
+            daily["upstream_tgp_sydney_lag_7"] - daily["upstream_brent_aud_lag_7"]
+        )
+    else:
+        for col in (
+            "upstream_tgp_sydney_lag_0",
+            "upstream_tgp_sydney_lag_3",
+            "upstream_tgp_sydney_lag_7",
+            "upstream_tgp_minus_brent_aud_lag_7",
+        ):
+            daily[col] = pd.NA
+
     upstream_cols = [c for c in daily.columns if c.startswith("upstream_")]
     out = df.merge(
         daily.reset_index()[["date", *upstream_cols]],
         on="date",
         how="left",
     )
-
-    # Phase 5 TGP placeholders.
-    for col in ("upstream_tgp_sydney_lag_0", "upstream_tgp_sydney_lag_3",
-                "upstream_tgp_sydney_lag_7", "upstream_tgp_minus_brent_aud_lag_7"):
-        out[col] = pd.NA
-
     return out
 
 
@@ -363,8 +396,27 @@ def add_context_features(
     top_n_table: pd.DataFrame,
     summary_table: pd.DataFrame,
     traffic_daily: pd.DataFrame,
+    *,
+    cash_rate: pd.DataFrame | None = None,
+    asx200: pd.DataFrame | None = None,
+    inflation_expectations: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Top-N traffic counters + radius count + Phase 5 nulls."""
+    """Top-N traffic counters + radius count + Phase 5 macro joins.
+
+    Args:
+        df: panel rows.
+        top_n_table: from spatial.nearest top-N.
+        summary_table: from spatial.nearest summary (radius count).
+        traffic_daily: from clean.traffic.
+        cash_rate: from fetch.cash_rate (monthly RBA F1.1). Optional —
+            forward-filled to daily. None → `ctx_cash_rate` is null.
+        asx200: from fetch.asx200 (daily yfinance ^AXJO). Optional —
+            None → `ctx_asx200_lag_1` is null.
+        inflation_expectations: from fetch.inflation_expectations
+            (quarterly RBA G3 GCONEXP). Optional — forward-filled to
+            daily; lagged 7. None → column is null. Substitution for
+            ANZ-Roy Morgan Consumer Confidence per spec §5.2 / §7.4.
+    """
     out = df.copy()
 
     # Pivot top-N table to wide: per station, rank-1..3 distance + counter_id.
@@ -439,12 +491,62 @@ def add_context_features(
             if col.startswith("ctx_traffic_"):
                 out.loc[too_far, col] = pd.NA
 
-    # Phase 5 placeholders.
-    out["ctx_consumer_confidence_lag_7"] = pd.NA
-    out["ctx_asx200_lag_1"] = pd.NA
-    out["ctx_cash_rate"] = pd.NA
+    # Phase 5 macro features. Each is None-tolerant: if the upstream
+    # parquet wasn't fetched, the column ships as null and LightGBM
+    # handles natively.
+    out = _add_macro_feature(
+        out,
+        macro=cash_rate,
+        value_col="cash_rate",
+        feature_col="ctx_cash_rate",
+        lag_days=0,  # forward-fill the latest published value
+    )
+    out = _add_macro_feature(
+        out,
+        macro=asx200,
+        value_col="close",
+        feature_col="ctx_asx200_lag_1",
+        lag_days=1,  # yesterday's close
+    )
+    out = _add_macro_feature(
+        out,
+        macro=inflation_expectations,
+        value_col="inflation_expectations",
+        feature_col="ctx_inflation_expectations_lag_7",
+        lag_days=7,
+    )
 
     return out
+
+
+def _add_macro_feature(
+    df: pd.DataFrame,
+    *,
+    macro: pd.DataFrame | None,
+    value_col: str,
+    feature_col: str,
+    lag_days: int,
+) -> pd.DataFrame:
+    """Forward-fill `macro[value_col]` to daily, lag by `lag_days`, join on date.
+
+    Adds `feature_col` to df (null when macro is None / empty).
+    """
+    out = df.copy()
+    if macro is None or macro.empty or value_col not in macro.columns:
+        out[feature_col] = pd.NA
+        return out
+
+    macro = macro.assign(date=pd.to_datetime(macro["date"]).dt.date).sort_values("date")
+    upstream_start = macro["date"].min()
+    panel_end = max(out["date"].max(), macro["date"].max())
+    full_dates = pd.date_range(upstream_start, panel_end, freq="D").date
+    series = (
+        pd.DataFrame({"date": full_dates})
+        .merge(macro[["date", value_col]], on="date", how="left")
+        .ffill()
+    )
+    series[feature_col] = series[value_col].shift(lag_days)
+    return out.merge(series[["date", feature_col]], on="date", how="left")
 
 
 # ============================================================
@@ -669,21 +771,36 @@ def make_features(
     traffic_daily: pd.DataFrame,
     weather_dir: Path | None = None,
     school_terms_path: Path | None = None,
+    aip_tgp: pd.DataFrame | None = None,
+    cash_rate: pd.DataFrame | None = None,
+    asx200: pd.DataFrame | None = None,
+    inflation_expectations: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Compose all feature blocks. Returns the full features.parquet shape."""
+    """Compose all feature blocks. Returns the full features.parquet shape.
+
+    Phase-5 inputs (`aip_tgp`, `cash_rate`, `asx200`,
+    `inflation_expectations`) are optional — when omitted, the
+    corresponding columns ship as null.
+    """
     logger.info("starting feature build: %d panel rows", len(panel))
 
     df = add_lag_features(panel)
     logger.info("after lag block: %d cols", len(df.columns))
 
-    df = add_upstream_features(df, brent=brent, audusd=audusd)
+    df = add_upstream_features(df, brent=brent, audusd=audusd, aip_tgp=aip_tgp)
     logger.info("after upstream block: %d cols", len(df.columns))
 
     df = add_calendar_features(df, school_terms_path=school_terms_path)
     logger.info("after calendar block: %d cols", len(df.columns))
 
     df = add_context_features(
-        df, top_n_table=top_n, summary_table=summary, traffic_daily=traffic_daily
+        df,
+        top_n_table=top_n,
+        summary_table=summary,
+        traffic_daily=traffic_daily,
+        cash_rate=cash_rate,
+        asx200=asx200,
+        inflation_expectations=inflation_expectations,
     )
     logger.info("after ctx block: %d cols", len(df.columns))
 
@@ -714,8 +831,17 @@ def make_features_from_paths(
     traffic_daily_path: Path | None = None,
     weather_dir: Path | None = None,
     school_terms_path: Path | None = None,
+    aip_tgp_path: Path | None = None,
+    cash_rate_path: Path | None = None,
+    asx200_path: Path | None = None,
+    inflation_expectations_path: Path | None = None,
 ) -> None:
-    """File-IO convenience wrapper around `make_features`."""
+    """File-IO convenience wrapper around `make_features`.
+
+    Phase-5 paths are optional — missing files become null feature
+    columns rather than fatal errors, so feature builds work
+    incrementally as upstream fetchers come online.
+    """
     raw = config.DATA_RAW
     interim = config.DATA_INTERIM
     brent_path = brent_path or raw / "brent.parquet"
@@ -726,6 +852,12 @@ def make_features_from_paths(
     traffic_daily_path = traffic_daily_path or interim / "traffic_daily.parquet"
     weather_dir = weather_dir or raw / "weather"
     school_terms_path = school_terms_path or config.DATA_STATIC / "nsw_school_terms.csv"
+    aip_tgp_path = aip_tgp_path or raw / "aip_tgp.parquet"
+    cash_rate_path = cash_rate_path or raw / "cash_rate.parquet"
+    asx200_path = asx200_path or raw / "asx200.parquet"
+    inflation_expectations_path = (
+        inflation_expectations_path or raw / "inflation_expectations.parquet"
+    )
 
     panel = pd.read_parquet(panel_path)
     brent = pd.read_parquet(brent_path)
@@ -735,6 +867,14 @@ def make_features_from_paths(
     summary = pd.read_parquet(summary_path)
     traffic_daily = (
         pd.read_parquet(traffic_daily_path) if traffic_daily_path.exists() else pd.DataFrame()
+    )
+    aip_tgp = pd.read_parquet(aip_tgp_path) if aip_tgp_path.exists() else None
+    cash_rate = pd.read_parquet(cash_rate_path) if cash_rate_path.exists() else None
+    asx200 = pd.read_parquet(asx200_path) if asx200_path.exists() else None
+    inflation_expectations = (
+        pd.read_parquet(inflation_expectations_path)
+        if inflation_expectations_path.exists()
+        else None
     )
 
     features = make_features(
@@ -747,6 +887,10 @@ def make_features_from_paths(
         traffic_daily=traffic_daily,
         weather_dir=weather_dir,
         school_terms_path=school_terms_path,
+        aip_tgp=aip_tgp,
+        cash_rate=cash_rate,
+        asx200=asx200,
+        inflation_expectations=inflation_expectations,
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)

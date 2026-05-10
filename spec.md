@@ -610,9 +610,8 @@ Each phase produces a runnable artefact and a testable outcome. Designed for seq
 - Acceptance: `data/interim/stations.parquet` and `data/interim/fuel_daily.parquet` exist with the schemas in §6
 
 ### Phase 3 — Census enrichment (1 session)
-- `build.enrich_census` — wrapper around `abs-census-augmentor`'s spatial-join + enrichment path (uses pre-resolved lat/lon from Phase 2). Ships the 4 unambiguous columns: `sa2_median_age`, `sa2_median_household_income_weekly`, `sa2_total_population`, plus `sa2_code` / `sa2_name`.
-- `fetch.seifa` — auto-download ABS SEIFA 2021 SA2 IRSD scores; cache to `data/raw/seifa_2021_sa2.parquet`. Joined into stations during enrichment to add `sa2_seifa_irsd_score`.
-- 6 DERIVED percentages (§7.7.1) stubbed with nulls + `TODO(spec)` markers. Filled in later, EDA-driven.
+- `build.enrich_census` — wrapper around `abs-census-augmentor`'s spatial-join + enrichment path (uses pre-resolved lat/lon from Phase 2). Ships the 4 unambiguous columns: `sa2_median_age`, `sa2_median_household_income_weekly`, `sa2_total_population`, plus `sa2_code` / `sa2_name`. SEIFA `sa2_seifa_irsd_score` is joined via the augmentor's native `SeifaDataSource` (v1.3+; previously a local `fetch.seifa` module — removed once upstream landed [abs-census-augmentor#10](https://github.com/cauldnz/abs-census-augmentor/issues/10)).
+- 6 DERIVED percentages (§7.7.1) stubbed with nulls + `TODO(spec)` markers. Filled in later, either EDA-driven or via the augmentor's native PRESETs (gated on [abs-census-augmentor#19](https://github.com/cauldnz/abs-census-augmentor/issues/19) — wheel-packaging fix needed before downstream can use the registered specs).
 - Acceptance: `data/interim/stations.parquet` has the 4 ship-now `sa2_*` columns + `sa2_code` / `sa2_name` populated for ≥ 95% of stations. The 6 deferred columns exist but are null.
 
 ### Phase 4 — Feature build (1 session)

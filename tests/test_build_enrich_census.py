@@ -84,18 +84,28 @@ def stations_in(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def seifa_path(tmp_path: Path) -> Path:
-    """A tiny SEIFA parquet — only the irsd columns needed by the join."""
-    df = pd.DataFrame(
-        [
-            {"sa2_code": "117011635", "irsd_score": 1098, "sa2_name": "Mascot"},
-            {"sa2_code": "122021422", "irsd_score": 1102, "sa2_name": "Newport"},
-            {"sa2_code": "999999999", "irsd_score": 999, "sa2_name": "Unused"},
-        ]
-    )
-    p = tmp_path / "seifa.parquet"
-    df.to_parquet(p, engine="pyarrow", compression="zstd", index=False)
-    return p
+def seifa_loader():
+    """A test seam returning a synthetic SEIFA frame in the augmentor's
+    native shape (indexed by `sa2_code_2021`).
+    """
+    def _loader() -> pd.DataFrame:
+        df = pd.DataFrame(
+            {
+                "sa2_code_2021": ["117011635", "122021422", "999999999"],
+                "irsd_score": [1098.0, 1102.0, 999.0],
+                "irsd_aus_decile": [9.0, 10.0, 5.0],
+            }
+        ).set_index("sa2_code_2021")
+        return df
+
+    return _loader
+
+
+@pytest.fixture
+def seifa_cache_dir(tmp_path: Path) -> Path:
+    """Cache dir; not actually written to in tests because seifa_loader
+    short-circuits the SeifaDataSource construction."""
+    return tmp_path / "seifa_cache"
 
 
 @pytest.fixture
@@ -121,14 +131,16 @@ def lookup() -> dict[tuple[float, float], dict[str, object]]:
 def test_writes_full_schema(
     tmp_path: Path,
     stations_in: Path,
-    seifa_path: Path,
+    seifa_cache_dir: Path,
+    seifa_loader,
     lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
     out = tmp_path / "stations_out.parquet"
     ec.enrich(
         stations_in,
         out,
-        seifa_path=seifa_path,
+        seifa_cache_dir=seifa_cache_dir,
+        seifa_loader=seifa_loader,
         pipeline_factory=_make_stub_factory(lookup),
     )
 
@@ -145,14 +157,16 @@ def test_writes_full_schema(
 def test_seifa_irsd_joins_correctly(
     tmp_path: Path,
     stations_in: Path,
-    seifa_path: Path,
+    seifa_cache_dir: Path,
+    seifa_loader,
     lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
     out = tmp_path / "stations_out.parquet"
     ec.enrich(
         stations_in,
         out,
-        seifa_path=seifa_path,
+        seifa_cache_dir=seifa_cache_dir,
+        seifa_loader=seifa_loader,
         pipeline_factory=_make_stub_factory(lookup),
     )
     df = pd.read_parquet(out)
@@ -164,7 +178,8 @@ def test_seifa_irsd_joins_correctly(
 def test_six_derived_columns_are_null_stubs(
     tmp_path: Path,
     stations_in: Path,
-    seifa_path: Path,
+    seifa_cache_dir: Path,
+    seifa_loader,
     lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
     """Per spec §7.7.1, the 6 derived percentages exist but are null in v1."""
@@ -172,7 +187,8 @@ def test_six_derived_columns_are_null_stubs(
     ec.enrich(
         stations_in,
         out,
-        seifa_path=seifa_path,
+        seifa_cache_dir=seifa_cache_dir,
+        seifa_loader=seifa_loader,
         pipeline_factory=_make_stub_factory(lookup),
     )
     df = pd.read_parquet(out)
@@ -182,7 +198,10 @@ def test_six_derived_columns_are_null_stubs(
 
 
 def test_idempotent_skip_when_already_enriched(
-    tmp_path: Path, seifa_path: Path, lookup: dict[tuple[float, float], dict[str, object]]
+    tmp_path: Path,
+    seifa_cache_dir: Path,
+    seifa_loader,
+    lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
     """Re-running on a fully-enriched file should not call the augmentor."""
     df = pd.DataFrame(
@@ -204,13 +223,21 @@ def test_idempotent_skip_when_already_enriched(
     df.to_parquet(p, engine="pyarrow", compression="zstd", index=False)
 
     stub = _StubPipeline(lookup)
-    ec.enrich(p, p, seifa_path=seifa_path, pipeline_factory=lambda: stub)
+    ec.enrich(
+        p, p,
+        seifa_cache_dir=seifa_cache_dir,
+        seifa_loader=seifa_loader,
+        pipeline_factory=lambda: stub,
+    )
 
     assert stub.calls == []  # augmentor not invoked
 
 
 def test_force_re_enriches_every_row(
-    tmp_path: Path, seifa_path: Path, lookup: dict[tuple[float, float], dict[str, object]]
+    tmp_path: Path,
+    seifa_cache_dir: Path,
+    seifa_loader,
+    lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
     df = pd.DataFrame(
         [
@@ -228,7 +255,13 @@ def test_force_re_enriches_every_row(
     df.to_parquet(p, engine="pyarrow", compression="zstd", index=False)
 
     stub = _StubPipeline(lookup)
-    ec.enrich(p, p, seifa_path=seifa_path, pipeline_factory=lambda: stub, force=True)
+    ec.enrich(
+        p, p,
+        seifa_cache_dir=seifa_cache_dir,
+        seifa_loader=seifa_loader,
+        pipeline_factory=lambda: stub,
+        force=True,
+    )
 
     out = pd.read_parquet(p)
     assert out["sa2_code"].iloc[0] == "117011635"
@@ -236,7 +269,10 @@ def test_force_re_enriches_every_row(
 
 
 def test_partial_enrichment_only_processes_unseen_rows(
-    tmp_path: Path, seifa_path: Path, lookup: dict[tuple[float, float], dict[str, object]]
+    tmp_path: Path,
+    seifa_cache_dir: Path,
+    seifa_loader,
+    lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
     """One row already has sa2_code → only the other gets sent to the augmentor."""
     df = pd.DataFrame(
@@ -261,46 +297,66 @@ def test_partial_enrichment_only_processes_unseen_rows(
     df.to_parquet(p, engine="pyarrow", compression="zstd", index=False)
 
     stub = _StubPipeline(lookup)
-    ec.enrich(p, p, seifa_path=seifa_path, pipeline_factory=lambda: stub)
+    ec.enrich(
+        p, p,
+        seifa_cache_dir=seifa_cache_dir,
+        seifa_loader=seifa_loader,
+        pipeline_factory=lambda: stub,
+    )
 
     # The augmentor only saw s2.
     assert len(stub.calls) == 1
     assert list(stub.calls[0]["station_id"]) == ["s2"]
 
 
-def test_missing_lat_lon_raises(tmp_path: Path, seifa_path: Path) -> None:
+def test_missing_lat_lon_raises(
+    tmp_path: Path, seifa_cache_dir: Path, seifa_loader
+) -> None:
     df = pd.DataFrame([{"station_id": "s1", "name": "X"}])
     p = tmp_path / "stations.parquet"
     df.to_parquet(p, engine="pyarrow", compression="zstd", index=False)
 
     with pytest.raises(RuntimeError, match="lat/lon"):
-        ec.enrich(p, p, seifa_path=seifa_path, pipeline_factory=lambda: _StubPipeline({}))
+        ec.enrich(
+            p, p,
+            seifa_cache_dir=seifa_cache_dir,
+            seifa_loader=seifa_loader,
+            pipeline_factory=lambda: _StubPipeline({}),
+        )
 
 
-def test_seifa_missing_logs_warning_and_keeps_irsd_null(
+def test_seifa_loader_failure_logs_warning_and_keeps_irsd_null(
     tmp_path: Path,
     stations_in: Path,
+    seifa_cache_dir: Path,
     lookup: dict[tuple[float, float], dict[str, object]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """If the augmentor's SEIFA fetch raises (e.g. ABS down), degrade gracefully."""
     out = tmp_path / "stations_out.parquet"
-    seifa_missing = tmp_path / "seifa_does_not_exist.parquet"
+
+    def failing_loader() -> pd.DataFrame:
+        raise RuntimeError("ABS unreachable")
 
     with caplog.at_level("WARNING", logger="fuel_pred.build.enrich_census"):
         ec.enrich(
             stations_in,
             out,
-            seifa_path=seifa_missing,
+            seifa_cache_dir=seifa_cache_dir,
+            seifa_loader=failing_loader,
             pipeline_factory=_make_stub_factory(lookup),
         )
 
     df = pd.read_parquet(out)
     assert df["sa2_seifa_irsd_score"].isna().all()
-    assert any("SEIFA parquet missing" in rec.message for rec in caplog.records)
+    assert any("SEIFA fetch via augmentor failed" in rec.message for rec in caplog.records)
 
 
 def test_acceptance_warns_below_95_percent(
-    tmp_path: Path, seifa_path: Path, lookup: dict[tuple[float, float], dict[str, object]],
+    tmp_path: Path,
+    seifa_cache_dir: Path,
+    seifa_loader,
+    lookup: dict[tuple[float, float], dict[str, object]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Spec gate: log a clear warning if any required column < 95% coverage."""
@@ -316,7 +372,12 @@ def test_acceptance_warns_below_95_percent(
     df.to_parquet(p, engine="pyarrow", compression="zstd", index=False)
 
     with caplog.at_level("WARNING", logger="fuel_pred.build.enrich_census"):
-        ec.enrich(p, p, seifa_path=seifa_path, pipeline_factory=_make_stub_factory(lookup))
+        ec.enrich(
+            p, p,
+            seifa_cache_dir=seifa_cache_dir,
+            seifa_loader=seifa_loader,
+            pipeline_factory=_make_stub_factory(lookup),
+        )
 
     # 1 of 3 enriched = 33%; well below 95%.
     assert any("threshold" in rec.message and "not met" in rec.message for rec in caplog.records)
@@ -325,13 +386,15 @@ def test_acceptance_warns_below_95_percent(
 def test_in_place_overwrite_is_atomic(
     tmp_path: Path,
     stations_in: Path,
-    seifa_path: Path,
+    seifa_cache_dir: Path,
+    seifa_loader,
     lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
     ec.enrich(
         stations_in,
         stations_in,
-        seifa_path=seifa_path,
+        seifa_cache_dir=seifa_cache_dir,
+        seifa_loader=seifa_loader,
         pipeline_factory=_make_stub_factory(lookup),
     )
     df = pd.read_parquet(stations_in)

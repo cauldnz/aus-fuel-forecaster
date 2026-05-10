@@ -2,7 +2,8 @@
 
 Reads:
 - ``data/interim/stations.parquet`` (post Phase 2 — has lat/lon)
-- ``data/raw/seifa_2021_sa2.parquet`` (from fetch.seifa)
+- SEIFA: lazy-fetched via the augmentor's ``SeifaDataSource``
+  (``data/raw/seifa/`` cache; ABS Census-tied, refreshed every 5 years)
 
 Writes (overwrites in place):
 - ``data/interim/stations.parquet`` with the §6.1 SA2 columns +
@@ -13,12 +14,15 @@ Pipeline:
    longitude_column='lon')`` — uses pre-resolved coordinates so no G-NAF
    or Nominatim is hit. Augmentor does the SA2 spatial join + variable
    lookup against the GCP DataPack.
-2. Join SEIFA on ``sa2_code`` to add ``sa2_seifa_irsd_score``.
+2. Fetch SEIFA via ``census_augment.datasets.SeifaDataSource``
+   (upstream v1.3+ native support, replacing our local fetch.seifa). Join
+   on ``sa2_code`` to add ``sa2_seifa_irsd_score``.
 3. Stub the 6 deferred derived percentages with nulls (per spec §7.7.1).
 
 Phase 3 v1 ships 4 ``sa2_*`` columns; the 6 derived ratios stay null
-until either the EDA notebook surfaces priorities or augmentor #11
-ships native derived-variable support. See spec.md §7.7.1.
+pending augmentor PRESETs (gated on
+https://github.com/cauldnz/abs-census-augmentor/issues/19). See
+spec.md §7.7.1.
 
 Spec: spec.md §6.1, §7.7, §12 Phase 3.
 """
@@ -100,28 +104,77 @@ def _augment(stations: pd.DataFrame, *, pipeline_factory: object | None = None) 
     return result.df  # type: ignore[no-any-return]
 
 
-def _join_seifa(stations: pd.DataFrame, seifa_path: Path) -> pd.DataFrame:
-    """Add `sa2_seifa_irsd_score` by joining the SEIFA parquet on sa2_code."""
-    if not seifa_path.exists():
-        logger.warning("SEIFA parquet missing at %s — sa2_seifa_irsd_score stays null", seifa_path)
-        return stations
+def _load_seifa(seifa_cache_dir: Path, seifa_loader: object | None = None) -> pd.DataFrame:
+    """Fetch + parse SEIFA via the augmentor's native SeifaDataSource.
 
-    seifa = pd.read_parquet(seifa_path)[["sa2_code", "irsd_score"]].rename(
-        columns={"irsd_score": "sa2_seifa_irsd_score"}
-    )
-    seifa["sa2_code"] = seifa["sa2_code"].astype(str)
+    Returns a DataFrame indexed by `sa2_code_2021` (string, 9-digit) with
+    one column per index/flavour (irsd_score, irsd_aus_decile, etc).
 
+    `seifa_loader` is a test seam — when provided, it's called instead
+    of constructing a real SeifaDataSource. Returns a DataFrame.
+    """
+    if seifa_loader is not None:
+        return seifa_loader()  # type: ignore[operator,no-any-return]
+
+    # SeifaDataSource is exposed under the private `_seifa` submodule in
+    # v1.3.0 (the public `census_augment.datasets` namespace ships only
+    # `Registry`, `DatasetSpec`, etc — see augmentor #19).
+    from census_augment.datasets._seifa import SeifaDataSource
+
+    seifa_cache_dir.mkdir(parents=True, exist_ok=True)
+    ds = SeifaDataSource(root=seifa_cache_dir)
+    return ds.load()
+
+
+def _join_seifa(
+    stations: pd.DataFrame,
+    seifa_cache_dir: Path,
+    *,
+    seifa_loader: object | None = None,
+) -> pd.DataFrame:
+    """Add `sa2_seifa_irsd_score` by joining augmentor SEIFA on sa2_code.
+
+    The augmentor's SEIFA frame is indexed by `sa2_code_2021` (string)
+    and exposes 46 columns (4 indexes x score+ranks+deciles+percentiles
+    + state breakdowns + suppression indicators). For Phase 3 v1 we lift
+    only `irsd_score` into `sa2_seifa_irsd_score` per spec §7.7; the
+    additional richness lands as a follow-up.
+    """
     out = stations.copy()
     if "sa2_code" not in out.columns:
         logger.warning("stations have no sa2_code yet — skipping SEIFA join")
         return out
+
+    try:
+        seifa = _load_seifa(seifa_cache_dir, seifa_loader=seifa_loader)
+    except Exception as exc:
+        logger.warning(
+            "SEIFA fetch via augmentor failed (%s: %s) — sa2_seifa_irsd_score stays null",
+            type(exc).__name__,
+            exc,
+        )
+        return out
+
+    if "irsd_score" not in seifa.columns:
+        logger.warning(
+            "augmentor SEIFA frame missing `irsd_score` (cols=%s) — skipping join",
+            list(seifa.columns)[:10],
+        )
+        return out
+
+    seifa_lookup = (
+        seifa.reset_index()
+        .rename(columns={"sa2_code_2021": "sa2_code", "irsd_score": "sa2_seifa_irsd_score"})
+        [["sa2_code", "sa2_seifa_irsd_score"]]
+    )
+    seifa_lookup["sa2_code"] = seifa_lookup["sa2_code"].astype(str)
     out["sa2_code"] = out["sa2_code"].astype(str)
 
-    # If the column already exists from _ensure_columns_exist, drop the
-    # null version so the merge brings in fresh values.
+    # Drop the null stub column added by `_ensure_columns_exist` so the
+    # merge brings in fresh values rather than producing _x / _y suffixes.
     if "sa2_seifa_irsd_score" in out.columns:
         out = out.drop(columns=["sa2_seifa_irsd_score"])
-    return out.merge(seifa, on="sa2_code", how="left")
+    return out.merge(seifa_lookup, on="sa2_code", how="left")
 
 
 def _check_acceptance(stations: pd.DataFrame, threshold: float = 0.95) -> None:
@@ -158,20 +211,24 @@ def enrich(
     stations_path: Path,
     out_path: Path,
     *,
-    seifa_path: Path | None = None,
+    seifa_cache_dir: Path | None = None,
     force: bool = False,
     pipeline_factory: object | None = None,
+    seifa_loader: object | None = None,
 ) -> None:
     """Add SA2 + Census + SEIFA columns to ``stations.parquet``.
 
     Args:
         stations_path: input stations parquet (post Phase 2 — needs lat/lon).
         out_path: output parquet (in-place safe; written atomically via .tmp).
-        seifa_path: SEIFA parquet (default ``data/raw/seifa_2021_sa2.parquet``).
+        seifa_cache_dir: where SeifaDataSource caches the downloaded ABS
+            workbook (~150 KB, refreshed on a 5-year Census cycle).
+            Defaults to ``data/raw/seifa/``.
         force: if True, re-enrich every row even if `sa2_code` is populated.
         pipeline_factory: test seam — replaces the real augmentor pipeline.
+        seifa_loader: test seam — replaces SeifaDataSource construction.
     """
-    seifa_path = seifa_path or (config.DATA_RAW / "seifa_2021_sa2.parquet")
+    seifa_cache_dir = seifa_cache_dir or (config.DATA_RAW / "seifa")
 
     stations = pd.read_parquet(stations_path)
     stations = _ensure_columns_exist(stations)
@@ -219,7 +276,7 @@ def enrich(
                     stations.loc[original_index, col] = augmented.loc[original_index, col].values
 
     # SEIFA join always runs against the latest sa2_code values.
-    stations = _join_seifa(stations, seifa_path)
+    stations = _join_seifa(stations, seifa_cache_dir, seifa_loader=seifa_loader)
     # Re-add stub columns that the merge may have stripped.
     for col in DEFERRED_DERIVED_COLUMNS:
         if col not in stations.columns:
@@ -238,11 +295,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--in", dest="in_path", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
-    parser.add_argument("--seifa", type=Path, default=None)
+    parser.add_argument(
+        "--seifa-cache",
+        type=Path,
+        default=None,
+        help="Cache dir for the augmentor's SeifaDataSource (default: data/raw/seifa)",
+    )
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    enrich(args.in_path, args.out, seifa_path=args.seifa, force=args.force)
+    enrich(args.in_path, args.out, seifa_cache_dir=args.seifa_cache, force=args.force)
 
 
 if __name__ == "__main__":

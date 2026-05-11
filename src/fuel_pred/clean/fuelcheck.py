@@ -30,6 +30,7 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict, cast
 
 import pandas as pd
 
@@ -158,7 +159,10 @@ def _parse_price_date(series: pd.Series) -> pd.Series:
 
 
 def _process_month(
-    path: Path, brand_map: dict[str, BrandInfo], unmapped: set[str]
+    path: Path,
+    brand_map: dict[str, BrandInfo],
+    unmapped: set[str],
+    miss_stats: dict[str, _BrandMissEntry] | None = None,
 ) -> pd.DataFrame:
     """Load one monthly Parquet, normalise, return a long-form rows frame.
 
@@ -166,6 +170,11 @@ def _process_month(
     brand_raw, brand_canonical, brand_is_major, fuel_code, date, price``.
     Both raw and canonical brand are preserved — see CLAUDE.md memory
     "Preserve raw alongside normalised". One row per FuelCheck event.
+
+    ``miss_stats`` is an optional accumulator for the per-month brand-miss
+    sidecar (see ``_record_brand_misses``); when provided, this function
+    appends per-raw-brand stats (occurrence count, distinct station ids,
+    sample address/suburb) so ``clean()`` can dump a structured CSV.
     """
     raw = pd.read_parquet(path)
     df = _normalise_columns(raw)
@@ -193,6 +202,13 @@ def _process_month(
     df["date"] = _parse_price_date(df["price_updated_date"])
     df = df[df["date"].notna()].copy()
 
+    if miss_stats is not None and unmapped:
+        # Restrict to rows whose raw brand is unmapped — note we filter on
+        # the `unmapped` set rather than `brand_canonical == brand_raw`,
+        # because legitimately-mapped brands can also have canonical == raw
+        # (e.g. "BP" maps to "BP").
+        _record_brand_misses(df, unmapped, miss_stats, source_file=path.name)
+
     out_cols = [
         "station_id",
         "name",
@@ -207,6 +223,89 @@ def _process_month(
         "price",
     ]
     return df[out_cols]
+
+
+class _BrandMissEntry(TypedDict):
+    """Per-raw-brand stats accumulated by ``_record_brand_misses``."""
+
+    n_occurrences: int
+    stations: set[str]
+    sample_name: str
+    sample_address: str
+    sample_suburb: str
+    first_seen_in: str
+
+
+def _record_brand_misses(
+    df: pd.DataFrame,
+    unmapped: set[str],
+    miss_stats: dict[str, _BrandMissEntry],
+    *,
+    source_file: str,
+) -> None:
+    """Accumulate per-raw-brand stats for the brand-miss CSV sidecar.
+
+    Tracks: total occurrence count, distinct station_ids, sample
+    address/suburb/name (the first one we see is good enough — the goal
+    is to give a human enough to identify the brand and add it to
+    `data/static/brand_aliases.csv`), and the first source file the
+    brand appeared in.
+    """
+    miss_rows = df[df["brand_raw"].isin(unmapped)]
+    if miss_rows.empty:
+        return
+    # `brand_raw` is normalised to str earlier in `_process_month` so
+    # `groupby` keys are always str at runtime; cast for mypy.
+    for raw_key, group in miss_rows.groupby("brand_raw"):
+        raw = cast(str, raw_key)
+        if raw not in miss_stats:
+            first = group.iloc[0]
+            miss_stats[raw] = _BrandMissEntry(
+                n_occurrences=0,
+                stations=set(),
+                sample_name=str(first["name"]),
+                sample_address=str(first["address"]),
+                sample_suburb=str(first["suburb"]),
+                first_seen_in=source_file,
+            )
+        entry = miss_stats[raw]
+        entry["n_occurrences"] += len(group)
+        entry["stations"].update(group["station_id"].tolist())
+
+
+def _write_brand_misses_csv(
+    miss_stats: dict[str, _BrandMissEntry], out_path: Path
+) -> None:
+    """Persist the unmapped-brand sidecar to ``out_path`` (CSV, sorted desc by count).
+
+    Schema: raw_brand, n_occurrences, n_stations, sample_name,
+    sample_address, sample_suburb, first_seen_in. Designed to be
+    consumable both by humans curating ``brand_aliases.csv`` and by
+    automated tools that want to suggest canonical mappings.
+    """
+    if not miss_stats:
+        # Don't leave a stale file from a previous run.
+        if out_path.exists():
+            out_path.unlink()
+        return
+
+    rows = [
+        {
+            "raw_brand": raw,
+            "n_occurrences": entry["n_occurrences"],
+            "n_stations": len(entry["stations"]),
+            "sample_name": entry["sample_name"],
+            "sample_address": entry["sample_address"],
+            "sample_suburb": entry["sample_suburb"],
+            "first_seen_in": entry["first_seen_in"],
+        }
+        for raw, entry in miss_stats.items()
+    ]
+    df = pd.DataFrame(rows).sort_values(
+        ["n_occurrences", "raw_brand"], ascending=[False, True]
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=False)
 
 
 def _aggregate_daily(events: pd.DataFrame) -> pd.DataFrame:
@@ -246,6 +345,7 @@ def clean(
     *,
     brand_aliases: Path | None = None,
     fuels: tuple[str, ...] = config.FUELS_V1,
+    brand_misses_out: Path | None = None,
 ) -> None:
     """Aggregate monthly raw Parquets to daily fuel-prices + station roster.
 
@@ -257,6 +357,10 @@ def clean(
             to the in-repo location.
         fuels: tuple of FuelCode strings to keep. Defaults to U91 + DL —
             U91 is the forecast target, DL is kept as a candidate feature.
+        brand_misses_out: where to write the brand-miss sidecar CSV
+            (one row per unmapped raw_brand, sorted by occurrence count).
+            Defaults to ``data/interim/brand_misses.csv``. Designed for
+            curating new entries into ``brand_aliases.csv``.
     """
     aliases_path = brand_aliases or (config.DATA_STATIC / "brand_aliases.csv")
     brand_map = load_brand_aliases(aliases_path)
@@ -267,12 +371,13 @@ def clean(
         raise RuntimeError(f"no monthly parquets found in {in_dir}")
 
     unmapped: set[str] = set()
+    miss_stats: dict[str, _BrandMissEntry] = {}
     daily_chunks: list[pd.DataFrame] = []
     roster_chunks: list[pd.DataFrame] = []
 
     for batch in _batched(monthly_paths, MONTHLY_CHUNK):
         events = pd.concat(
-            (_process_month(p, brand_map, unmapped) for p in batch),
+            (_process_month(p, brand_map, unmapped, miss_stats) for p in batch),
             ignore_index=True,
         )
         if events.empty:
@@ -334,13 +439,18 @@ def clean(
     roster.to_parquet(stations_out, engine="pyarrow", compression="zstd", index=False)
     logger.info("wrote %d stations to %s", len(roster), stations_out)
 
+    misses_path = brand_misses_out or (config.DATA_INTERIM / "brand_misses.csv")
+    _write_brand_misses_csv(miss_stats, misses_path)
     if unmapped:
         sample = sorted(unmapped)[:20]
         logger.warning(
-            "%d brand strings unmapped — append to brand_aliases.csv. Sample: %s",
+            "%d brand strings unmapped — sidecar written to %s. Sample: %s",
             len(unmapped),
+            misses_path,
             sample,
         )
+    else:
+        logger.info("all brand strings mapped — no sidecar needed")
 
 
 def _batched(items: list[Path], size: int) -> Iterator[list[Path]]:
@@ -354,9 +464,22 @@ def main() -> None:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--stations-out", required=True, type=Path)
     parser.add_argument("--brand-aliases", type=Path, default=None)
+    parser.add_argument(
+        "--brand-misses-out",
+        type=Path,
+        default=None,
+        help="Where to write the unmapped-brand sidecar CSV "
+        "(default: data/interim/brand_misses.csv)",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    clean(args.in_dir, args.out, args.stations_out, brand_aliases=args.brand_aliases)
+    clean(
+        args.in_dir,
+        args.out,
+        args.stations_out,
+        brand_aliases=args.brand_aliases,
+        brand_misses_out=args.brand_misses_out,
+    )
 
 
 if __name__ == "__main__":

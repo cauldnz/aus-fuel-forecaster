@@ -362,6 +362,87 @@ def test_falls_back_to_nominatim_when_gnaf_warmup_fails(
     assert any("G-NAF init failed" in rec.message for rec in caplog.records)
 
 
+# ----------------------------- progress logging -----------------------------
+
+
+def test_format_eta_seconds_only() -> None:
+    assert ra._format_eta(45) == "45s"
+
+
+def test_format_eta_minutes_and_seconds() -> None:
+    assert ra._format_eta(125) == "2m 5s"
+
+
+def test_format_eta_hours_minutes_seconds() -> None:
+    assert ra._format_eta(3 * 3600 + 12 * 60 + 8) == "3h 12m 8s"
+
+
+def test_format_eta_handles_zero_or_negative() -> None:
+    assert ra._format_eta(0) == "?"
+    assert ra._format_eta(-1) == "?"
+
+
+def test_progress_logger_emits_at_count_threshold(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Reaching PROGRESS_LOG_INTERVAL_COUNT items triggers a log even
+    if the time threshold hasn't elapsed."""
+    progress = ra._ProgressLogger(total=1000)
+    with caplog.at_level("INFO", logger="fuel_pred.spatial.resolve_addrs"):
+        # Below threshold — silent.
+        for i in range(1, ra.PROGRESS_LOG_INTERVAL_COUNT):
+            progress.maybe_emit(i, gnaf_hits=i, nominatim_hits=0, failures=0)
+        assert not any("geocoding progress" in r.message for r in caplog.records)
+        # Hit the threshold — one log.
+        progress.maybe_emit(
+            ra.PROGRESS_LOG_INTERVAL_COUNT,
+            gnaf_hits=ra.PROGRESS_LOG_INTERVAL_COUNT,
+            nominatim_hits=0,
+            failures=0,
+        )
+    progress_msgs = [r for r in caplog.records if "geocoding progress" in r.message]
+    assert len(progress_msgs) == 1
+    msg = progress_msgs[0].message
+    assert f"{ra.PROGRESS_LOG_INTERVAL_COUNT}/1000" in msg
+    assert "gnaf=" in msg and "eta " in msg
+
+
+def test_progress_logger_emits_at_time_threshold(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A slow run that hasn't hit the count threshold still gets a log
+    once the time threshold elapses."""
+    fake_now = [1000.0]
+    monkeypatch.setattr(ra.time, "monotonic", lambda: fake_now[0])
+
+    progress = ra._ProgressLogger(total=1000)
+    with caplog.at_level("INFO", logger="fuel_pred.spatial.resolve_addrs"):
+        # Process just 5 items but advance the clock past the time threshold.
+        progress.maybe_emit(5, gnaf_hits=5, nominatim_hits=0, failures=0)
+        assert not any("geocoding progress" in r.message for r in caplog.records)
+        fake_now[0] += ra.PROGRESS_LOG_INTERVAL_SECONDS + 0.1
+        progress.maybe_emit(6, gnaf_hits=6, nominatim_hits=0, failures=0)
+
+    progress_msgs = [r for r in caplog.records if "geocoding progress" in r.message]
+    assert len(progress_msgs) == 1
+    assert "6/1000" in progress_msgs[0].message
+
+
+def test_progress_logger_silent_below_both_thresholds(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No log emitted while both count and time deltas are sub-threshold."""
+    fake_now = [0.0]
+    monkeypatch.setattr(ra.time, "monotonic", lambda: fake_now[0])
+
+    progress = ra._ProgressLogger(total=10000)
+    with caplog.at_level("INFO", logger="fuel_pred.spatial.resolve_addrs"):
+        for i in range(1, 50):  # well under PROGRESS_LOG_INTERVAL_COUNT
+            fake_now[0] += 0.01  # 0.01s/iter → well under PROGRESS_LOG_INTERVAL_SECONDS
+            progress.maybe_emit(i, gnaf_hits=i, nominatim_hits=0, failures=0)
+    assert not any("geocoding progress" in r.message for r in caplog.records)
+
+
 def test_in_place_overwrite_is_atomic(tmp_path: Path, stations_in: Path) -> None:
     """If the writer crashed, no half-written parquet should overwrite the input."""
     addr_s1 = _addr("Mascot", "2020", "1 Botany Rd")

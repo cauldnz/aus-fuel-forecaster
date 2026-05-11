@@ -534,6 +534,74 @@ def test_progress_logger_silent_below_both_thresholds(
     assert not any("geocoding progress" in r.message for r in caplog.records)
 
 
+# ----------------------------- gnaf_mode threading -----------------------------
+
+
+def test_default_gnaf_mode_is_cache() -> None:
+    """The default mode is `cache` — fast queries, ~825 MB local download.
+    The augmentor's own default is also `cache`; we explicitly track it
+    here so a switch to `remote` (or any other future mode) is a
+    deliberate, reviewed change.
+    """
+    assert ra.GNAF_MODE_DEFAULT == "cache"
+
+
+def test_build_geocoders_passes_gnaf_mode_to_data_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`gnaf_mode` flows from `_build_geocoders` into GnafDataSource(mode=...)."""
+    captured: dict[str, object] = {}
+
+    class _SpyDataSource:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    class _SpyGeocoder:
+        def __init__(self, *, data_source: object) -> None:
+            self.data_source = data_source
+
+    monkeypatch.setattr(ra, "GnafDataSource", _SpyDataSource)
+    monkeypatch.setattr(ra, "GnafGeocoder", _SpyGeocoder)
+    monkeypatch.setattr(
+        ra, "NominatimGeocoder", lambda **kw: object()
+    )
+    monkeypatch.setattr(ra, "GeocodeCache", lambda **kw: object())
+
+    ra._build_geocoders(
+        cache_dir=Path("/tmp/cache"),
+        user_agent="test",
+        gnaf_mode="remote",
+    )
+    assert captured["mode"] == "remote"
+
+    captured.clear()
+    ra._build_geocoders(
+        cache_dir=Path("/tmp/cache"),
+        user_agent="test",
+        gnaf_mode="cache",
+    )
+    assert captured["mode"] == "cache"
+
+
+def test_build_geocoders_default_mode_is_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling `_build_geocoders` without `gnaf_mode` uses the module default."""
+    captured: dict[str, object] = {}
+
+    class _SpyDataSource:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(ra, "GnafDataSource", _SpyDataSource)
+    monkeypatch.setattr(ra, "GnafGeocoder", lambda *, data_source: object())
+    monkeypatch.setattr(ra, "NominatimGeocoder", lambda **kw: object())
+    monkeypatch.setattr(ra, "GeocodeCache", lambda **kw: object())
+
+    ra._build_geocoders(cache_dir=Path("/tmp/cache"), user_agent="test")
+    assert captured["mode"] == "cache"
+
+
 def test_in_place_overwrite_is_atomic(tmp_path: Path, stations_in: Path) -> None:
     """If the writer crashed, no half-written parquet should overwrite the input."""
     addr_s1 = _addr("Mascot", "2020", "1 Botany Rd")

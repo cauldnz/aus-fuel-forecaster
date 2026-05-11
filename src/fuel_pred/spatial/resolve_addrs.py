@@ -77,9 +77,14 @@ _CROSS_STREET_RE: re.Pattern[str] = re.compile(
     r"\s+(cnr|corner|c/o)\b.*?(?=,|$)", flags=re.IGNORECASE
 )
 
+# Detect a 4-digit AU postcode at the end of a string (with or without
+# a state code in front). Used to decide whether to append suburb +
+# postcode or trust what's already in the address field.
+_TRAILING_POSTCODE_RE: re.Pattern[str] = re.compile(r"\b\d{4}\s*$")
+
 
 def _clean_street(street: str) -> str:
-    """Strip cross-street annotations that break Nominatim parsing.
+    """Strip cross-street annotations that break geocoder parsing.
 
     FuelCheck addresses often include `Cnr Ross St`, `Corner of X & Y`, etc.
     These are useful for human navigation but cause Nominatim to return zero
@@ -89,34 +94,71 @@ def _clean_street(street: str) -> str:
     return _CROSS_STREET_RE.sub("", street).strip()
 
 
+def _normalise_postcode(raw: object) -> str:
+    """Coerce a postcode value to its canonical 4-digit string form.
+
+    `clean.fuelcheck` sometimes hands us postcodes that pandas typed as
+    floats during chunked CSV reads, so a perfectly normal `2776` ends
+    up serialised as the string `'2776.0'`. Strip the spurious `.0` so
+    downstream G-NAF / Nominatim queries match real AU postcodes.
+    """
+    if raw is None:
+        return ""
+    s = str(raw).strip()
+    if not s:
+        return ""
+    if s.endswith(".0") and s[:-2].isdigit():
+        return s[:-2]
+    return s
+
+
 def _format_address(row: pd.Series) -> str:
     """Build a single address string from FuelCheck columns.
 
-    FuelCheck's `address` column is *inconsistent*: some rows are
-    street-only ("78 Great Western Hwy Cnr Ross St"), others already
-    contain the full address ("1 Braidwood Rd, GOULBURN NSW 2580").
-    Naively appending suburb/state/postcode duplicates everything in the
-    second case and produces strings Nominatim refuses to parse.
+    For ~99.9% of FuelCheck stations the `address` column already has
+    the canonical "<street>, <suburb> <state> <postcode>" form that the
+    augmentor's `parse_address()` handles cleanly — extracting locality,
+    state, and postcode into the components G-NAF Tier 2/3 need to
+    resolve. Sending anything more decorated (e.g. with `, Australia`
+    appended, or a duplicate postcode tacked on) corrupts the parser:
+    the trailing tokens get swept into `locality` and the parser leaves
+    `postcode=None` / `state=None`, killing every G-NAF tier and
+    forcing every address through the rate-limited Nominatim fallback.
 
-    Strategy: take the address column as authoritative, strip
-    cross-street annotations, then append suburb / postcode only when
-    they aren't already present (case-insensitive substring check).
-    State is left to whatever the address itself carries — many FuelCheck
-    stations sit in ACT despite being on a NSW dataset.
+    Strategy:
+    - Strip cross-street annotations (Nominatim still benefits from this
+      even when G-NAF gets a clean exact match).
+    - If the address already ends with a 4-digit postcode → return as-is.
+      Don't append anything; the parser will handle it.
+    - Only when the address is street-only (rare — about 1 in 6,000 NSW
+      stations) do we append suburb + postcode. We never append
+      "Australia": both G-NAF (AU-only by definition) and Nominatim
+      handle Australian addresses fine without the country hint when a
+      state code or postcode is present.
     """
     raw = str(row.get("address", "") or "").strip()
     cleaned = _clean_street(raw)
     suburb = str(row.get("suburb", "") or "").strip()
-    postcode = str(row.get("postcode", "") or "").strip()
+    postcode = _normalise_postcode(row.get("postcode"))
 
-    parts: list[str] = [cleaned] if cleaned else []
+    if not cleaned:
+        # Truly empty address — synthesise from the components we have.
+        parts = [p for p in (suburb, postcode) if p]
+        return ", ".join(parts)
+
+    if _TRAILING_POSTCODE_RE.search(cleaned):
+        # Already canonical — don't touch it. (Common case.)
+        return cleaned
+
+    # Street-only fallback: append suburb and postcode if not already
+    # present. Avoid the `, Australia` suffix that breaks the parser.
+    parts = [cleaned]
     lower = cleaned.lower()
     if suburb and suburb.lower() not in lower:
         parts.append(suburb)
     if postcode and postcode not in cleaned:
         parts.append(postcode)
-    parts.append("Australia")
-    return ", ".join(p for p in parts if p)
+    return ", ".join(parts)
 
 
 def _ensure_geocoded_columns(stations: pd.DataFrame) -> pd.DataFrame:

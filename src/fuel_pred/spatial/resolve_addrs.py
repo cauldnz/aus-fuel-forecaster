@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,19 @@ from fuel_pred import config
 logger = logging.getLogger(__name__)
 
 GEOCODED_COLUMNS: tuple[str, ...] = ("lat", "lon", "geocoder", "mb_code")
+
+# Progress-log cadence inside the per-station resolve loop. Hybrid trigger:
+# whichever fires first. Rationale:
+# - Time interval (10s): matches the typical "is this hung?" perception
+#   threshold. Anything slower than ~30s with no output and a human
+#   watching starts wondering. 10s gives steady reassurance without
+#   spamming the log.
+# - Count interval (250 stations): a 5,000-station NSW run on a warm
+#   cache can blast through hundreds per second; the time-based trigger
+#   would never fire. Count-based ensures fast runs still log
+#   meaningful checkpoints (~20 messages over a 5,000-row corpus).
+PROGRESS_LOG_INTERVAL_SECONDS: float = 10.0
+PROGRESS_LOG_INTERVAL_COUNT: int = 250
 
 # G-NAF parquet is published to s3://minus34.com/opendata/ (ap-southeast-2).
 # The default virtual-hosted URL `minus34.com.s3.amazonaws.com` triggers a
@@ -184,6 +198,65 @@ def _geocode_one(
     return {"lat": pd.NA, "lon": pd.NA, "geocoder": pd.NA, "mb_code": pd.NA}
 
 
+def _format_eta(seconds: float) -> str:
+    """Render a remaining-seconds duration as ``Hh Mm Ss`` (skip leading zeros)."""
+    if seconds <= 0 or seconds != seconds:  # NaN check
+        return "?"
+    total = int(seconds)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m {s}s"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+class _ProgressLogger:
+    """Hybrid time + count progress logger for the resolve loop.
+
+    ``maybe_emit()`` is called after every iteration; it logs only when
+    either ``PROGRESS_LOG_INTERVAL_COUNT`` items have elapsed since the
+    last log OR ``PROGRESS_LOG_INTERVAL_SECONDS`` have passed (whichever
+    comes first). Cheap when not emitting (two comparisons + a
+    ``time.monotonic()`` call), so safe to call inside the hot loop.
+    """
+
+    def __init__(self, total: int) -> None:
+        self.total = total
+        self.start = time.monotonic()
+        self.last_log_time = self.start
+        self.last_log_count = 0
+
+    def maybe_emit(
+        self, processed: int, gnaf_hits: int, nominatim_hits: int, failures: int
+    ) -> None:
+        now = time.monotonic()
+        if (
+            processed - self.last_log_count < PROGRESS_LOG_INTERVAL_COUNT
+            and now - self.last_log_time < PROGRESS_LOG_INTERVAL_SECONDS
+        ):
+            return
+        elapsed = now - self.start
+        rate = processed / elapsed if elapsed > 0 else 0.0
+        remaining = self.total - processed
+        eta = _format_eta(remaining / rate) if rate > 0 else "?"
+        logger.info(
+            "geocoding progress: %d/%d (%.1f%%) — gnaf=%d nominatim=%d fail=%d — "
+            "%.1f addr/s — eta %s",
+            processed,
+            self.total,
+            100 * processed / self.total if self.total else 0.0,
+            gnaf_hits,
+            nominatim_hits,
+            failures,
+            rate,
+            eta,
+        )
+        self.last_log_time = now
+        self.last_log_count = processed
+
+
 def _try_gnaf_warmup(gnaf: object) -> object | None:
     """Force G-NAF to open its remote view; return None if it can't.
 
@@ -262,11 +335,13 @@ def resolve(
     gnaf_hits = 0
     nominatim_hits = 0
     failures = 0
-    for idx in to_resolve:
+    progress = _ProgressLogger(total=len(to_resolve))
+    for processed, idx in enumerate(to_resolve, start=1):
         row = stations.loc[idx]
         address = _format_address(row)
         if not address:
             failures += 1
+            progress.maybe_emit(processed, gnaf_hits, nominatim_hits, failures)
             continue
         update = _geocode_one(address, gnaf, nominatim)
         for col, val in update.items():
@@ -280,6 +355,7 @@ def resolve(
             nominatim_hits += 1
         else:
             failures += 1
+        progress.maybe_emit(processed, gnaf_hits, nominatim_hits, failures)
 
     logger.info(
         "geocoding done: gnaf=%d nominatim=%d failures=%d",

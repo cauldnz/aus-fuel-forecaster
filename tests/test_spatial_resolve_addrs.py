@@ -67,10 +67,13 @@ def stations_in(tmp_path: Path) -> Path:
 def _addr(suburb: str, postcode: str, address: str) -> str:
     """Mirror what `_format_address` produces from FuelCheck's columns.
 
-    The street-only fixture inputs add suburb + postcode but no state — the
-    state comes from whatever the FuelCheck `address` column already carries.
+    The street-only fixture inputs (no postcode tail in the `address`
+    field) trigger the suburb + postcode appending path. No state is
+    appended (FuelCheck's address column carries it when present); no
+    `, Australia` suffix (it broke the augmentor's parser — see
+    PR for context).
     """
-    return f"{address}, {suburb}, {postcode}, Australia"
+    return f"{address}, {suburb}, {postcode}"
 
 
 def test_gnaf_resolves_all_addresses(tmp_path: Path, stations_in: Path) -> None:
@@ -248,16 +251,12 @@ def test_failure_leaves_lat_lon_null(tmp_path: Path, stations_in: Path) -> None:
     assert df["geocoder"].isna().all()
 
 
-def test_format_address_appends_missing_suburb_and_postcode() -> None:
-    """Street-only address column: suburb + postcode get appended."""
-    row = pd.Series(
-        {"address": "1 Main St ", "suburb": "Foo", "postcode": "2000", "name": "X"}
-    )
-    assert ra._format_address(row) == "1 Main St, Foo, 2000, Australia"
-
-
-def test_format_address_avoids_duplicating_suburb_and_postcode() -> None:
-    """Full-form address column: don't append suburb/postcode that's already there."""
+def test_format_address_passes_through_canonical_full_address() -> None:
+    """The 99.9% case: address already ends with a 4-digit postcode →
+    return as-is so the augmentor's `parse_address()` can extract
+    locality/state/postcode cleanly. Adding ANY decoration breaks the
+    parser (Tier 2/3 then have no postcode and silently miss).
+    """
     row = pd.Series(
         {
             "address": "1 Braidwood Rd, GOULBURN NSW 2580",
@@ -266,7 +265,31 @@ def test_format_address_avoids_duplicating_suburb_and_postcode() -> None:
             "name": "X",
         }
     )
-    assert ra._format_address(row) == "1 Braidwood Rd, GOULBURN NSW 2580, Australia"
+    assert ra._format_address(row) == "1 Braidwood Rd, GOULBURN NSW 2580"
+
+
+def test_format_address_appends_missing_suburb_and_postcode() -> None:
+    """Street-only address column: suburb + postcode appended (no `, Australia`)."""
+    row = pd.Series(
+        {"address": "1 Main St ", "suburb": "Foo", "postcode": "2000", "name": "X"}
+    )
+    # Cross-street stripping leaves the trailing space stripped too.
+    assert ra._format_address(row) == "1 Main St, Foo, 2000"
+
+
+def test_format_address_never_appends_australia_suffix() -> None:
+    """The `, Australia` suffix corrupts the augmentor's parser — it gets
+    swept into `locality` and the parser fails to extract postcode.
+    Regression guard for the bug that produced 0% G-NAF hit rate.
+    """
+    canonical = pd.Series(
+        {"address": "1 Main St, Foo NSW 2000", "suburb": "Foo", "postcode": "2000", "name": "X"}
+    )
+    street_only = pd.Series(
+        {"address": "1 Main St", "suburb": "Foo", "postcode": "2000", "name": "X"}
+    )
+    assert "Australia" not in ra._format_address(canonical)
+    assert "Australia" not in ra._format_address(street_only)
 
 
 def test_format_address_preserves_non_nsw_state_in_address_column() -> None:
@@ -291,6 +314,55 @@ def test_format_address_strips_blanks() -> None:
     assert ", , " not in out
 
 
+def test_format_address_handles_postcode_as_float_artifact() -> None:
+    """`clean.fuelcheck` sometimes emits postcodes as floats (`'2776.0'`).
+
+    The street-only path was previously appending the literal `'2776.0'`
+    to the address (since `'2776.0'` isn't a substring of an address
+    containing `2776`). Normalised postcode now lands as `'2776'`.
+    """
+    row = pd.Series(
+        {"address": "1 Main St", "suburb": "Foo", "postcode": "2776.0", "name": "X"}
+    )
+    assert ra._format_address(row) == "1 Main St, Foo, 2776"
+
+
+def test_format_address_canonical_address_with_float_postcode_passes_through() -> None:
+    """Float-postcode + canonical address → passthrough wins. The address
+    field already has the 4-digit postcode at the end; the float column
+    is ignored thanks to the trailing-postcode short-circuit.
+    """
+    row = pd.Series(
+        {
+            "address": "450 Great Western Hw, Faulconbridge NSW 2776",
+            "suburb": "Faulconbridge",
+            "postcode": "2776.0",
+            "name": "X",
+        }
+    )
+    out = ra._format_address(row)
+    assert out == "450 Great Western Hw, Faulconbridge NSW 2776"
+    assert "2776.0" not in out
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("2776", "2776"),
+        ("2776.0", "2776"),
+        ("  2776  ", "2776"),
+        (2776.0, "2776"),  # numeric input from a non-stringified column
+        (2776, "2776"),
+        ("", ""),
+        (None, ""),
+        ("LPO 1234", "LPO 1234"),  # non-numeric postcode-ish strings: untouched
+    ],
+)
+def test_normalise_postcode(raw: object, expected: str) -> None:
+    """Strip the spurious trailing `.0` that pandas can introduce."""
+    assert ra._normalise_postcode(raw) == expected
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -306,7 +378,11 @@ def test_clean_street_strips_cross_street_annotations(raw: str, expected: str) -
 
 
 def test_format_address_drops_cross_street_in_full_pipeline() -> None:
-    """End-to-end: cross-street annotation in the address column gets stripped."""
+    """End-to-end: cross-street annotation in the address column gets stripped.
+
+    Without trailing postcode in the address (the cross-street was the
+    whole tail), suburb + postcode are appended. No `, Australia`.
+    """
     row = pd.Series(
         {
             "address": "78 Great Western Hwy Cnr Ross St",
@@ -315,7 +391,22 @@ def test_format_address_drops_cross_street_in_full_pipeline() -> None:
             "name": "Ampol Foodary",
         }
     )
-    assert ra._format_address(row) == "78 Great Western Hwy, Glenbrook, 2773, Australia"
+    assert ra._format_address(row) == "78 Great Western Hwy, Glenbrook, 2773"
+
+
+def test_format_address_drops_cross_street_with_canonical_tail() -> None:
+    """Cross-street + canonical postcode tail: strip the cnr, then the
+    trailing-postcode short-circuit fires (suburb/postcode already in
+    the address text)."""
+    row = pd.Series(
+        {
+            "address": "78 Great Western Hwy Cnr Ross St, Glenbrook NSW 2773",
+            "suburb": "Glenbrook",
+            "postcode": "2773",
+            "name": "Ampol Foodary",
+        }
+    )
+    assert ra._format_address(row) == "78 Great Western Hwy, Glenbrook NSW 2773"
 
 
 class _BrokenGnaf:

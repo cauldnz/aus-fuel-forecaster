@@ -72,6 +72,20 @@ PROGRESS_LOG_INTERVAL_COUNT: int = 250
 # the regional endpoint sidesteps this and is faster (no cross-region hop).
 GNAF_S3_HTTPS_ENDPOINT: str = "https://s3.ap-southeast-2.amazonaws.com"
 
+# G-NAF data-source mode. The augmentor supports:
+#   - "cache":  download the release's parquet shards once to ``data_dir``
+#              (~825 MB for the 202602 release), then query them locally
+#              via DuckDB. ~17x faster per query than ``remote``; one-time
+#              ~30s download. This is the augmentor's default.
+#   - "remote": stream parquet over httpfs from S3 on every query. No
+#              local disk, but each tier of the 3-tier match cascade is a
+#              separate S3 round trip — empirically averaging ~14 s per
+#              address (~8 h for a 6 k-station NSW corpus). Useful when
+#              local disk is constrained, e.g. CI.
+# Default ``cache`` matches the augmentor's default and trades 825 MB of
+# disk for an order of magnitude in throughput.
+GNAF_MODE_DEFAULT: str = "cache"
+
 
 _CROSS_STREET_RE: re.Pattern[str] = re.compile(
     r"\s+(cnr|corner|c/o)\b.*?(?=,|$)", flags=re.IGNORECASE
@@ -178,17 +192,20 @@ def _build_geocoders(
     cache_dir: Path,
     user_agent: str,
     *,
+    gnaf_mode: str = GNAF_MODE_DEFAULT,
     nominatim_factory: object | None = None,
     gnaf_factory: object | None = None,
 ) -> tuple[object, object]:
-    """Construct the G-NAF (remote) and Nominatim geocoders.
+    """Construct the G-NAF and Nominatim geocoders.
 
-    `nominatim_factory` and `gnaf_factory` exist so tests can inject
+    ``gnaf_mode`` selects between the augmentor's local-cache and remote
+    streaming modes — see ``GNAF_MODE_DEFAULT`` for trade-off notes.
+    ``nominatim_factory`` and ``gnaf_factory`` exist so tests can inject
     in-memory fakes without hitting the network.
     """
     if gnaf_factory is None:
         data_source = GnafDataSource(
-            mode="remote",
+            mode=gnaf_mode,  # type: ignore[arg-type]
             release="latest",
             data_dir=cache_dir / "gnaf",
             s3_https_endpoint=GNAF_S3_HTTPS_ENDPOINT,
@@ -329,6 +346,7 @@ def resolve(
     cache_dir: Path | None = None,
     force: bool = False,
     user_agent: str = config.USER_AGENT,
+    gnaf_mode: str = GNAF_MODE_DEFAULT,
     nominatim_factory: object | None = None,
     gnaf_factory: object | None = None,
 ) -> None:
@@ -341,6 +359,8 @@ def resolve(
             ``data/raw/geocode_cache/``.
         force: if True, re-geocode every row regardless of existing values.
         user_agent: HTTP User-Agent for Nominatim (per their usage policy).
+        gnaf_mode: ``"cache"`` (default — fast, ~825 MB local) or
+            ``"remote"`` (slow, no local disk). See ``GNAF_MODE_DEFAULT``.
         nominatim_factory, gnaf_factory: test seams. When provided,
             replace the real geocoders with the factory's return value.
     """
@@ -365,7 +385,11 @@ def resolve(
         return
 
     gnaf, nominatim = _build_geocoders(
-        cache_dir, user_agent, nominatim_factory=nominatim_factory, gnaf_factory=gnaf_factory
+        cache_dir,
+        user_agent,
+        gnaf_mode=gnaf_mode,
+        nominatim_factory=nominatim_factory,
+        gnaf_factory=gnaf_factory,
     )
 
     # Probe G-NAF up-front so a broken remote view fails fast — and the run
@@ -419,9 +443,25 @@ def main() -> None:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--cache-dir", type=Path, default=None)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--gnaf-mode",
+        choices=["cache", "remote"],
+        default=GNAF_MODE_DEFAULT,
+        help=(
+            "G-NAF data-source mode. 'cache' (default) downloads ~825 MB "
+            "of parquet shards once and queries them locally — ~17x faster "
+            "per query than 'remote', which streams from S3 on every call."
+        ),
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    resolve(args.in_path, args.out, cache_dir=args.cache_dir, force=args.force)
+    resolve(
+        args.in_path,
+        args.out,
+        cache_dir=args.cache_dir,
+        force=args.force,
+        gnaf_mode=args.gnaf_mode,
+    )
 
 
 if __name__ == "__main__":

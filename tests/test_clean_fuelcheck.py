@@ -239,10 +239,131 @@ def test_warn_on_unmapped_brand(
 
     out = tmp_path / "fuel_daily.parquet"
     stations = tmp_path / "stations.parquet"
+    misses = tmp_path / "brand_misses.csv"
     with caplog.at_level("WARNING", logger="fuel_pred.clean.fuelcheck"):
-        cf.clean(raw_dir, out, stations, brand_aliases=aliases_path)
+        cf.clean(
+            raw_dir, out, stations,
+            brand_aliases=aliases_path,
+            brand_misses_out=misses,
+        )
 
     assert any("unmapped" in rec.message for rec in caplog.records)
+
+
+def test_brand_miss_sidecar_has_expected_schema_and_counts(
+    tmp_path: Path, aliases_path: Path
+) -> None:
+    """The sidecar CSV holds one row per raw brand, sorted by occurrences."""
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    # Two months. Three unmapped brands with different occurrence counts:
+    # `Mystery A` appears 5 times across 2 stations; `Mystery B` appears
+    # 2 times at 1 station; `Mystery C` appears 1 time.
+    aug = _sample_month("2024/08/")
+    for i in range(3):
+        aug[i]["ServiceStationName"] = "Station Alpha"
+        aug[i]["Address"] = "1 Alpha St"
+        aug[i]["Brand"] = "Mystery A"
+    aug[3]["ServiceStationName"] = "Station Bravo"
+    aug[3]["Address"] = "2 Bravo Rd"
+    aug[3]["Brand"] = "Mystery A"
+    aug[4]["Brand"] = "Mystery B"  # at the default sample_month station
+    aug[5]["Brand"] = "Mystery B"
+
+    sep = _sample_month("2024/09/")
+    sep[0]["ServiceStationName"] = "Station Alpha"
+    sep[0]["Address"] = "1 Alpha St"
+    sep[0]["Brand"] = "Mystery A"   # 5th total occurrence of Mystery A
+    sep[1]["Brand"] = "Mystery C"
+
+    _write(aug, raw_dir / "2024-08.parquet")
+    _write(sep, raw_dir / "2024-09.parquet")
+
+    out = tmp_path / "fuel_daily.parquet"
+    stations = tmp_path / "stations.parquet"
+    misses = tmp_path / "brand_misses.csv"
+    cf.clean(
+        raw_dir, out, stations,
+        brand_aliases=aliases_path,
+        brand_misses_out=misses,
+    )
+
+    assert misses.exists(), "sidecar CSV should be created when there are misses"
+    df = pd.read_csv(misses)
+    assert list(df.columns) == [
+        "raw_brand",
+        "n_occurrences",
+        "n_stations",
+        "sample_name",
+        "sample_address",
+        "sample_suburb",
+        "first_seen_in",
+    ]
+    # Sorted by count desc.
+    assert df["n_occurrences"].tolist() == sorted(
+        df["n_occurrences"].tolist(), reverse=True
+    )
+    by_brand = df.set_index("raw_brand")
+    assert by_brand.loc["Mystery A", "n_occurrences"] == 5
+    assert by_brand.loc["Mystery A", "n_stations"] == 2
+    assert by_brand.loc["Mystery B", "n_occurrences"] == 2
+    assert by_brand.loc["Mystery C", "n_occurrences"] == 1
+    # Sample columns are populated (verbatim from the first occurrence).
+    assert by_brand.loc["Mystery A", "sample_name"] == "Station Alpha"
+    assert by_brand.loc["Mystery A", "sample_address"] == "1 Alpha St"
+    # first_seen_in is the file the brand first appeared in.
+    assert by_brand.loc["Mystery A", "first_seen_in"] == "2024-08.parquet"
+    assert by_brand.loc["Mystery C", "first_seen_in"] == "2024-09.parquet"
+
+
+def test_brand_miss_sidecar_absent_when_all_brands_mapped(
+    tmp_path: Path, aliases_path: Path
+) -> None:
+    """No misses → no sidecar file (and any stale one is removed)."""
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    rows = _sample_month("2024/08/")  # All "BP", which IS in aliases.
+    _write(rows, raw_dir / "2024-08.parquet")
+
+    out = tmp_path / "fuel_daily.parquet"
+    stations = tmp_path / "stations.parquet"
+    misses = tmp_path / "brand_misses.csv"
+    # Pre-create a stale sidecar to verify it gets removed.
+    misses.write_text("stale,from,a,previous,run\n", encoding="utf-8")
+
+    cf.clean(
+        raw_dir, out, stations,
+        brand_aliases=aliases_path,
+        brand_misses_out=misses,
+    )
+
+    assert not misses.exists(), "sidecar should be absent when no misses occur"
+
+
+def test_brand_miss_sidecar_default_path_is_data_interim(
+    tmp_path: Path, aliases_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When `brand_misses_out` is None, defaults to config.DATA_INTERIM/brand_misses.csv."""
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    rows = _sample_month("2024/08/")
+    rows[0]["Brand"] = "Mystery"
+    _write(rows, raw_dir / "2024-08.parquet")
+
+    # Redirect DATA_INTERIM to tmp so the test stays hermetic.
+    interim = tmp_path / "interim"
+    interim.mkdir()
+    monkeypatch.setattr("fuel_pred.config.DATA_INTERIM", interim)
+
+    cf.clean(
+        raw_dir,
+        tmp_path / "fuel_daily.parquet",
+        tmp_path / "stations.parquet",
+        brand_aliases=aliases_path,
+        # brand_misses_out intentionally omitted → exercise the default
+    )
+
+    assert (interim / "brand_misses.csv").exists()
 
 
 def test_empty_input_dir_raises(tmp_path: Path, aliases_path: Path) -> None:

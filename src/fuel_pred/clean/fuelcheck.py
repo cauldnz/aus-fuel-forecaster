@@ -73,6 +73,119 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
 MONTHLY_CHUNK: int = 4
 
 
+# Tokens we expect to see in a header row across all 3 known Excel
+# layouts. Lowercased, no separators. Used to detect which row holds
+# the actual headers when the source file has a title cell at row 0.
+_HEADER_TOKENS: frozenset[str] = frozenset(CANONICAL_COLUMNS)
+
+# Descriptive columns whose values are visually "merged" in the
+# Variant C layout — only the first row of each station's block has
+# them filled, subsequent rows are NaN. We forward-fill these (but
+# never the per-event columns: fuel code, price, timestamp).
+_MERGED_CELL_DESCRIPTIVE_COLUMNS: frozenset[str] = frozenset(
+    {"servicestationname", "address", "suburb", "postcode", "brand"}
+)
+
+
+def _row_looks_like_headers(row: pd.Series) -> bool:
+    """True if this row's non-null values include canonical header tokens.
+
+    Used by ``_detect_and_promote_headers`` to identify which row of a
+    monthly file actually contains the column names. Two-or-more matches
+    is the threshold to avoid false positives from data rows that
+    coincidentally contain a single header-like value.
+    """
+    matches = 0
+    for v in row.values:
+        if v is None or pd.isna(v):
+            continue
+        if str(v).strip().lower() in _HEADER_TOKENS:
+            matches += 1
+            if matches >= 2:
+                return True
+    return False
+
+
+def _detect_and_promote_headers(df: pd.DataFrame) -> pd.DataFrame:
+    """Recover canonical headers from any of the 3 known FuelCheck Excel layouts.
+
+    NSW Open Data ships monthly Price History workbooks in three header
+    layouts (issue #19). Our fetcher reads ``header=0`` for everything
+    and persists whatever it finds, so the cached parquets carry the
+    layout drift forward. This helper inspects the first 1-2 rows and
+    promotes the real header row to ``df.columns`` so the downstream
+    ``_normalise_columns`` path works for all three.
+
+    - **Variant A** — headers at row 0 (the common case). Returned as-is.
+    - **Variant B** — title cell at row 0 (e.g. ``Price_History_July_2017``),
+      real headers at row 1. We promote row 0 to columns and drop it.
+    - **Variant C** — title cell at row 0, blank row at row 0 of the
+      data, real headers at row 1, and descriptive columns
+      (ServiceStationName, Address, Suburb, Postcode, Brand) only filled
+      on the first row of each station's "block" (visual merged cells).
+      We promote, drop the prelude, and forward-fill the descriptive
+      columns so each event row carries its station identity.
+
+    If none of the three patterns match (a future schema change), we
+    return ``df`` unchanged and let ``_normalise_columns`` produce the
+    "missing columns" warning the caller already handles.
+    """
+    if df.empty or len(df.columns) == 0:
+        return df
+
+    # Variant A: column 0 is already a canonical header name.
+    first_col = str(df.columns[0]).strip().lower()
+    if first_col in _HEADER_TOKENS:
+        return df
+
+    # Variant B: row 0 is the headers (column 0 was a title cell).
+    if len(df) >= 1 and _row_looks_like_headers(df.iloc[0]):
+        new_cols = [str(v) for v in df.iloc[0].tolist()]
+        out = df.iloc[1:].copy()
+        out.columns = new_cols
+        return out.reset_index(drop=True)
+
+    # Variant C: row 0 is blank, row 1 is the headers, descriptive
+    # columns are merged-cell-style (NaN-filled in subsequent rows).
+    if (
+        len(df) >= 2
+        and df.iloc[0].isna().all()
+        and _row_looks_like_headers(df.iloc[1])
+    ):
+        new_cols = [str(v) for v in df.iloc[1].tolist()]
+        out = df.iloc[2:].copy()
+        out.columns = new_cols
+        # Forward-fill the sticky descriptive columns. Per-event
+        # columns (FuelCode, PriceUpdatedDate, Price) are explicitly
+        # NOT ffill'd — they're the actual per-row data.
+        ffill_cols = [
+            c for c in out.columns
+            if str(c).strip().lower() in _MERGED_CELL_DESCRIPTIVE_COLUMNS
+        ]
+        if ffill_cols:
+            out[ffill_cols] = out[ffill_cols].ffill()
+        return out.reset_index(drop=True)
+
+    # Unknown layout — let _normalise_columns surface the issue via
+    # its existing "missing columns" warning.
+    return df
+
+
+def _normalise_postcode_series(series: pd.Series) -> pd.Series:
+    """Coerce a postcode column to canonical 4-digit string form.
+
+    Issue #23: pandas can read postcodes as ``float64`` from some monthly
+    parquets (probably driven by occasional missing values triggering
+    numeric inference), so a perfectly normal ``2776`` ends up serialised
+    as ``'2776.0'``. Strip the spurious ``.0`` so downstream consumers
+    (geocoders, joins) see consistent string postcodes regardless of
+    monthly source. Non-numeric postcodes (e.g. LPO codes) pass through
+    untouched.
+    """
+    coerced = series.astype("string").str.strip()
+    return coerced.str.replace(r"\.0$", "", regex=True)
+
+
 def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Rename columns to the canonical §6 names; drop unknown columns."""
     rename: dict[str, str] = {}
@@ -177,12 +290,17 @@ def _process_month(
     sample address/suburb) so ``clean()`` can dump a structured CSV.
     """
     raw = pd.read_parquet(path)
+    raw = _detect_and_promote_headers(raw)
     df = _normalise_columns(raw)
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         logger.warning("%s missing columns %s; skipping", path.name, missing)
         return pd.DataFrame()
 
+    # Coerce postcode to canonical str form first (issue #23) — the
+    # downstream dropna() and station_id hashing both depend on the
+    # postcode column being string, not "2776.0" floats.
+    df["postcode"] = _normalise_postcode_series(df["postcode"])
     df = df.dropna(subset=["name", "address", "suburb", "postcode", "fuel_code", "price"]).copy()
     df["station_id"] = df.apply(
         lambda r: _hash_station(r["name"], r["address"], r["suburb"], r["postcode"]), axis=1

@@ -366,6 +366,209 @@ def test_brand_miss_sidecar_default_path_is_data_interim(
     assert (interim / "brand_misses.csv").exists()
 
 
+# --------------- Excel header layout variants (issue #19) ---------------
+#
+# NSW Open Data ships monthly Price History workbooks in three header
+# layouts. The fetcher reads `header=0` for everything and persists
+# whatever it finds, so the cached parquets carry the layout drift
+# forward. _detect_and_promote_headers recovers from all three.
+
+
+def _variant_a_rows() -> list[dict[str, object]]:
+    """Headers at row 0 (clean form). Same shape as `_sample_month`."""
+    return _sample_month("2024/08/")
+
+
+def _variant_b_dataframe() -> pd.DataFrame:
+    """Title cell at row 0; real headers at row 1.
+
+    Mirrors the 2017-07/08, 2018-11/12, 2019-* cached parquets.
+    """
+    headers = list(_variant_a_rows()[0].keys())
+    data = [list(r.values()) for r in _variant_a_rows()]
+    placeholder_cols = [
+        f"Unnamed: {i}" if i else "Price_History_July_2017"
+        for i in range(len(headers))
+    ]
+    return pd.DataFrame([headers, *data], columns=placeholder_cols)
+
+
+def _variant_c_dataframe() -> pd.DataFrame:
+    """Title cell at row 0; blank row at index 0 of data; real headers at
+    index 1; descriptive columns merged-cell-style (only first row of
+    each station's block is filled).
+
+    Mirrors the 2020-*, 2021-*, 2022-01..04, etc. cached parquets.
+    """
+    rows = _variant_a_rows()
+    headers = list(rows[0].keys())
+
+    # Build the "merged-cell" pattern: keep ServiceStationName, Address,
+    # Suburb, Postcode, Brand on the first row of each station's block;
+    # NaN them on subsequent rows of the same station.
+    sticky_cols = {"ServiceStationName", "Address", "Suburb", "Postcode", "Brand"}
+    last_station = None
+    merged_rows = []
+    for r in rows:
+        new = dict(r)
+        if r["ServiceStationName"] == last_station:
+            for c in sticky_cols:
+                new[c] = None
+        last_station = r["ServiceStationName"]
+        merged_rows.append(new)
+
+    placeholder_cols = [f"Unnamed: {i}" if i else "Price History Checks"
+                        for i in range(len(headers))]
+    blank_row = [None] * len(headers)
+    header_row = headers
+    data_rows = [list(r.values()) for r in merged_rows]
+    return pd.DataFrame([blank_row, header_row, *data_rows], columns=placeholder_cols)
+
+
+def test_detect_and_promote_headers_variant_a_passthrough() -> None:
+    """Variant A — clean headers — returned unchanged."""
+    df = pd.DataFrame(_variant_a_rows())
+    out = cf._detect_and_promote_headers(df)
+    assert list(out.columns) == list(df.columns)
+    assert len(out) == len(df)
+
+
+def test_detect_and_promote_headers_variant_b() -> None:
+    """Variant B — title cell at row 0, headers at row 1 — promoted correctly."""
+    df = _variant_b_dataframe()
+    out = cf._detect_and_promote_headers(df)
+    expected_cols = list(_variant_a_rows()[0].keys())
+    assert list(out.columns) == expected_cols
+    # Title row dropped, plus the headers-as-data row promoted.
+    assert len(out) == len(_variant_a_rows())
+    assert out.iloc[0]["ServiceStationName"] == "BP Mascot"
+
+
+def test_detect_and_promote_headers_variant_c_with_ffill() -> None:
+    """Variant C — title + blank + merged cells — promoted and ffilled."""
+    df = _variant_c_dataframe()
+    out = cf._detect_and_promote_headers(df)
+    expected_cols = list(_variant_a_rows()[0].keys())
+    assert list(out.columns) == expected_cols
+    # No NaN in the descriptive columns after ffill — every row knows its station.
+    for col in ("ServiceStationName", "Address", "Suburb", "Postcode", "Brand"):
+        assert out[col].notna().all(), f"{col} should have been forward-filled"
+    # Per-event columns (price, fuel) are NOT ffilled — they're the actual data.
+    assert out["FuelCode"].notna().all()  # in our fixture every row has its own fuel
+    # Station identity preserved across "blocks".
+    bp_rows = out[out["ServiceStationName"] == "BP Mascot"]
+    assert len(bp_rows) == 9  # 3 fuels x 3 days
+
+
+def test_detect_and_promote_headers_unknown_layout_passthrough() -> None:
+    """Future schema drift: unrecognised → pass through, let normaliser warn."""
+    df = pd.DataFrame(
+        {"junk_col_a": ["x", "y"], "junk_col_b": [1, 2]}
+    )
+    out = cf._detect_and_promote_headers(df)
+    # Should be unchanged so the downstream "missing columns" warning fires.
+    assert list(out.columns) == ["junk_col_a", "junk_col_b"]
+    assert len(out) == 2
+
+
+def test_clean_recovers_data_from_variant_b_files(
+    tmp_path: Path, aliases_path: Path
+) -> None:
+    """End-to-end: a Variant B monthly should produce daily rows, not be skipped."""
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    _variant_b_dataframe().to_parquet(
+        raw_dir / "2017-07.parquet", engine="pyarrow", compression="zstd", index=False
+    )
+    out = tmp_path / "fuel_daily.parquet"
+    stations = tmp_path / "stations.parquet"
+    cf.clean(raw_dir, out, stations, brand_aliases=aliases_path)
+    daily = pd.read_parquet(out)
+    # Same fixture as Variant A: 2 stations x 2 fuels (E10 filtered) x 3 days.
+    assert len(daily) == 12
+
+
+def test_clean_recovers_data_from_variant_c_files(
+    tmp_path: Path, aliases_path: Path
+) -> None:
+    """End-to-end: a Variant C monthly recovers post-ffill — rows that were
+    NaN in the merged-cell layout still produce daily aggregates."""
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    _variant_c_dataframe().to_parquet(
+        raw_dir / "2020-06.parquet", engine="pyarrow", compression="zstd", index=False
+    )
+    out = tmp_path / "fuel_daily.parquet"
+    stations = tmp_path / "stations.parquet"
+    cf.clean(raw_dir, out, stations, brand_aliases=aliases_path)
+    daily = pd.read_parquet(out)
+    # Without ffill we'd lose ~half the rows (the merged-cell ones drop on dropna).
+    assert len(daily) == 12
+
+
+def test_clean_handles_mixed_layouts_in_one_run(
+    tmp_path: Path, aliases_path: Path
+) -> None:
+    """Real corpus: variant A + B + C months side-by-side in `data/raw/fuelcheck/`."""
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    _write(_variant_a_rows(), raw_dir / "2024-01.parquet")
+    _variant_b_dataframe().to_parquet(
+        raw_dir / "2017-07.parquet", engine="pyarrow", compression="zstd", index=False
+    )
+    _variant_c_dataframe().to_parquet(
+        raw_dir / "2020-06.parquet", engine="pyarrow", compression="zstd", index=False
+    )
+
+    out = tmp_path / "fuel_daily.parquet"
+    stations = tmp_path / "stations.parquet"
+    cf.clean(raw_dir, out, stations, brand_aliases=aliases_path)
+
+    daily = pd.read_parquet(out)
+    # 3 months, 12 daily rows each (deduplication: same station_ids
+    # across months produce dupes that re-aggregate). Worst case
+    # we get 12 * 3 = 36 rows; same-day dedup means we'll see ≤ 36
+    # but ≥ 12. Just assert we have something from each month-shape.
+    assert len(daily) >= 12
+
+
+# ----------------------------- Postcode normalisation (issue #23) -----------------------------
+
+
+def test_postcode_float_artifact_stripped_at_source(
+    tmp_path: Path, aliases_path: Path
+) -> None:
+    """Pandas float coercion serialises postcode as '2776.0'; we strip it."""
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    rows = _sample_month("2024/08/")
+    # Mimic what pandas does when one cell in the column is missing during
+    # a chunked CSV read: type bumps to float64 → string round-trip yields '.0'.
+    df = pd.DataFrame(rows)
+    df["Postcode"] = df["Postcode"].astype(float).astype("string")  # → '2020.0', '2042.0'
+    df.to_parquet(raw_dir / "2024-08.parquet", engine="pyarrow", compression="zstd", index=False)
+
+    out = tmp_path / "fuel_daily.parquet"
+    stations_out = tmp_path / "stations.parquet"
+    cf.clean(raw_dir, out, stations_out, brand_aliases=aliases_path)
+
+    stations_df = pd.read_parquet(stations_out)
+    # No '.0' anywhere in the postcodes.
+    assert not stations_df["postcode"].astype(str).str.endswith(".0").any()
+    # And the canonical 4-digit form is preserved.
+    pcs = sorted(stations_df["postcode"].unique().tolist())
+    assert pcs == ["2020", "2042"]
+
+
+def test_normalise_postcode_series_handles_mixed_input() -> None:
+    """Direct unit test on the normaliser, covering the cases pandas hands us."""
+    s = pd.Series(["2776.0", "2042", " 2000 ", None, "LPO 1234", 2776.0])
+    out = cf._normalise_postcode_series(s)
+    # NaN preserved (so dropna can filter); whitespace stripped; .0 dropped;
+    # non-numeric (LPO) untouched; float coerced to "2776".
+    assert out.tolist() == ["2776", "2042", "2000", pd.NA, "LPO 1234", "2776"]
+
+
 def test_empty_input_dir_raises(tmp_path: Path, aliases_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()

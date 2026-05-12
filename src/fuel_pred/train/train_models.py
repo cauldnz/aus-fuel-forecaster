@@ -90,8 +90,14 @@ def train(
     folds = split_folds(work, fold=fold)
 
     # ---- Pick feature columns per model variant --------------------------
-    cols_a = feature_columns(work, MODEL_A_BLOCKS)
-    cols_b = feature_columns(work, MODEL_B_BLOCKS)
+    # Lax mode: warn if the spec promises a column that build/make_features
+    # doesn't actually emit, but proceed with whatever's there. Strict mode
+    # is intended for callers (notebooks / interactive use) that want the
+    # spec drift to surface as a hard error; the production training
+    # pipeline should be defensive about known-pending feature columns.
+    _warn_on_missing_blocks(work, MODEL_B_BLOCKS)
+    cols_a = feature_columns(work, MODEL_A_BLOCKS, strict=False)
+    cols_b = feature_columns(work, MODEL_B_BLOCKS, strict=False)
     cat_a = categorical_columns(cols_a)
     cat_b = categorical_columns(cols_b)
     logger.info(
@@ -178,6 +184,27 @@ def train(
 
 
 # ---- internals -------------------------------------------------------------
+
+
+def _warn_on_missing_blocks(df: pd.DataFrame, blocks: tuple[str, ...]) -> None:
+    """Log a single WARNING enumerating any spec-defined feature columns
+    that aren't in ``df``. Modeling continues without them — useful when
+    ``build/make_features.py`` hasn't yet emitted a column the spec
+    promises.
+    """
+    from fuel_pred.train.feature_blocks import BLOCK_COLUMNS
+
+    expected: list[str] = []
+    for b in blocks:
+        expected.extend(BLOCK_COLUMNS[b])
+    missing = [c for c in expected if c not in df.columns]
+    if missing:
+        logger.warning(
+            "%d spec-defined feature column(s) absent from features.parquet "
+            "(modeling will proceed without them): %s",
+            len(missing),
+            missing,
+        )
 
 
 def _coerce_categorical_union(

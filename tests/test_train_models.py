@@ -305,6 +305,36 @@ def test_train_raises_on_empty_features(tmp_path: Path) -> None:
         tm.train(p, tmp_path / "models", fold=_short_fold_config())
 
 
+def test_train_warns_and_proceeds_when_spec_column_missing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Lax mode: a column in the spec but not in features.parquet should
+    log a WARNING and let modeling proceed using the columns that ARE
+    present. (Verified the day Phase 6 first ran against real data —
+    `stn_distance_to_sydney_terminal_km` was promised but not built.)"""
+    df = _synth_panel(n_stations=4, n_days=200).drop(
+        columns=["stn_distance_to_sydney_terminal_km"]
+    )
+    p = tmp_path / "features.parquet"
+    df.to_parquet(p, engine="pyarrow", compression="zstd", index=False)
+    out_dir = tmp_path / "models"
+
+    with caplog.at_level("WARNING", logger="fuel_pred.train.train_models"):
+        tm.train(p, out_dir, fold=_short_fold_config())
+
+    # Modeling completed.
+    assert (out_dir / "model_a.pkl").exists()
+    assert (out_dir / "model_b.pkl").exists()
+    # Warning surfaced — single line, names the missing column.
+    matched = [
+        r
+        for r in caplog.records
+        if "absent from features.parquet" in r.message
+        and "stn_distance_to_sydney_terminal_km" in r.message
+    ]
+    assert matched, "expected a WARNING naming the missing spec column"
+
+
 def test_train_no_predictions_flag_skips_prediction_parquets(
     features_path: Path, tmp_path: Path
 ) -> None:

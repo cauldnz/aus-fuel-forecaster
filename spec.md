@@ -634,15 +634,15 @@ Each phase produces a runnable artefact and a testable outcome. Designed for seq
 - Add corresponding feature columns
 - Acceptance: feature matrix has the new `ctx_*` columns
 
-### Phase 6 — Modeling (1 session) ✅ (training half)
+### Phase 6 — Modeling (1 session) ✅
 - `train.train_models` — fit Models A and B with the spec §8.2 hyperparameters. Implemented via:
   - `train.feature_blocks` — explicit per-block column lists (§7) + `MODEL_A_BLOCKS` / `MODEL_B_BLOCKS` per §8.4 + categorical / exclude lists.
   - `train.folds` — time-based splitter producing the four §8.3 folds (`train`, `val`, `test_normal`, `test_crisis`).
-  - `train._fit` — inner `fit_lgbm()` wrapping `lightgbm.LGBMRegressor` with the early-stopping callback.
-  - `train.train_models.train()` — orchestrator: load → filter to U91 + non-null target → split → identical-rows guard (§8.4: only rows where every Model B column is non-null are used in *either* model) → fit A → fit B → persist `model_a.pkl` / `model_b.pkl` / `feature_lists.json` / `predictions_test_normal.parquet` / `predictions_test_crisis.parquet`.
+  - `train._fit` — inner `fit_lgbm()` wrapping `lightgbm.LGBMRegressor` with the early-stopping callback + `lgb.log_evaluation` periodic output (PR #37, #38).
+  - `train.train_models.train()` — orchestrator: load → filter to U91 + non-null target → split → identical-rows guard (§8.4: rows where every SA2 column is non-null) → defensive object→numeric coercion (PR #36) → fit A → fit B → persist `model_a.pkl` / `model_b.pkl` / `feature_lists.json` / `predictions_test_normal.parquet` / `predictions_test_crisis.parquet`. CLI knobs: `--n-estimators`, `--log-period` (PR #37, #39).
 - `evaluate.metrics` — implemented in PR #28 (the five §8.5 metrics + `all_metrics()` convenience).
-- `evaluate.compare` — pending; consumes the prediction parquets above.
-- Acceptance: both models saved, prediction parquets persisted; comparison report still TBD (Phase 8 follow-up).
+- `evaluate.compare` — implemented; consumes the prediction parquets and writes `results/comparison.md` with overall + four segmented tables (metro/regional, brand top-8 + Other, fuel, SEIFA quintile) per spec §8.5/§9.2.
+- Acceptance: both models saved, prediction parquets persisted, `results/comparison.md` generated.
 
 ### Phase 7 — Notebooks (1-2 sessions)
 - Implement `01_eda`, `02_modeling`, `03_explainability` per §9

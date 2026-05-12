@@ -1,6 +1,7 @@
 """Hermetic tests for evaluate.compare."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -60,19 +61,38 @@ def _synth_predictions(
 
 
 def _synth_features(n_stations: int = 6, n_days: int = 60) -> pd.DataFrame:
-    """Synthetic features.parquet that carries just the segmentation columns."""
+    """Synthetic features.parquet that carries the segmentation columns.
+
+    Also includes a few non-SA2 numeric columns so the correlation
+    analysis section has something to correlate against. One of them
+    (`stn_competitors_within_5km`) is deliberately wired to track
+    `sa2_seifa_irsd_score` linearly so we can verify the high-correlation
+    flag fires (sometimes wealthier areas have more competing stations).
+    """
+    rng = np.random.default_rng(42)
     dates = pd.date_range("2024-01-01", periods=n_days, freq="D")
     rows: list[dict[str, object]] = []
     for s in range(n_stations):
+        seifa = 900.0 + s * 50.0
         for d in dates:
             rows.append(
                 {
                     "station_id": f"s{s:03d}",
                     "fuel_code": "U91",
                     "date": d,
+                    # Segmentation cols.
                     "stn_is_metro": bool(s % 2 == 0),
                     "stn_brand_canonical": ["BP", "Ampol", "Shell", "7-Eleven"][s % 4],
-                    "sa2_seifa_irsd_score": 900.0 + s * 50.0,  # spreads quintiles
+                    "sa2_seifa_irsd_score": seifa,
+                    # Some non-SA2 numerics for correlation.
+                    "lag_price_1": 180.0 + s * 0.5 + rng.normal(0, 0.5),
+                    "upstream_brent_lag_0": 80.0 + rng.normal(0, 1.0),
+                    # High-correlation plant: tracks SEIFA almost exactly.
+                    "stn_competitors_within_5km": (seifa - 900.0) / 10.0
+                    + rng.normal(0, 0.1),
+                    # Other SA2 columns so the report has multiple SA2 features.
+                    "sa2_median_age": 30.0 + s,
+                    "sa2_pct_renters": 50.0 + s * 2,
                 }
             )
     return pd.DataFrame(rows)
@@ -101,6 +121,76 @@ def features_path(tmp_path: Path) -> Path:
         p, engine="pyarrow", compression="zstd", index=False
     )
     return p
+
+
+def _write_feature_lists(models_dir: Path) -> None:
+    """Write a synthetic feature_lists.json with importance fields.
+
+    Mirrors the shape `train.train_models._save_feature_lists` produces
+    after the importances change. Importances are intentionally
+    different between A and B so the test can assert ranks differ.
+    """
+    payload = {
+        "A": {
+            "feature_columns": [
+                "lag_price_1",
+                "upstream_brent_lag_0",
+                "stn_competitors_within_5km",
+            ],
+            "categorical_columns": [],
+            "best_iteration": 305,
+            "best_val_mae": 5.123,
+            "importance_gain": {
+                "lag_price_1": 12345.6,
+                "upstream_brent_lag_0": 6543.2,
+                "stn_competitors_within_5km": 1234.5,
+            },
+            "importance_split": {
+                "lag_price_1": 234,
+                "upstream_brent_lag_0": 123,
+                "stn_competitors_within_5km": 45,
+            },
+        },
+        "B": {
+            "feature_columns": [
+                "lag_price_1", "upstream_brent_lag_0",
+                "stn_competitors_within_5km",
+                "sa2_seifa_irsd_score", "sa2_median_age", "sa2_pct_renters",
+            ],
+            "categorical_columns": [],
+            "best_iteration": 320,
+            "best_val_mae": 4.987,
+            "importance_gain": {
+                "lag_price_1": 12100.3,
+                "upstream_brent_lag_0": 6321.7,
+                "stn_competitors_within_5km": 1100.0,
+                "sa2_seifa_irsd_score": 543.2,
+                "sa2_median_age": 234.1,
+                "sa2_pct_renters": 89.4,
+            },
+            "importance_split": {
+                "lag_price_1": 230,
+                "upstream_brent_lag_0": 120,
+                "stn_competitors_within_5km": 40,
+                "sa2_seifa_irsd_score": 45,
+                "sa2_median_age": 22,
+                "sa2_pct_renters": 9,
+            },
+        },
+        "config": {"lgbm_params": {"objective": "regression_l1"}},
+    }
+    (models_dir / "feature_lists.json").write_text(
+        json.dumps(payload, indent=2), encoding="utf-8"
+    )
+
+
+@pytest.fixture
+def models_dir_full(
+    models_dir_with_predictions: Path,
+) -> Path:
+    """Full models/ dir: predictions + feature_lists.json with importances."""
+    _write_feature_lists(models_dir_with_predictions)
+    return models_dir_with_predictions
 
 
 # ----------------------------- end-to-end -----------------------------
@@ -237,6 +327,125 @@ def test_compare_brand_bucket_collapses_to_top_n_plus_other(
     # the top-N cap.
     brand_section = text.split("## Segmented by Brand", 1)[1].split("##", 1)[0]
     assert "Other" in brand_section
+
+
+# ----------------------------- internal helpers -----------------------------
+
+
+# ----------------------------- feature importance section -----------------------------
+
+
+def test_compare_renders_feature_importance_section_when_json_present(
+    features_path: Path, models_dir_full: Path, tmp_path: Path
+) -> None:
+    """When feature_lists.json carries importances, render a top-N table
+    for each model + a 'Where SA2 features rank in B' sub-table."""
+    out = tmp_path / "results" / "comparison.md"
+    cmp.compare(features_path, models_dir_full, out)
+    text = out.read_text(encoding="utf-8")
+
+    assert "## Feature importance" in text
+    assert "### Model A — top" in text
+    assert "### Model B — top" in text
+    # SA2 sub-table only exists for Model B (which has the SA2 features).
+    assert "### Where SA2 features rank in Model B" in text
+    # Spot-check feature names appear with their gain values formatted
+    # with thousands separators.
+    assert "`lag_price_1`" in text
+    assert "`sa2_seifa_irsd_score`" in text
+
+
+def test_compare_skips_importance_section_when_json_missing(
+    features_path: Path, models_dir_with_predictions: Path, tmp_path: Path
+) -> None:
+    """No feature_lists.json → log warning, but the rest of the report
+    still renders so we can use compare.py against legacy models/ dirs."""
+    out = tmp_path / "results" / "comparison.md"
+    cmp.compare(features_path, models_dir_with_predictions, out)
+    text = out.read_text(encoding="utf-8")
+    assert "## Feature importance" not in text
+    # But the headline + segmented sections are still there.
+    assert "## Headline (overall)" in text
+
+
+def test_block_of_classifies_known_prefixes() -> None:
+    """Every spec §7 block has at least one prefix that maps cleanly."""
+    assert cmp._block_of("lag_price_1") == "lag"
+    assert cmp._block_of("roll_price_mean_7") == "lag"
+    assert cmp._block_of("xfuel_dl_price_lag_0") == "lag"
+    assert cmp._block_of("days_since_last_price_change") == "lag"
+    assert cmp._block_of("price_minus_28d_min") == "lag"
+    assert cmp._block_of("upstream_brent_lag_0") == "upstream"
+    assert cmp._block_of("cal_day_of_fortnight") == "cal"
+    assert cmp._block_of("ctx_traffic_top1_lag_1") == "ctx"
+    assert cmp._block_of("stn_brand_canonical") == "stn"
+    assert cmp._block_of("wx_temp_max_c") == "wx"
+    assert cmp._block_of("sa2_pct_renters") == "sa2"
+    # Unknown prefixes fall through.
+    assert cmp._block_of("mystery_feature") == "?"
+
+
+# ----------------------------- correlation section -----------------------------
+
+
+def test_compare_renders_correlation_section(
+    features_path: Path, models_dir_with_predictions: Path, tmp_path: Path
+) -> None:
+    """Correlation section appears when SA2 + non-SA2 numeric cols are present."""
+    out = tmp_path / "results" / "comparison.md"
+    cmp.compare(features_path, models_dir_with_predictions, out)
+    text = out.read_text(encoding="utf-8")
+    assert "## SA2 ↔ non-SA2 feature correlation" in text
+    assert "Top 3 correlated non-SA2 features per SA2 feature" in text
+
+
+def test_compare_correlation_flags_high_correlation(
+    features_path: Path, models_dir_with_predictions: Path, tmp_path: Path
+) -> None:
+    """The synthetic features fixture wires `stn_competitors_within_5km`
+    to track `sa2_seifa_irsd_score` linearly. The correlation section
+    must surface this with the ⚠️ flag and list it under the
+    'High correlations' callout."""
+    out = tmp_path / "results" / "comparison.md"
+    cmp.compare(features_path, models_dir_with_predictions, out)
+    text = out.read_text(encoding="utf-8")
+    # ⚠️ appears next to the correlated cell.
+    assert "⚠️" in text
+    # High-correlation list contains the expected pair.
+    assert "High correlations" in text
+    assert "sa2_seifa_irsd_score" in text
+    assert "stn_competitors_within_5km" in text
+
+
+def test_compare_correlation_skips_gracefully_when_no_sa2(
+    tmp_path: Path,
+) -> None:
+    """features.parquet without any sa2_* columns → graceful skip
+    (no crash, just a 'skipped' note)."""
+    feats = pd.DataFrame(
+        {
+            "station_id": ["s0"] * 10,
+            "fuel_code": ["U91"] * 10,
+            "date": pd.date_range("2024-01-01", periods=10),
+            "lag_price_1": np.arange(10).astype(float),
+            "stn_is_metro": [True] * 10,
+            "stn_brand_canonical": ["BP"] * 10,
+        }
+    )
+    feats_path = tmp_path / "features.parquet"
+    feats.to_parquet(feats_path)
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    _synth_predictions().to_parquet(
+        models_dir / "predictions_test_normal.parquet"
+    )
+
+    out = tmp_path / "comparison.md"
+    cmp.compare(feats_path, models_dir, out)
+    text = out.read_text(encoding="utf-8")
+    assert "## SA2 ↔ non-SA2 feature correlation" in text
+    assert "skipped" in text
 
 
 # ----------------------------- internal helpers -----------------------------

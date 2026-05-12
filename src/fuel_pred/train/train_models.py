@@ -382,12 +382,19 @@ def _save_feature_lists(path: Path, fit_a: FitResult, fit_b: FitResult) -> None:
             "categorical_columns": fit_a.categorical_columns,
             "best_iteration": fit_a.best_iteration,
             "best_val_mae": fit_a.best_score,
+            # Per-feature importances (gain + split). Lets the
+            # comparison report and the explainability notebook rank
+            # features without re-loading the pickle.
+            "importance_gain": fit_a.importance_gain,
+            "importance_split": fit_a.importance_split,
         },
         "B": {
             "feature_columns": fit_b.feature_columns,
             "categorical_columns": fit_b.categorical_columns,
             "best_iteration": fit_b.best_iteration,
             "best_val_mae": fit_b.best_score,
+            "importance_gain": fit_b.importance_gain,
+            "importance_split": fit_b.importance_split,
         },
         "config": {
             # Snapshot the hyperparameters used so a future re-run can be

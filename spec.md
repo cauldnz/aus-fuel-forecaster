@@ -431,7 +431,7 @@ Two models, identical except for one feature block:
 | **Model A** | lag, upstream, calendar, ctx, stn, wx |
 | **Model B** | lag, upstream, calendar, ctx, stn, wx, **sa2** |
 
-Both trained on the *same* training rows (rows where every column required by Model B is non-null — so the comparison isn't biased by Model B having fewer/easier rows).
+Both trained on the *same* training rows (rows where every **SA2** column is non-null — so the comparison isn't biased by Model B having fewer/easier rows). Other naturally-sparse columns (`xfuel_dl_*`, `upstream_tgp_*`, occasional Tier-2 macros) are in both models' feature sets and LightGBM handles their nulls natively; filtering on every Model B column would be over-strict and on real corpora has been observed to leave zero training rows because rare-coverage columns combine multiplicatively. The §8.4 "apples-to-apples" intent is that the SA2 join shouldn't bias the comparison — exactly what filtering on the SA2 block isolates.
 
 ### 8.5 Metrics
 

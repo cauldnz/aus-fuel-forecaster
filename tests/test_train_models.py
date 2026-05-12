@@ -275,6 +275,60 @@ def test_train_raises_when_sa2_block_entirely_null(tmp_path: Path) -> None:
         tm.train(p, tmp_path / "models", fold=_short_fold_config())
 
 
+def test_train_proceeds_when_sparse_non_sa2_columns_have_nulls(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Per spec §8.4: the identical-rows guard tests SA2 columns ONLY,
+    not every Model B column. Sparse columns like xfuel_dl_*,
+    upstream_tgp_*, and Tier-2 macros (which are present in BOTH models'
+    feature sets) should not multiply down to zero training rows.
+
+    Regression guard for the bug where the user's first real run hit
+    "identical-rows guard left zero training rows" because xfuel_dl was
+    24% non-null and upstream_tgp + ctx_cash_rate were 100% null in
+    parts of the data, intersecting to nothing.
+    """
+    df = _synth_panel(n_stations=5, n_days=200)
+    # Knock out every xfuel_dl_* on every row — the old guard would have
+    # killed all training rows. The new guard should still keep ~all
+    # rows because SA2 is fully populated.
+    # Use np.nan (not pd.NA) so dtype stays float64 — LightGBM rejects
+    # object-dtype columns even when they're entirely NaN.
+    xfuel_cols = [c for c in df.columns if c.startswith("xfuel_dl_")]
+    for c in xfuel_cols:
+        df[c] = np.nan
+    # And every upstream_tgp_* column too — these were 100% null in
+    # parts of the user's real data.
+    tgp_cols = [c for c in df.columns if c.startswith("upstream_tgp_")]
+    for c in tgp_cols:
+        df[c] = np.nan
+    # And the Tier-2 macros that go entirely null for some folds.
+    for c in ("ctx_cash_rate", "ctx_asx200_lag_1", "ctx_inflation_expectations_lag_7"):
+        df[c] = np.nan
+
+    p = tmp_path / "features.parquet"
+    df.to_parquet(p, engine="pyarrow", compression="zstd", index=False)
+    out_dir = tmp_path / "models"
+
+    with caplog.at_level("INFO", logger="fuel_pred.train.train_models"):
+        tm.train(p, out_dir, fold=_short_fold_config())
+
+    # Modeling completed — both pickles + predictions on disk.
+    assert (out_dir / "model_a.pkl").exists()
+    assert (out_dir / "model_b.pkl").exists()
+    assert (out_dir / "predictions_test_normal.parquet").exists()
+
+    # Guard log line should report ~100% retention (only SA2 was tested).
+    guard_lines = [
+        r
+        for r in caplog.records
+        if "identical-rows guard:" in r.message
+    ]
+    assert guard_lines, "expected the identical-rows guard log line"
+    # With sa2_null_fraction=0.0 (default) every row passes the SA2 test.
+    assert "100.0% kept" in guard_lines[0].message
+
+
 # ----------------------------- filter behaviour -----------------------------
 
 

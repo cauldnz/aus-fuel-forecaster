@@ -275,6 +275,60 @@ def test_train_raises_when_sa2_block_entirely_null(tmp_path: Path) -> None:
         tm.train(p, tmp_path / "models", fold=_short_fold_config())
 
 
+def test_train_coerces_object_dtype_feature_columns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Real features.parquet sometimes has feature columns that landed as
+    object dtype (because they were 100% null at write time, or had
+    mixed types in build). LightGBM rejects object outright. The
+    orchestrator should coerce them to numeric before fitting.
+
+    Regression guard for the user's bug:
+        ValueError: pandas dtypes must be int, float or bool.
+        Fields with bad pandas dtypes:
+        upstream_tgp_sydney_lag_0: object, ..., wx_temp_max_c: object, ...
+    """
+    df = _synth_panel(n_stations=4, n_days=200)
+    # Mimic the real-data root cause: a column that was 100% null at
+    # build time gets serialized as object dtype (pyarrow stores it as
+    # a null array, pandas reads it back as object). Reproduce by
+    # round-tripping a None-valued object column through parquet.
+    bad_cols = [
+        "upstream_tgp_sydney_lag_0",
+        "upstream_tgp_sydney_lag_3",
+        "ctx_cash_rate",
+        "ctx_asx200_lag_1",
+        "wx_temp_max_c",
+    ]
+    for c in bad_cols:
+        df[c] = pd.Series([None] * len(df), dtype="object")
+
+    p = tmp_path / "features.parquet"
+    df.to_parquet(p, engine="pyarrow", compression="zstd", index=False)
+    # Sanity: confirm the round-trip preserves object dtype on those cols.
+    rt = pd.read_parquet(p)
+    for c in bad_cols:
+        assert rt[c].dtype == object, f"setup didn't reproduce object dtype for {c}"
+    out_dir = tmp_path / "models"
+
+    with caplog.at_level("INFO", logger="fuel_pred.train.train_models"):
+        tm.train(p, out_dir, fold=_short_fold_config())
+
+    # Modeling completed.
+    assert (out_dir / "model_a.pkl").exists()
+    assert (out_dir / "model_b.pkl").exists()
+    # Coercion log line names the columns it touched.
+    coerced_lines = [
+        r
+        for r in caplog.records
+        if "coerced" in r.message and "object-dtype" in r.message
+    ]
+    assert coerced_lines, "expected an INFO line about object-to-numeric coercion"
+    msg = coerced_lines[0].message
+    for c in bad_cols:
+        assert c in msg, f"expected {c!r} to be named in the coercion log"
+
+
 def test_train_proceeds_when_sparse_non_sa2_columns_have_nulls(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

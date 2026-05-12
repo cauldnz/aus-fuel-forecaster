@@ -42,6 +42,9 @@ class FitResult:
     best_score: float | None  # validation MAE at best_iteration
 
 
+DEFAULT_LOG_PERIOD: int = 50
+
+
 def fit_lgbm(
     *,
     X_train: pd.DataFrame,
@@ -51,6 +54,7 @@ def fit_lgbm(
     feature_columns: list[str],
     categorical_columns: list[str] | None = None,
     params: dict[str, object] | None = None,
+    log_period: int = DEFAULT_LOG_PERIOD,
 ) -> FitResult:
     """Fit one LightGBM regressor with early stopping on the val fold.
 
@@ -64,6 +68,11 @@ def fit_lgbm(
             LightGBM-categorical. None ⇒ no categoricals (all numeric).
         params: hyperparameters dict; defaults to ``config.LGBM_PARAMS``
             (spec §8.2). Override only for tests.
+        log_period: emit a per-iteration eval line every ``log_period``
+            boosting rounds via ``lgb.log_evaluation``. ~30-40 lines per
+            model at the spec's 2000-iteration ceiling. Set to 0 to
+            silence (e.g. in tests where pytest captures stdout and the
+            noise is unhelpful).
 
     Returns:
         ``FitResult`` with the model + audit trail.
@@ -102,6 +111,13 @@ def fit_lgbm(
         callbacks.append(
             lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=False)
         )
+    if log_period > 0:
+        # ``lgb.log_evaluation(period=N)`` prints one line every N rounds:
+        #   ``[N]    valid_0's l1: X.XXXXX``
+        # Useful for "is training still alive / converging" visibility.
+        # Goes to LightGBM's own logger (which writes to stderr by default);
+        # keeps it separate from our INFO-level logger.
+        callbacks.append(lgb.log_evaluation(period=log_period))
 
     # LightGBM accepts categoricals as pandas Categorical dtype or int codes
     # but rejects object/string dtype. The orchestrator

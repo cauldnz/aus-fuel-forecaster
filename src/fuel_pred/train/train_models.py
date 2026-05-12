@@ -25,7 +25,7 @@ from pathlib import Path
 import pandas as pd
 
 from fuel_pred import config
-from fuel_pred.train._fit import FitResult, fit_lgbm
+from fuel_pred.train._fit import DEFAULT_LOG_PERIOD, FitResult, fit_lgbm
 from fuel_pred.train.feature_blocks import (
     BLOCK_COLUMNS,
     MODEL_A_BLOCKS,
@@ -47,6 +47,7 @@ def train(
     fold: FoldConfig | None = None,
     target: str = TARGET_COLUMN,
     save_predictions: bool = True,
+    log_period: int = DEFAULT_LOG_PERIOD,
 ) -> dict[str, FitResult]:
     """Fit Models A and B; persist artefacts under ``out_dir``.
 
@@ -58,6 +59,11 @@ def train(
             (tests pass a synthetic FoldConfig).
         target: target column name; default ``y_t1`` per spec §7.8.
             ``y_t1_t7`` is also valid for the longer-horizon variant.
+        log_period: emit a per-iteration eval line every ``log_period``
+            boosting rounds (passed to ``lgb.log_evaluation``). Default
+            50 — gives ~30-40 lines per model at the spec's 2000-iter
+            ceiling. Set to 0 to silence (e.g. in test runs that
+            capture stdout).
         save_predictions: if True (default), also writes per-fold
             prediction parquets so the comparison-report writer
             (Phase 8) doesn't need to re-load the models.
@@ -191,6 +197,7 @@ def train(
         y_val=y_val,
         feature_columns=cols_a,
         categorical_columns=cat_a,
+        log_period=log_period,
     )
     logger.info("fitting Model B (%d feature columns, with SA2 block)", len(cols_b))
     fit_b = fit_lgbm(
@@ -200,6 +207,7 @@ def train(
         y_val=y_val,
         feature_columns=cols_b,
         categorical_columns=cat_b,
+        log_period=log_period,
     )
 
     # ---- Persist ---------------------------------------------------------
@@ -421,6 +429,17 @@ def main() -> None:
         help="skip writing per-fold prediction parquets (eval can still run "
         "via the pickles, just slower)",
     )
+    parser.add_argument(
+        "--log-period",
+        type=int,
+        default=DEFAULT_LOG_PERIOD,
+        help=(
+            "emit a per-iteration eval line every N boosting rounds "
+            "(default %(default)s; ~30-40 lines per model at the spec's "
+            "2000-iter ceiling). Set 0 to silence, or 1 for every-iter "
+            "output (XGBoost-style)"
+        ),
+    )
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -430,6 +449,7 @@ def main() -> None:
         args.out,
         target=args.target,
         save_predictions=not args.no_predictions,
+        log_period=args.log_period,
     )
 
 

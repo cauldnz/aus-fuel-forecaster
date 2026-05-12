@@ -51,6 +51,15 @@ class FitResult:
     categorical_columns: list[str]
     best_iteration: int | None
     best_score: float | None  # validation MAE at best_iteration
+    # Feature importances per spec §8.5 / §9.3 — keyed by feature name,
+    # with both 'gain' (total reduction in loss attributable to splits on
+    # that feature) and 'split' (count of times the feature was used to
+    # split). Gain is the more interpretable headline metric; split is
+    # included for completeness because they sometimes disagree on
+    # ranking when a feature is queried very often but each split
+    # contributes little.
+    importance_gain: dict[str, float]
+    importance_split: dict[str, int]
 
 
 DEFAULT_LOG_PERIOD: int = 50
@@ -179,10 +188,21 @@ def fit_lgbm(
         f"{best_score:.4f}" if best_score is not None else "n/a",
     )
 
+    # Feature importances per spec §8.5 / §9.3. Use the booster API
+    # rather than the sklearn `.feature_importances_` shortcut so we
+    # can request both 'gain' (default) and 'split' types in one place.
+    booster = model.booster_
+    gains = booster.feature_importance(importance_type="gain")
+    splits = booster.feature_importance(importance_type="split")
+    importance_gain = {col: float(g) for col, g in zip(feature_columns, gains, strict=True)}
+    importance_split = {col: int(s) for col, s in zip(feature_columns, splits, strict=True)}
+
     return FitResult(
         model=model,
         feature_columns=list(feature_columns),
         categorical_columns=list(categorical_columns or []),
         best_iteration=best_iter,
         best_score=best_score,
+        importance_gain=importance_gain,
+        importance_split=importance_split,
     )

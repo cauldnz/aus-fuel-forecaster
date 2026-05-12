@@ -28,6 +28,8 @@ See [`spec.md`](./spec.md) for the full design specification — it is the sourc
 
 A [devcontainer](.devcontainer/devcontainer.json) ships with the repo. With the **Dev Containers** extension installed, opening the project will offer "Reopen in Container" — accept it. The container provides Python 3.11, `uv`, all project deps, and the matching VS Code extensions (Pylance, Ruff, Mypy, Jupyter). First attach takes ~1 min for `uv sync`; subsequent attaches are instant. Works identically in **GitHub Codespaces**.
 
+**Container engine.** Both **Docker Desktop** and **Podman Desktop** are tested and work without changes — the Dev Containers extension auto-detects whichever you have running. Podman ships a `docker` CLI shim by default, so any troubleshooting commands you find in PR notes (e.g. `docker volume rm fuel-pred-uv-cache`) work transparently with Podman too.
+
 ### On the host
 
 ```bash

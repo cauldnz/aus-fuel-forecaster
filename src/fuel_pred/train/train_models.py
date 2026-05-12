@@ -147,6 +147,22 @@ def train(
         train_eligible, val_eligible, folds = _coerce_categorical_union(
             train_eligible, val_eligible, folds, union_cat_cols
         )
+    # Defensive: coerce any remaining object-dtype feature columns to
+    # numeric. LightGBM rejects object dtype outright. Two ways a column
+    # ends up object in features.parquet:
+    #   - It was 100% null at write time (e.g. upstream_tgp_*,
+    #     ctx_cash_rate during fold periods where the fetcher had no data)
+    #     — pandas keeps the previous object inference rather than
+    #     promoting to float.
+    #   - The build step had mixed types (numeric + None) — pandas falls
+    #     back to object when it can't unify them.
+    # Both cases are make_features.py bugs we should fix at the source,
+    # but the coercion here unblocks training on existing features.parquet.
+    # Tracked separately as an issue.
+    non_cat_feature_cols = [c for c in cols_b if c not in union_cat_cols]
+    train_eligible, val_eligible, folds = _coerce_object_to_numeric(
+        train_eligible, val_eligible, folds, non_cat_feature_cols
+    )
     logger.info(
         "identical-rows guard: train %d -> %d (%.1f%% kept), val %d -> %d (%.1f%% kept)",
         len(train_full),
@@ -220,6 +236,53 @@ def _warn_on_missing_blocks(df: pd.DataFrame, blocks: tuple[str, ...]) -> None:
             len(missing),
             missing,
         )
+
+
+def _coerce_object_to_numeric(
+    train: pd.DataFrame,
+    val: pd.DataFrame,
+    folds: dict[str, pd.DataFrame],
+    columns: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
+    """Cast any object-dtype columns in ``columns`` to numeric across all frames.
+
+    LightGBM only accepts int / float / bool / Categorical dtypes; object
+    columns raise. ``pd.to_numeric(errors='coerce')`` turns
+    actual-numeric values into floats and any non-numeric leftovers into
+    NaN — which LightGBM handles natively.
+
+    Logs which columns were coerced (one INFO line) so the surface area
+    is visible. Real fix belongs in build/make_features.py; tracked
+    as a separate issue.
+    """
+    out_train = train.copy()
+    out_val = val.copy()
+    out_folds = {name: df.copy() for name, df in folds.items()}
+
+    coerced: list[str] = []
+    for col in columns:
+        if col not in out_train.columns:
+            continue
+        if out_train[col].dtype != object:
+            continue
+        coerced.append(col)
+        out_train[col] = pd.to_numeric(out_train[col], errors="coerce")
+        if col in out_val.columns:
+            out_val[col] = pd.to_numeric(out_val[col], errors="coerce")
+        for name in out_folds:
+            if col in out_folds[name].columns:
+                out_folds[name][col] = pd.to_numeric(
+                    out_folds[name][col], errors="coerce"
+                )
+
+    if coerced:
+        logger.info(
+            "coerced %d object-dtype feature column(s) to numeric "
+            "(make_features.py bug; tracked separately): %s",
+            len(coerced),
+            coerced,
+        )
+    return out_train, out_val, out_folds
 
 
 def _coerce_categorical_union(

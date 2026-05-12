@@ -27,6 +27,7 @@ import pandas as pd
 from fuel_pred import config
 from fuel_pred.train._fit import FitResult, fit_lgbm
 from fuel_pred.train.feature_blocks import (
+    BLOCK_COLUMNS,
     MODEL_A_BLOCKS,
     MODEL_B_BLOCKS,
     categorical_columns,
@@ -109,13 +110,26 @@ def train(
     )
 
     # ---- Identical-rows guard (spec §8.4) --------------------------------
-    # Both models train on rows where every Model B column is non-null.
-    # This makes the comparison apples-to-apples — Model B doesn't get an
-    # easier dataset just because the SA2 join filtered out hard rows.
+    # Both models train on rows where every column in the SA2 block is
+    # non-null. Spec §8.4 originally read "every column required by Model
+    # B" but the intent — confirmed by spec §8.4's own gloss — is that
+    # the SA2 join shouldn't bias the comparison. Other naturally-sparse
+    # columns (xfuel_dl_*, upstream_tgp_*, occasional Tier-2 macros) are
+    # in BOTH models' feature sets and LightGBM handles their nulls
+    # natively. Filtering on every Model B column is over-strict and on
+    # real corpora can leave zero training rows because rare-coverage
+    # columns combine multiplicatively.
+    #
+    # The right test: keep rows whose SA2 block is fully populated. A and
+    # B see identical row sets, so Model B's only structural advantage is
+    # the SA2 columns themselves. That's exactly what the §8.4
+    # "apples-to-apples" comparison is supposed to isolate.
+    sa2_cols = list(BLOCK_COLUMNS["sa2"])
+    sa2_cols_present = [c for c in sa2_cols if c in work.columns]
     train_full = folds["train"]
     val_full = folds["val"]
-    train_mask = train_full[cols_b].notna().all(axis=1)
-    val_mask = val_full[cols_b].notna().all(axis=1)
+    train_mask = train_full[sa2_cols_present].notna().all(axis=1)
+    val_mask = val_full[sa2_cols_present].notna().all(axis=1)
     train_eligible = train_full.loc[train_mask].copy()
     val_eligible = val_full.loc[val_mask].copy()
     # Coerce string categoricals to pandas Categorical with a category set
@@ -145,7 +159,8 @@ def train(
     if train_eligible.empty:
         raise RuntimeError(
             "identical-rows guard left zero training rows - every train row has "
-            "at least one null in the Model B column set. Check enrichment."
+            "at least one null in the SA2 column set. Check enrichment "
+            f"({len(sa2_cols_present)} sa2_* columns checked: {sa2_cols_present})."
         )
 
     y_train = train_eligible[target]

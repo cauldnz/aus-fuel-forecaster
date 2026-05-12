@@ -25,6 +25,17 @@ from fuel_pred import config
 
 logger = logging.getLogger(__name__)
 
+# Route LightGBM's internal logger (the one `lgb.log_evaluation`,
+# `lgb.early_stopping`, build warnings etc. write to) through our Python
+# `logging` setup so its output inherits the timestamp formatter we
+# configure in the CLI's `logging.basicConfig`. Without this, the
+# `[50] valid_0's l1: 5.234` lines come out raw — useful but missing the
+# `2026-05-12 06:46:26,470 ...` prefix.
+#
+# `register_logger` is process-global; calling it once at module import
+# is fine because every consumer of fuel_pred.train benefits.
+lgb.register_logger(logger.getChild("lightgbm"))
+
 
 @dataclass(frozen=True)
 class FitResult:

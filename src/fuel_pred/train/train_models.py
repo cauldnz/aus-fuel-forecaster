@@ -48,6 +48,7 @@ def train(
     target: str = TARGET_COLUMN,
     save_predictions: bool = True,
     log_period: int = DEFAULT_LOG_PERIOD,
+    n_estimators: int | None = None,
 ) -> dict[str, FitResult]:
     """Fit Models A and B; persist artefacts under ``out_dir``.
 
@@ -64,6 +65,12 @@ def train(
             50 — gives ~30-40 lines per model at the spec's 2000-iter
             ceiling. Set to 0 to silence (e.g. in test runs that
             capture stdout).
+        n_estimators: cap on boosting rounds. When None (default), uses
+            the spec §8.2 value from ``config.LGBM_PARAMS`` (2000).
+            Set lower (e.g. 800) for rough-iteration runs where the
+            last few % of training gain isn't worth the wall clock.
+            Both models receive the same value — keeps the A/B
+            comparison apples-to-apples per spec §8.4.
         save_predictions: if True (default), also writes per-fold
             prediction parquets so the comparison-report writer
             (Phase 8) doesn't need to re-load the models.
@@ -188,6 +195,22 @@ def train(
     y_train = train_eligible[target]
     y_val = val_eligible[target]
 
+    # ---- Build per-fit params (with optional n_estimators override) -----
+    # Both A and B get the same params snapshot — keeps the comparison
+    # apples-to-apples per spec §8.4. Override applied here rather than
+    # mutating config.LGBM_PARAMS so the global stays clean.
+    fit_params = dict(config.LGBM_PARAMS)
+    if n_estimators is not None:
+        spec_default = config.LGBM_PARAMS.get("n_estimators")
+        fit_params["n_estimators"] = n_estimators
+        logger.info(
+            "n_estimators override: %d (spec default %s) — early stopping "
+            "still fires at early_stopping_rounds=%s",
+            n_estimators,
+            spec_default,
+            config.LGBM_PARAMS.get("early_stopping_rounds"),
+        )
+
     # ---- Fit -------------------------------------------------------------
     logger.info("fitting Model A (%d feature columns, no SA2 block)", len(cols_a))
     fit_a = fit_lgbm(
@@ -197,6 +220,7 @@ def train(
         y_val=y_val,
         feature_columns=cols_a,
         categorical_columns=cat_a,
+        params=fit_params,
         log_period=log_period,
     )
     logger.info("fitting Model B (%d feature columns, with SA2 block)", len(cols_b))
@@ -207,6 +231,7 @@ def train(
         y_val=y_val,
         feature_columns=cols_b,
         categorical_columns=cat_b,
+        params=fit_params,
         log_period=log_period,
     )
 
@@ -440,6 +465,18 @@ def main() -> None:
             "output (XGBoost-style)"
         ),
     )
+    parser.add_argument(
+        "--n-estimators",
+        type=int,
+        default=None,
+        help=(
+            "cap on boosting rounds (default: spec §8.2 value, currently "
+            "2000). Lower for rough-iteration runs where the last few %% "
+            "of training gain isn't worth the wall clock — e.g. "
+            "--n-estimators 800. Both Model A and Model B receive the "
+            "same value to keep the §8.4 comparison apples-to-apples"
+        ),
+    )
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -450,6 +487,7 @@ def main() -> None:
         target=args.target,
         save_predictions=not args.no_predictions,
         log_period=args.log_period,
+        n_estimators=args.n_estimators,
     )
 
 

@@ -458,3 +458,45 @@ def test_train_no_predictions_flag_skips_prediction_parquets(
     assert (out_dir / "feature_lists.json").exists()
     assert not (out_dir / "predictions_test_normal.parquet").exists()
     assert not (out_dir / "predictions_test_crisis.parquet").exists()
+
+
+def test_train_n_estimators_override_caps_boosting_rounds(
+    features_path: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`n_estimators=N` should cap each model's boosting rounds at N
+    (modulo earlier early-stopping). Verifies (a) the override log line
+    fires with the right value, (b) the resulting fits respect the cap.
+    """
+    out_dir = tmp_path / "models"
+    with caplog.at_level("INFO", logger="fuel_pred.train.train_models"):
+        result = tm.train(
+            features_path, out_dir, fold=_short_fold_config(), n_estimators=25
+        )
+
+    # Override log line surfaced.
+    override_lines = [
+        r for r in caplog.records if "n_estimators override" in r.message
+    ]
+    assert override_lines, "expected an override log line"
+    assert "25" in override_lines[0].message
+
+    # Each fit's best_iteration is bounded by n_estimators (LightGBM
+    # iterations are 1-indexed; best_iteration may be 0 if early
+    # stopping never improved past the first round).
+    for name, fit in result.items():
+        assert fit.best_iteration is None or fit.best_iteration <= 25, (
+            f"Model {name}'s best_iteration={fit.best_iteration} exceeded cap of 25"
+        )
+
+
+def test_train_n_estimators_default_uses_spec_value(
+    features_path: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When `n_estimators=None` (default), no override log fires —
+    the spec §8.2 value from config.LGBM_PARAMS applies."""
+    out_dir = tmp_path / "models"
+    with caplog.at_level("INFO", logger="fuel_pred.train.train_models"):
+        tm.train(features_path, out_dir, fold=_short_fold_config())
+    assert not any(
+        "n_estimators override" in r.message for r in caplog.records
+    ), "no override log line should fire when n_estimators=None"

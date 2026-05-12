@@ -20,6 +20,15 @@ fi
 echo ">>> uv sync (installing project deps)"
 uv sync --extra dev --extra notebooks
 
+# Add `pip` to the venv. uv intentionally doesn't install pip (it
+# replaces the package manager entirely), but VS Code's Jupyter
+# extension probes for `pip` alongside `ipykernel` when first opening
+# a notebook and pops a "Running cells with ... requires the ipykernel
+# and pip package" prompt if pip is missing. Adding pip here makes
+# Run All Just Work on first attach.
+echo ">>> installing pip into the venv (for VS Code Jupyter compatibility)"
+uv pip install pip --quiet
+
 echo ">>> verifying the project imports + pytest discovers tests"
 uv run python -c "import fuel_pred; print('fuel_pred OK', fuel_pred.__version__)"
 uv run pytest --collect-only -q | tail -5

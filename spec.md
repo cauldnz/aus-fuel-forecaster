@@ -586,6 +586,12 @@ Conventions:
 - Tests are hermetic. Real-network integration tests live in `tools/` (opt-in), mirroring the `abs-census-augmentor` pattern.
 - Logging via `logging` stdlib, not print. Each fetcher logs source URL, row counts, and cache hits at INFO.
 
+### Devcontainer & container engine
+
+- The devcontainer (`.devcontainer/`) targets the Microsoft Python 3.11 base image. Both **Docker Desktop** and **Podman Desktop** are tested and work without changes — the Dev Containers extension auto-detects whichever engine is running.
+- **No Docker-in-Docker / `docker-outside-of-docker`.** The `ghcr.io/devcontainers/features/docker-outside-of-docker` feature is intentionally **not** included. Audit (May 2026): zero references to the Docker socket, `DOCKER_HOST`, `docker-py`, `testcontainers`, or any subprocess invocation of `docker` exist anywhere in `src/`, `tests/`, `tools/`, lifecycle scripts, or the resolved dependency tree (including `abs-census-augmentor`). If a future component genuinely needs Docker access, prefer adding it as an explicit `mounts:` + `containerEnv: DOCKER_HOST=…` pair (so Podman users only need to point the mount at `/run/podman/podman.sock` rather than re-add a feature that assumes a socket path).
+- Verify the audit any time with: `git grep -niE 'docker(-py|_host)|testcontainers|/var/run/docker' -- ':^.devcontainer' ':^.claude'` from the repo root — should return zero matches.
+
 ## 12. Implementation Phases
 
 Each phase produces a runnable artefact and a testable outcome. Designed for sequential overnight Claude Code sessions.

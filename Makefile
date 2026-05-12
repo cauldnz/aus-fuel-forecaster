@@ -87,8 +87,16 @@ features: enrich
 
 .PHONY: train evaluate
 
+## Override knobs for `make train`. Usage:
+##   make train                  -> spec §8.2 defaults (n_estimators=2000)
+##   make train N_ESTIMATORS=800 -> cap boosting rounds for rough-iteration runs
+##   make train LOG_PERIOD=1     -> XGBoost-style every-iter eval output
+TRAIN_OPTS := \
+	$(if $(N_ESTIMATORS),--n-estimators $(N_ESTIMATORS),) \
+	$(if $(LOG_PERIOD),--log-period $(LOG_PERIOD),)
+
 train: features
-	$(PYTHON) -m $(PKG).train.train_models --features $(DATA_PROCESSED)/features.parquet --out $(MODELS)
+	$(PYTHON) -m $(PKG).train.train_models --features $(DATA_PROCESSED)/features.parquet --out $(MODELS) $(TRAIN_OPTS)
 
 evaluate: train
 	$(PYTHON) -m $(PKG).evaluate.compare --features $(DATA_PROCESSED)/features.parquet --models $(MODELS) --out $(RESULTS)/comparison.md

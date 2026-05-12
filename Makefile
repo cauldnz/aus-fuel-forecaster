@@ -84,22 +84,64 @@ features: enrich
 	$(PYTHON) -m $(PKG).build.make_features --panel $(DATA_INTERIM)/panel.parquet --out $(DATA_PROCESSED)/features.parquet
 
 # ----------------------------- Train + evaluate -----------------------------
+#
+# `train` and `evaluate` are file-target-aware on purpose. The data
+# pipeline targets above (clean-data, enrich, features) are .PHONY
+# because they cover several output files each + some are mutate-in-place;
+# threading them through full file dependency tracking is brittle. Result:
+# `make features` always re-runs everything upstream, which costs ~85 min
+# of geocoding even when nothing changed.
+#
+# For training + eval, that's the wrong default — most iterations are
+# "I changed the model code, re-fit on the existing features.parquet."
+# So we pin train to depend on the actual features.parquet *file*. If
+# the file exists, training fires immediately. If it doesn't, the
+# fallback rule routes through `make features` to build it.
+#
+# To force a full pipeline rebuild: `make features train` explicitly.
 
-.PHONY: train evaluate
+.PHONY: train evaluate train-fresh evaluate-fresh
 
 ## Override knobs for `make train`. Usage:
 ##   make train                  -> spec §8.2 defaults (n_estimators=2000)
 ##   make train N_ESTIMATORS=800 -> cap boosting rounds for rough-iteration runs
 ##   make train LOG_PERIOD=1     -> XGBoost-style every-iter eval output
+##
+## To force a full pipeline rebuild (including ~85 min geocoding):
+##   make features train
+## or use the dedicated alias:
+##   make train-fresh
 TRAIN_OPTS := \
 	$(if $(N_ESTIMATORS),--n-estimators $(N_ESTIMATORS),) \
 	$(if $(LOG_PERIOD),--log-period $(LOG_PERIOD),)
 
-train: features
+# File-target fallback: when features.parquet is missing, defer to
+# `make features` to build it. The recursive $(MAKE) is the standard
+# pattern; doesn't loop because the second invocation finds the file
+# either present (no-op) or fires the .PHONY chain to make it.
+$(DATA_PROCESSED)/features.parquet:
+	@echo ">>> $(@F) missing — running 'make features' to build it"
+	$(MAKE) features
+
+train: $(DATA_PROCESSED)/features.parquet
 	$(PYTHON) -m $(PKG).train.train_models --features $(DATA_PROCESSED)/features.parquet --out $(MODELS) $(TRAIN_OPTS)
 
-evaluate: train
+# Same pattern for the per-fold prediction parquets — they're what
+# evaluate.compare actually reads. If they exist, `make evaluate` skips
+# straight to the report renderer; if not, we route through training.
+$(MODELS)/predictions_test_normal.parquet $(MODELS)/predictions_test_crisis.parquet: $(DATA_PROCESSED)/features.parquet
+	@echo ">>> prediction parquets missing — running 'make train'"
+	$(MAKE) train
+
+evaluate: $(MODELS)/predictions_test_normal.parquet $(MODELS)/predictions_test_crisis.parquet
 	$(PYTHON) -m $(PKG).evaluate.compare --features $(DATA_PROCESSED)/features.parquet --models $(MODELS) --out $(RESULTS)/comparison.md
+
+# Force-rebuild aliases — explicit opt-in to re-run upstream stages.
+train-fresh: features
+	$(MAKE) train
+
+evaluate-fresh: train-fresh
+	$(MAKE) evaluate
 
 # ----------------------------- Notebooks -----------------------------
 

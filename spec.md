@@ -363,28 +363,38 @@ sa2_seifa_irsad_score                             # SEIFA.irsad_score  — advan
 sa2_seifa_ier_score                               # SEIFA.ier_score    — economic resources (income, assets, dwelling)
 sa2_seifa_ieo_score                               # SEIFA.ieo_score    — education + occupation
 
-# ABS Estimated Resident Population (latest annual release, currently 2024)
-sa2_erp_population_density_per_km2                # ERP.population_density_per_km2
-sa2_erp_population_0_14                           # ERP.population_0_14   — kid count by SA2
-sa2_erp_population_15_64                          # ERP.population_15_64  — working-age
-sa2_erp_population_65_plus                        # ERP.population_65_plus — retiree count
-sa2_erp_median_age                                # ERP.median_age        — current vs Census 2021 snapshot
+# ABS Estimated Resident Population (latest annual release, currently 2024).
+# v1.5 fetcher only emits `population_total` — the dataset spec markdown's
+# promised age bands / density / median age aren't wired up. See §7.7.3.
+sa2_erp_population_total                          # ERP.population_total — current vs Census 2021 snapshot
 
-# ABS Personal Income in Australia (latest annual release, currently 2022-23)
-sa2_pia_gini_coefficient                          # ABS_PIA.gini_coefficient — within-SA2 inequality
+# ABS Personal Income in Australia (latest annual release, currently 2022-23).
+# LEED-derived from ATO data; complements Census household income with a
+# different bias profile (no top-coding, but excludes non-filers).
+sa2_pia_median_total_income                       # ABS_PIA.median_total_income
+sa2_pia_mean_total_income                         # ABS_PIA.mean_total_income       — mean−median spread captures distribution skew
+sa2_pia_income_earners_count                      # ABS_PIA.income_earners_count    — proxy for employment level
+sa2_pia_median_age_of_earners                     # ABS_PIA.median_age_of_earners
 
-# DSS Payment Demographic Data — quarterly welfare-recipient counts
+# DSS Payment Demographic Data — quarterly welfare-recipient counts.
 # Pinned to latest available release (currently 2025-Q3) for v1; temporal
 # per-row resolution is a deferred follow-up — see §7.7.2.
-sa2_dss_age_pension_recipients                    # DSS.age_pension_recipients
-sa2_dss_jobseeker_payment_recipients              # DSS.jobseeker_payment_recipients
-sa2_dss_disability_support_pension_recipients     # DSS.disability_support_pension_recipients
-sa2_dss_parenting_payment_single_recipients       # DSS.parenting_payment_single_recipients
-sa2_dss_parenting_payment_partnered_recipients    # DSS.parenting_payment_partnered_recipients
-sa2_dss_carer_payment_recipients                  # DSS.carer_payment_recipients
-sa2_dss_youth_allowance_other_recipients          # DSS.youth_allowance_other_recipients
-sa2_dss_youth_allowance_student_recipients        # DSS.youth_allowance_student_recipients
-sa2_dss_commonwealth_rent_assistance_recipients   # DSS.commonwealth_rent_assistance_recipients
+# Selected from the ~21 columns DSS publishes — the omitted ones (ABSTUDY,
+# special benefit, austudy, low-income card, etc.) have very small recipient
+# pops that suppress to null in most NSW SA2s.
+sa2_dss_age_pension_recipients                              # DSS.age_pension_recipients
+sa2_dss_jobseeker_payment_recipients                        # DSS.jobseeker_payment_recipients
+sa2_dss_disability_support_pension_recipients               # DSS.disability_support_pension_recipients
+sa2_dss_parenting_payment_single_recipients                 # DSS.parenting_payment_single_recipients
+sa2_dss_parenting_payment_partnered_recipients              # DSS.parenting_payment_partnered_recipients
+sa2_dss_carer_payment_recipients                            # DSS.carer_payment_recipients
+sa2_dss_carer_allowance_recipients                          # DSS.carer_allowance_recipients
+sa2_dss_youth_allowance_other_recipients                    # DSS.youth_allowance_other_recipients
+sa2_dss_youth_allowance_student_and_apprentice_recipients   # DSS.youth_allowance_student_and_apprentice_recipients
+sa2_dss_commonwealth_rent_assistance_recipients             # DSS.commonwealth_rent_assistance_recipients
+sa2_dss_commonwealth_seniors_health_card_recipients         # DSS.commonwealth_seniors_health_card_recipients
+sa2_dss_family_tax_benefit_a_recipients                     # DSS.family_tax_benefit_a_recipients — kid-count proxy
+sa2_dss_family_tax_benefit_b_recipients                     # DSS.family_tax_benefit_b_recipients — single-parent / single-income family proxy
 ```
 
 This block is the *only* difference between Model A and Model B.
@@ -412,6 +422,18 @@ Two reasons we defer the temporal version to its own PR:
 2. **Cross-edition support is not yet available upstream.** Temporal Phase E.2 is single-edition; pre-2023-Q2 DSS releases are on ASGS Edition 2 and would need Phase F (deferred upstream) to mix with our Edition-3 boundaries. For our train fold (≤ 2022-12-31) the augmentor would either fail or null out. Workaround design (e.g. clamp to earliest Edition-3 release for old rows) is its own conversation.
 
 For v1, DSS lives in the static block at the latest-release pin. The signal it adds (per-SA2 welfare recipient counts) is meaningful even as a constant-across-time feature; the temporal upgrade adds *per-quarter variation*, which only kicks in for val + test data.
+
+#### 7.7.3 Augmentor schema vs spec drift — narrowed surface for ERP / ABS_PIA
+
+PR #45 was drafted against the dataset spec markdown files in `cauldnz/abs-census-augmentor` (`datasets/erp_by_sa2.md`, `datasets/abs_personal_income.md`), which document a richer schema than the v1.5 fetchers actually emit:
+
+- **ERP**: spec promises `population_density_per_km2`, `population_0_14`, `population_15_64`, `population_65_plus`, `median_age`. Fetcher emits only `population_total` + 25 historical-year columns (`population_history_YYYY`).
+- **ABS_PIA**: spec promises `gini_coefficient`, plus `median_employee_income`, `median_investment_income`, `median_super_income`, `median_own_business_income`. Fetcher emits 5 summary stats only (`income_earners_count`, `median_age_of_earners`, `sum_total_income`, `median_total_income`, `mean_total_income`).
+- **DSS**: spec lists 9 named payment columns. Fetcher emits 21 (everything DSS publishes per quarter), and one of the spec'd names (`youth_allowance_student_recipients`) is actually `youth_allowance_student_and_apprentice_recipients` post-snake-casing.
+
+PR #46 fixed our `AUGMENTOR_VARIABLES` dict to match what's actually emitted: ERP shrank from 5 to 1 column, ABS_PIA grew from 1 to 4 columns (the gini was the one promised-but-missing entry), DSS grew from 9 to 13 (using real names + 2 bonus payment categories — FTB-A, FTB-B, carer allowance, seniors health card). Net SA2 surface: 28 → 29 columns.
+
+Upstream issue queued in `tools/upstream_issue_dataset_spec_drift.md` requesting the augmentor either (a) implement the spec'd columns or (b) trim the spec markdown to what the fetchers actually emit. Either way, downstream consumers shouldn't be reading the spec markdowns as ground truth.
 
 ### 7.8 Target
 
@@ -664,9 +686,9 @@ Each phase produces a runnable artefact and a testable outcome. Designed for seq
   - 3 direct GCP fields (`G01.Tot_P_P`, `G02.Median_age_persons`, `G02.Median_tot_hhd_inc_weekly`).
   - 6 PRESET derivations (`PRESET.pct_drive_to_work`, `motor_vehicles_per_dwelling`, `pct_renters`, `pct_employed_full_time`, `pct_aged_65_plus`, `pct_one_parent_family`) via augmentor v1.4.2+ — see §7.7.1 for the resolution history.
   - 4 SEIFA scores (`SEIFA.irsd_score`, `irsad_score`, `ier_score`, `ieo_score`).
-  - 5 ERP variables (`ERP.population_density_per_km2`, `population_0_14`, `population_15_64`, `population_65_plus`, `median_age`) — pinned to the latest annual release.
-  - 1 ABS_PIA variable (`ABS_PIA.gini_coefficient`) — pinned to the latest financial-year release.
-  - 9 DSS welfare-payment recipient counts (`DSS.age_pension_recipients`, `jobseeker_payment_recipients`, `disability_support_pension_recipients`, `parenting_payment_single_recipients`, `parenting_payment_partnered_recipients`, `carer_payment_recipients`, `youth_allowance_other_recipients`, `youth_allowance_student_recipients`, `commonwealth_rent_assistance_recipients`) — pinned to the latest quarterly release; per-row temporal resolution deferred to a follow-up (§7.7.2).
+  - 1 ERP variable (`ERP.population_total`) — pinned to the latest annual release. (PR #46 narrowed this from 5 to 1 — spec drift, see §7.7.3.)
+  - 4 ABS_PIA variables (`ABS_PIA.median_total_income`, `mean_total_income`, `income_earners_count`, `median_age_of_earners`) — pinned to the latest financial-year release. (PR #46 grew this from 1 to 4 — spec drift, see §7.7.3.)
+  - 13 DSS welfare-payment recipient counts (age pension, jobseeker, DSP, parenting × 2, carer × 2, youth allowance × 2, CRA, seniors health card, FTB-A, FTB-B) — pinned to the latest quarterly release; per-row temporal resolution deferred to a follow-up (§7.7.2).
 - Acceptance: `data/interim/stations.parquet` has all `sa2_*` columns + `sa2_code` / `sa2_name` populated for ≥ 95% of stations on the GCP / SEIFA columns. ERP / ABS_PIA / DSS columns may legitimately be null on the small handful of NSW SA2s outside their publication coverage (or under DSS small-cell suppression); coverage is logged per column.
 
 ### Phase 4 — Feature build (1 session)

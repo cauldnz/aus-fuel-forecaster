@@ -1,79 +1,140 @@
-# Pending upstream issue — file at `cauldnz/abs-census-augmentor`
+# Filed upstream issue
 
-This file holds the body of an issue we want filed against the augmentor.
-Once filed, link it from `src/fuel_pred/config.py` (search for
-`PR #46`) and `spec.md` §7.7.3, then delete this file.
+> **Status:** filed as <https://github.com/cauldnz/abs-census-augmentor/issues/65> on 2026-05-13.
+> This file kept locally as a copy of the body — useful for context if the
+> issue is ever closed without resolution.
 
 ---
 
-**Title:** `Dataset spec markdowns promise columns the v1.5 fetchers don't actually emit`
+# Spec markdowns claim columns the v1.5 fetchers don't emit (regression of #23 pattern)
 
-## Summary
+## TL;DR
 
-The dataset spec markdown files in `datasets/` document an aspirational schema for `erp_by_sa2`, `abs_personal_income`, and (to a lesser degree) `dss_payments`. The actual columns the v1.5 fetchers return are a strict subset — sometimes a tiny subset — of what the markdown advertises. Downstream consumers reading the spec markdown as ground truth will write variable lists that crash with `Dataset 'X' doesn't expose columns [...]` at the first `Pipeline.augment(...)` call.
+Three of the five registered datasets ship a `Schema (variables exposed by the augmentor)` table in their spec markdown that lists columns the v1.5 fetcher does not actually emit. Downstream consumers reading the spec markdown as the source of truth — which they should be able to, since it's the documented schema — write variable lists that crash with `Dataset 'X' doesn't expose columns [...]` only at the first `Pipeline.augment(df)` call, after several seconds of fetching and parsing.
 
-This is a documentation-vs-code mismatch, not a runtime bug. But it bit us hard enough that I wanted to flag it: I shipped a PR (cauldnz/aus-fuel-forecaster#45) against the spec markdowns and had to immediately ship a fix-up PR (#46) against the *real* fetcher output once an `enrich` run blew up.
+This is the **same root-cause pattern as #23** ("PRESET column refs don't match real GCP DataPack columns"), where v1.3 PRESETs referenced columns that didn't exist and tests passed because synthetic fixtures encoded the same broken names. The category is *spec drift from code*; the test suite has no rung that catches it.
 
-## Specific gaps observed against `8fe6fa55` (post-PR #64, "Temporal Phase H")
+## Concrete drift, against current `main` (`8fe6fa55`, post-PR #64)
 
-### `datasets/erp_by_sa2.md` — Schema table claims:
+Each row below is **exactly what the fetcher returns from `.load().columns`**, probed by:
 
-| Variable | Status |
+```python
+from pathlib import Path
+from census_augment.datasets._erp import ErpDataSource
+from census_augment.datasets._dss import DssDataSource
+from census_augment.datasets._abs_pia import AbsPiaDataSource
+
+for name, cls, root in [
+    ("ERP", ErpDataSource, "erp_by_sa2"),
+    ("DSS", DssDataSource, "dss_payments"),
+    ("ABS_PIA", AbsPiaDataSource, "abs_personal_income"),
+]:
+    ds = cls(root=Path("/tmp/probe") / root)
+    ds.fetch()
+    print(name, sorted(ds.load().columns))
+```
+
+### `datasets/erp_by_sa2.md`
+
+| `Schema (...)` table promises | `ds.load().columns` actually has |
 |---|---|
-| `ERP.population_total` | ✅ emitted |
-| `ERP.population_male` | ❌ not emitted |
-| `ERP.population_female` | ❌ not emitted |
-| `ERP.population_0_14` | ❌ not emitted |
-| `ERP.population_15_64` | ❌ not emitted |
-| `ERP.population_65_plus` | ❌ not emitted |
-| `ERP.median_age` | ❌ not emitted |
-| `ERP.reference_year` | ✅ emitted (as metadata) |
-| `ERP.population_density_per_km2` | ❌ not emitted |
+| `population_total` | ✅ |
+| `population_male` | ❌ not emitted |
+| `population_female` | ❌ not emitted |
+| `population_0_14` | ❌ not emitted |
+| `population_15_64` | ❌ not emitted |
+| `population_65_plus` | ❌ not emitted |
+| `median_age` | ❌ not emitted |
+| `population_density_per_km2` | ❌ not emitted |
+| `reference_year` | ✅ |
 
-What the fetcher *actually* returns: `state_abbreviation`, `reference_year`, `population_total`, plus `population_history_2001` through `population_history_2025` (25 historical-year columns not mentioned in the spec at all).
+Plus 25 columns the spec doesn't mention at all: `population_history_2001` through `population_history_2025`, plus `state_abbreviation`.
 
-### `datasets/abs_personal_income.md` — Schema table claims:
+So the spec promises 9 columns, 7 of which are vapourware, and the fetcher silently emits 26 columns the spec doesn't mention.
 
-| Variable | Status |
+### `datasets/abs_personal_income.md`
+
+| `Schema (...)` table promises | `ds.load().columns` actually has |
 |---|---|
-| `ABS_PIA.median_total_income` | ✅ emitted |
-| `ABS_PIA.mean_total_income` | ✅ emitted |
-| `ABS_PIA.median_employee_income` | ❌ not emitted |
-| `ABS_PIA.median_investment_income` | ❌ not emitted |
-| `ABS_PIA.median_super_income` | ❌ not emitted |
-| `ABS_PIA.median_own_business_income` | ❌ not emitted |
-| `ABS_PIA.gini_coefficient` | ❌ not emitted |
-| `ABS_PIA.income_earners_count` | ✅ emitted |
-| `ABS_PIA.reference_financial_year` | ✅ emitted (as metadata) |
+| `median_total_income` | ✅ |
+| `mean_total_income` | ✅ |
+| `median_employee_income` | ❌ not emitted |
+| `median_investment_income` | ❌ not emitted |
+| `median_super_income` | ❌ not emitted |
+| `median_own_business_income` | ❌ not emitted |
+| `gini_coefficient` | ❌ not emitted |
+| `income_earners_count` | ✅ |
+| `reference_financial_year` | ✅ |
 
-What the fetcher *actually* returns: 5 summary stats (`income_earners_count`, `median_age_of_earners`, `sum_total_income`, `median_total_income`, `mean_total_income`) plus `reference_financial_year`. No income breakdowns by source (employee / investment / super / business). No gini coefficient.
+Plus `median_age_of_earners` and `sum_total_income` — emitted, not in the spec table.
 
-This appears to be by design — the loader explicitly only parses Table 1.4 of the source XLSX (the total-income summary sheet), not Tables 2-9 which would carry the breakdowns. But the spec markdown reads as if all of it is wired up.
+The fetcher's source code (`_abs_pia.py:50-63`) makes the design explicit: it only parses Table 1.4 (the total-income summary sheet). The spec table reads as if Tables 2-9 (income breakdowns, gini) are also wired up. They aren't.
 
-### `datasets/dss_payments.md` — minor naming drift
+### `datasets/dss_payments.md`
 
-The schema table lists `DSS.youth_allowance_student_recipients`. The actual column emitted is `youth_allowance_student_and_apprentice_recipients` (because that's what DSS publishes the column as, and the snake-caser preserves it).
+This one is closer to reality but has a naming bug:
 
-The DSS spec table also under-promises: it lists 9 columns but the fetcher emits 21 (everything DSS publishes per quarter). That's *better* than the spec, but still a gap between docs and reality.
+- Spec claims `youth_allowance_student_recipients`. The fetcher emits `youth_allowance_student_and_apprentice_recipients` (because that's the column DSS publishes, snake-cased verbatim).
 
-## Suggested resolution (pick one)
+The DSS spec table also under-promises (lists 9 columns, fetcher emits 21). That's *better* than the other two, but still a docs-vs-code gap.
 
-**Option A — Trim the spec markdowns to what the fetchers emit.** Conservative, ships immediately, removes the foot-gun. Add a note like "Schema may grow over releases; check `Registry.get('erp_by_sa2').load().columns` for the live list."
+## Root cause
 
-**Option B — Implement the spec'd columns.** Wire up ERP age bands + density + median age (the source XLSX has them on a different sheet); wire up ABS_PIA Tables 2-9 for the income breakdowns + gini. Honour the spec.
+The augmentor's test suite has no rung that connects the spec markdown to the fetcher output. Specifically:
 
-Either is fine; **the current state — spec drifting from code — is the problem**.
+- `tests/test_dataset_erp.py:168` (`test_load_returns_sa2_indexed_dataframe`) builds a synthetic XLSX from `_erp_xlsx_bytes(...)` whose only data columns are `S/T code`, `S/T name`, ..., `SA2 code`, `SA2 name`, and a series of year columns. The test asserts `population_total`, `population_history_YYYY`, `reference_year` exist — i.e. it asserts what the fetcher *does* produce, not what the spec *says* it should produce.
+- `tests/test_datasets_registry.py` has `test_parse_spec_with_schema_table` that verifies the schema-table parser. It does not verify those parsed `VariableSpec` entries actually correspond to columns the fetcher returns.
 
-## Why this matters for downstream consumers
+Result: spec markdowns can document any schema; fetcher tests can pass against a different schema; nothing fails. This is precisely the failure mode #23 was about, transposed from PRESET source-fields to dataset variable lists.
 
-Anyone using `Pipeline.create(variables={...})` based on reading the spec markdown will hit `ValueError: Dataset 'X' doesn't expose columns [...]` only at the first `augment(df)` call, after the fetchers have already downloaded and parsed their workbooks (so several seconds in). The error message is good ("Available: [first 10 cols]...") but the user has no signal up-front that the spec is aspirational.
+The recurrence is the part that warrants this issue. One-off documentation drift happens; a *pattern* of it on a project that publishes itself as a clean library API is something to fix at the test-architecture level, not by patching individual specs.
 
-A `Registry.validate_variables(variables)` helper that did a one-shot dispatch + column check without doing the full augmentation would catch this at construction time. Could be a nice complement to either Option A or B.
+## Suggested fix
 
-## Tracking on our side
+Add a `tests/test_spec_matches_fetcher_columns.py` that, for each registered dataset, fetches one record (offline against the existing synthetic fixtures) and asserts every `field` in `spec.variables` is present in `fetcher.load().columns`. Pseudocode:
 
-- `cauldnz/aus-fuel-forecaster#46` (the fix-up PR) lists the corrected variable names we settled on.
-- `src/fuel_pred/config.py` AUGMENTOR_VARIABLES has comments referencing this issue.
-- `spec.md` §7.7.3 documents the resulting narrowed surface for v1.
+```python
+@pytest.mark.parametrize("dataset_id", ALL_REGISTERED_DATASETS)
+def test_spec_columns_match_fetcher_output(dataset_id, tmp_path, monkeypatch):
+    spec = registry.get(dataset_id)
+    fetcher = registry.make_fetcher(dataset_id, root=tmp_path)
+    # ... point fetcher at a synthetic fixture that mirrors the *real* source schema ...
+    df = fetcher.load()
+    spec_cols = {v.field for v in spec.variables}
+    fetcher_cols = set(df.columns)
+    missing_from_fetcher = spec_cols - fetcher_cols
+    extras_in_fetcher = fetcher_cols - spec_cols
+    assert not missing_from_fetcher, (
+        f"{dataset_id}: spec claims columns the fetcher doesn't emit: "
+        f"{sorted(missing_from_fetcher)}"
+    )
+    # Optional, but worth having: also flag undocumented bonus columns.
+    if extras_in_fetcher:
+        warnings.warn(
+            f"{dataset_id}: fetcher emits undocumented columns: "
+            f"{sorted(extras_in_fetcher)}",
+            DocsDriftWarning,
+        )
+```
 
-Happy to PR the spec-markdown trim (Option A) if you'd like.
+Hooking into the existing weekly `real-data-check.yml` workflow would catch real-data schema drift too: ABS could rename a column in a future release and we'd see it before downstream does.
+
+The cost is low (one parametrized test) and the benefit is exactly the class of bug we keep tripping over.
+
+## Downstream impact (FYI)
+
+In `cauldnz/aus-fuel-forecaster`:
+- PR #45 was drafted against the spec markdown; assumed all spec'd columns existed.
+- First `make enrich --force` run: `ValueError: Dataset 'erp_by_sa2' doesn't expose columns [...]`. Hours of stations.parquet and ~150 MB of cached ABS workbooks already on disk by then.
+- PR #46 walked the variable list back to what the fetchers actually emit. Schema we ended up with: ERP shrank 5 → 1, ABS_PIA grew 1 → 4 (gini was promised-but-missing), DSS grew 9 → 13 (corrected name + 4 bonus payments).
+
+Diff: <https://github.com/cauldnz/aus-fuel-forecaster/pull/46>
+
+## Suggested resolutions (pick one — but pick *one*; the current state is the problem)
+
+- **Option A — trim specs to reality.** Remove the claimed-but-not-emitted rows from each `Schema (...)` table; add a "(More columns may be wired up in future releases — call `Registry.get(id).load().columns` for the live list.)" footnote. Cheapest fix.
+- **Option B — implement the spec'd columns.** Wire up ERP age bands / density / median age (the source XLSX has them on a different sheet); wire up ABS_PIA Tables 2-9 for income breakdowns and gini. Honour the spec.
+
+Either is fine. The third option — leave it as is — keeps the foot-gun primed for the next downstream consumer.
+
+Happy to PR Option A (the trim) if you'd like a starting point. Or to write the `test_spec_matches_fetcher_columns` test that locks the door behind whichever resolution lands.

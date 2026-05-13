@@ -164,14 +164,16 @@ SA2_COLUMNS: tuple[str, ...] = (
     "sa2_seifa_irsad_score",
     "sa2_seifa_ier_score",
     "sa2_seifa_ieo_score",
-    # ABS Estimated Resident Population (annual; pinned to latest)
-    "sa2_erp_population_density_per_km2",
-    "sa2_erp_population_0_14",
-    "sa2_erp_population_15_64",
-    "sa2_erp_population_65_plus",
-    "sa2_erp_median_age",
+    # ABS Estimated Resident Population (annual; pinned to latest).
+    # Only `population_total` is wired up in the augmentor v1.5 fetcher;
+    # the dataset spec's promised age bands / density / median age aren't
+    # actually emitted (PR #46 fix).
+    "sa2_erp_population_total",
     # ABS Personal Income in Australia (annual; pinned to latest)
-    "sa2_pia_gini_coefficient",
+    "sa2_pia_median_total_income",
+    "sa2_pia_mean_total_income",
+    "sa2_pia_income_earners_count",
+    "sa2_pia_median_age_of_earners",
     # DSS Payment Demographic Data (quarterly; pinned to latest snapshot
     # for v1 — temporal per-row resolution deferred, see spec §7.7.2)
     "sa2_dss_age_pension_recipients",
@@ -180,9 +182,13 @@ SA2_COLUMNS: tuple[str, ...] = (
     "sa2_dss_parenting_payment_single_recipients",
     "sa2_dss_parenting_payment_partnered_recipients",
     "sa2_dss_carer_payment_recipients",
+    "sa2_dss_carer_allowance_recipients",
     "sa2_dss_youth_allowance_other_recipients",
-    "sa2_dss_youth_allowance_student_recipients",
+    "sa2_dss_youth_allowance_student_and_apprentice_recipients",
     "sa2_dss_commonwealth_rent_assistance_recipients",
+    "sa2_dss_commonwealth_seniors_health_card_recipients",
+    "sa2_dss_family_tax_benefit_a_recipients",
+    "sa2_dss_family_tax_benefit_b_recipients",
 )
 
 # Convenience: block-name → column tuple.

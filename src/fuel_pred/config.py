@@ -103,30 +103,47 @@ AUGMENTOR_VARIABLES: dict[str, str] = {
     "seifa_ier_score": "SEIFA.ier_score",
     "seifa_ieo_score": "SEIFA.ieo_score",
     # ABS Estimated Resident Population — latest annual release (currently
-    # 2024). Density + age structure complement Census 2021 with current
-    # post-Census drift. Skipping male/female totals (already covered by
-    # G01.Tot_P_P) and ERP.population_total (redundant with the same).
-    "erp_population_density_per_km2": "ERP.population_density_per_km2",
-    "erp_population_0_14": "ERP.population_0_14",
-    "erp_population_15_64": "ERP.population_15_64",
-    "erp_population_65_plus": "ERP.population_65_plus",
-    "erp_median_age": "ERP.median_age",
+    # 2024). The augmentor's ERP fetcher only exposes a single point-in-time
+    # value (`population_total`) plus per-year history columns; the dataset
+    # spec markdown promises age bands / density / median age but those
+    # aren't wired up in v1.5 (verified empirically — see PR #46 description
+    # for the upstream-issue pointer). Useful signal here is the
+    # post-Census drift: ERP `population_total` (2024) vs `G01.Tot_P_P`
+    # (2021) lets the model see growth corridors that Census alone misses.
+    "erp_population_total": "ERP.population_total",
     # ABS Personal Income in Australia — latest financial-year release
-    # (currently 2022-23). Just the gini coefficient — different signal to
-    # SEIFA's IRSAD score. Median income variants intentionally skipped
-    # because we already have G02.Median_tot_hhd_inc_weekly from Census.
-    "pia_gini_coefficient": "ABS_PIA.gini_coefficient",
+    # (currently 2022-23). LEED-derived from ATO data, so different bias
+    # profile to Census's self-report household income (`G02.Median_tot_hhd_inc_weekly`):
+    # ABS_PIA captures the high-income tail without top-coding, but
+    # excludes non-filers (low end). Both signals worth keeping. Note: the
+    # dataset spec markdown promises `gini_coefficient` but the v1.5
+    # fetcher only emits these 4 summary stats.
+    "pia_median_total_income": "ABS_PIA.median_total_income",
+    "pia_mean_total_income": "ABS_PIA.mean_total_income",
+    "pia_income_earners_count": "ABS_PIA.income_earners_count",
+    "pia_median_age_of_earners": "ABS_PIA.median_age_of_earners",
     # DSS Payment Demographic Data — latest quarter (currently 2025-Q3),
-    # snapshot pinned. These are SA2-level recipient counts, not rates; the
-    # model picks up per-station scaling via interaction with the §7.5 stn
-    # block. Per-row temporal resolution deferred (spec §7.7.2).
+    # snapshot pinned. SA2-level recipient counts, not rates; the model
+    # picks up per-station scaling via interaction with the §7.5 stn block.
+    # Per-row temporal resolution deferred (spec §7.7.2). Selected from the
+    # ~21 columns DSS publishes per quarter — the ones excluded (e.g.
+    # ABSTUDY, special benefit, austudy, low-income card) have very small
+    # recipient pops that suppress to null in most NSW SA2s.
     "dss_age_pension_recipients": "DSS.age_pension_recipients",
     "dss_jobseeker_payment_recipients": "DSS.jobseeker_payment_recipients",
     "dss_disability_support_pension_recipients": "DSS.disability_support_pension_recipients",
     "dss_parenting_payment_single_recipients": "DSS.parenting_payment_single_recipients",
     "dss_parenting_payment_partnered_recipients": "DSS.parenting_payment_partnered_recipients",
     "dss_carer_payment_recipients": "DSS.carer_payment_recipients",
+    "dss_carer_allowance_recipients": "DSS.carer_allowance_recipients",
     "dss_youth_allowance_other_recipients": "DSS.youth_allowance_other_recipients",
-    "dss_youth_allowance_student_recipients": "DSS.youth_allowance_student_recipients",
+    "dss_youth_allowance_student_and_apprentice_recipients": (
+        "DSS.youth_allowance_student_and_apprentice_recipients"
+    ),
     "dss_commonwealth_rent_assistance_recipients": "DSS.commonwealth_rent_assistance_recipients",
+    "dss_commonwealth_seniors_health_card_recipients": (
+        "DSS.commonwealth_seniors_health_card_recipients"
+    ),
+    "dss_family_tax_benefit_a_recipients": "DSS.family_tax_benefit_a_recipients",
+    "dss_family_tax_benefit_b_recipients": "DSS.family_tax_benefit_b_recipients",
 }

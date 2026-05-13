@@ -72,23 +72,61 @@ LGBM_PARAMS: dict[str, object] = {
 }
 
 # ----------------------------- Augmentor variables -----------------------------
-# Keys are the aliases used in the augmentor call (and become column names with
-# the `sa2_` prefix). Values are the GCP DataPack variable references or a
-# marker indicating "derive in src/build/enrich_census.py".
+# Keys are the aliases passed to ``census_augment.Pipeline.create(variables=...)``
+# and become DataFrame column names prefixed with ``sa2_`` (the augmentor's
+# default ``output_prefix``). Values are augmentor variable references in the
+# ``<NAMESPACE>.<field>`` form — see each dataset's spec markdown in the
+# augmentor repo (`datasets/<id>.md`) for the canonical schema.
+#
+# Spec: spec.md §7.7. The order here mirrors the spec block order.
 
 AUGMENTOR_VARIABLES: dict[str, str] = {
+    # Census 2021 GCP — direct fields
     "median_age": "G02.Median_age_persons",
     "median_household_income_weekly": "G02.Median_tot_hhd_inc_weekly",
     "total_population": "G01.Tot_P_P",
-    # The remaining variables are computed as ratios in enrich_census.py
-    # because the augmentor exposes counts; we want percentages.
-    "pct_drive_to_work": "DERIVED.from_G46",
-    "motor_vehicles_per_dwelling": "DERIVED.from_G31",
-    "pct_renters": "DERIVED.from_G33",
-    "pct_employed_full_time": "DERIVED.from_G43",
-    "pct_aged_65_plus": "DERIVED.from_G04",
-    "pct_one_parent_family": "DERIVED.from_G25",
-    # SEIFA is joined separately because the augmentor doesn't expose it
-    # in the GCP DataPack; see src/build/enrich_census.py.
-    "seifa_irsd_score": "EXTERNAL.seifa_2021_irsd",
+    # Census 2021 PRESETs — six curated ratios with their right denominators
+    # baked in; resolves the long-standing "what's the right denominator
+    # per column" spike (augmentor #11, #18, #23 history in spec §7.7.1).
+    "pct_drive_to_work": "PRESET.pct_drive_to_work",
+    "motor_vehicles_per_dwelling": "PRESET.motor_vehicles_per_dwelling",
+    "pct_renters": "PRESET.pct_renters",
+    "pct_employed_full_time": "PRESET.pct_employed_full_time",
+    "pct_aged_65_plus": "PRESET.pct_aged_65_plus",
+    "pct_one_parent_family": "PRESET.pct_one_parent_family",
+    # SEIFA 2021 — four indexes, score values (technical paper recommends
+    # quantiles over scores for modelling but we keep the score for
+    # finer-grained tree splits). State-relative deciles deferred until
+    # we see whether the score scale alone gives the model enough signal.
+    "seifa_irsd_score": "SEIFA.irsd_score",
+    "seifa_irsad_score": "SEIFA.irsad_score",
+    "seifa_ier_score": "SEIFA.ier_score",
+    "seifa_ieo_score": "SEIFA.ieo_score",
+    # ABS Estimated Resident Population — latest annual release (currently
+    # 2024). Density + age structure complement Census 2021 with current
+    # post-Census drift. Skipping male/female totals (already covered by
+    # G01.Tot_P_P) and ERP.population_total (redundant with the same).
+    "erp_population_density_per_km2": "ERP.population_density_per_km2",
+    "erp_population_0_14": "ERP.population_0_14",
+    "erp_population_15_64": "ERP.population_15_64",
+    "erp_population_65_plus": "ERP.population_65_plus",
+    "erp_median_age": "ERP.median_age",
+    # ABS Personal Income in Australia — latest financial-year release
+    # (currently 2022-23). Just the gini coefficient — different signal to
+    # SEIFA's IRSAD score. Median income variants intentionally skipped
+    # because we already have G02.Median_tot_hhd_inc_weekly from Census.
+    "pia_gini_coefficient": "ABS_PIA.gini_coefficient",
+    # DSS Payment Demographic Data — latest quarter (currently 2025-Q3),
+    # snapshot pinned. These are SA2-level recipient counts, not rates; the
+    # model picks up per-station scaling via interaction with the §7.5 stn
+    # block. Per-row temporal resolution deferred (spec §7.7.2).
+    "dss_age_pension_recipients": "DSS.age_pension_recipients",
+    "dss_jobseeker_payment_recipients": "DSS.jobseeker_payment_recipients",
+    "dss_disability_support_pension_recipients": "DSS.disability_support_pension_recipients",
+    "dss_parenting_payment_single_recipients": "DSS.parenting_payment_single_recipients",
+    "dss_parenting_payment_partnered_recipients": "DSS.parenting_payment_partnered_recipients",
+    "dss_carer_payment_recipients": "DSS.carer_payment_recipients",
+    "dss_youth_allowance_other_recipients": "DSS.youth_allowance_other_recipients",
+    "dss_youth_allowance_student_recipients": "DSS.youth_allowance_student_recipients",
+    "dss_commonwealth_rent_assistance_recipients": "DSS.commonwealth_rent_assistance_recipients",
 }

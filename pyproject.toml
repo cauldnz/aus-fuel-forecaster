@@ -33,8 +33,16 @@ dependencies = [
     "shapely>=2.0",
     # Plotting (notebooks pull this in)
     "matplotlib>=3.8",
-    # The augmentor itself
-    "abs-census-augmentor @ git+https://github.com/cauldnz/abs-census-augmentor.git",
+    # The augmentor itself. Pinned to 8fe6fa55 (post-PR #64), the head of
+    # the upstream "Temporal" feature theme — adds the ERP / DSS / ABS_PIA
+    # dataset families and the Temporal mode infrastructure. Two upstream
+    # BREAKING changes land at this rev:
+    #   - `ATO.*` namespace renamed to `ABS_PIA.*` (we never used ATO; no impact)
+    #   - cache restructure to per-ASGS-edition subdirs (must wipe
+    #     `data/raw/seifa/`, `data/raw/boundaries/`, `data/raw/census/`,
+    #     `data/raw/mb/` once on next `make enrich` so the augmentor
+    #     repopulates the new layout).
+    "abs-census-augmentor @ git+https://github.com/cauldnz/abs-census-augmentor.git@8fe6fa55247def1e5bc1be81a2cd33775680ac3e",
 ]
 
 [project.optional-dependencies]

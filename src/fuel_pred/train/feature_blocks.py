@@ -133,30 +133,56 @@ WX_COLUMNS: tuple[str, ...] = (
 # §7.7 SA2 demographic block — the augmentor block; the ONLY difference
 # between Models A and B.
 #
-# Note on PR #43 (reverted by this commit): we briefly trimmed this
-# block to drop 4 features whose linear correlation with Model A
-# columns was |r| ≥ 0.5. That intuition was wrong. Linear correlation
-# isn't a tree-model redundancy measure: LightGBM's `feature_fraction
-# =0.8` randomly drops 20% of columns per tree specifically so it can
-# extract independent signal from correlated inputs. Two features
-# correlated in the population (e.g. `sa2_pct_renters` and
-# `stn_competitors_within_2km` are both downstream of urban density)
-# doesn't stop the model using each one's residual signal.
+# Note on PR #43 (reverted by PR #44): we briefly trimmed this block to
+# drop 4 features whose linear correlation with Model A columns was
+# |r| ≥ 0.5. That intuition was wrong. Linear correlation isn't a
+# tree-model redundancy measure: LightGBM's `feature_fraction=0.8`
+# randomly drops 20% of columns per tree specifically so it can extract
+# independent signal from correlated inputs. Two features correlated in
+# the population (e.g. `sa2_pct_renters` and `stn_competitors_within_2km`
+# are both downstream of urban density) doesn't stop the model from
+# using each one's residual signal in different splits. Restored.
 #
-# The right next move is adding NEW SA2 variables from the augmentor
-# (more breadth, more orthogonal axes) — see the upstream-features
-# investigation that follows this revert.
+# The right next move was adding NEW SA2 variables (more breadth, more
+# orthogonal axes), which is what this PR does: 18 additional columns
+# spanning 3 new datasets the augmentor v1.5 surface registered (DSS
+# welfare, ERP demographics, ABS_PIA income inequality) plus three
+# additional SEIFA scores. The block is kept in spec block-order.
 SA2_COLUMNS: tuple[str, ...] = (
+    # Census 2021 GCP — direct + PRESET ratios
     "sa2_total_population",
     "sa2_median_age",
     "sa2_median_household_income_weekly",
-    "sa2_seifa_irsd_score",
     "sa2_pct_drive_to_work",
     "sa2_motor_vehicles_per_dwelling",
     "sa2_pct_renters",
     "sa2_pct_employed_full_time",
     "sa2_pct_aged_65_plus",
     "sa2_pct_one_parent_family",
+    # SEIFA 2021 — four indexes
+    "sa2_seifa_irsd_score",
+    "sa2_seifa_irsad_score",
+    "sa2_seifa_ier_score",
+    "sa2_seifa_ieo_score",
+    # ABS Estimated Resident Population (annual; pinned to latest)
+    "sa2_erp_population_density_per_km2",
+    "sa2_erp_population_0_14",
+    "sa2_erp_population_15_64",
+    "sa2_erp_population_65_plus",
+    "sa2_erp_median_age",
+    # ABS Personal Income in Australia (annual; pinned to latest)
+    "sa2_pia_gini_coefficient",
+    # DSS Payment Demographic Data (quarterly; pinned to latest snapshot
+    # for v1 — temporal per-row resolution deferred, see spec §7.7.2)
+    "sa2_dss_age_pension_recipients",
+    "sa2_dss_jobseeker_payment_recipients",
+    "sa2_dss_disability_support_pension_recipients",
+    "sa2_dss_parenting_payment_single_recipients",
+    "sa2_dss_parenting_payment_partnered_recipients",
+    "sa2_dss_carer_payment_recipients",
+    "sa2_dss_youth_allowance_other_recipients",
+    "sa2_dss_youth_allowance_student_recipients",
+    "sa2_dss_commonwealth_rent_assistance_recipients",
 )
 
 # Convenience: block-name → column tuple.

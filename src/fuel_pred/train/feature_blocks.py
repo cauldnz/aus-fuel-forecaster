@@ -132,17 +132,52 @@ WX_COLUMNS: tuple[str, ...] = (
 
 # §7.7 SA2 demographic block — the augmentor block; the ONLY difference
 # between Models A and B.
+#
+# Curated set (v2): the first comparison.md (post PR #41) surfaced 14
+# correlations between SA2 features and Model A's existing ctx_traffic_*
+# / stn_competitors_* columns at |r| ≥ 0.5. Four SA2 features were
+# heavily redundant with what Model A could already see:
+#
+#     sa2_pct_drive_to_work       |r|=0.760 vs ctx_traffic_5km_radius_count
+#     sa2_pct_renters             |r|=0.575 vs stn_competitors_within_2km
+#     sa2_motor_vehicles_per_dwelling  |r|=0.537 vs stn_competitors_within_5km
+#     sa2_median_age              |r|=0.516 vs stn_competitors_within_5km
+#
+# Net result on test_normal: Model B was 1.65% WORSE than Model A
+# (Δ MAE +0.104 c/L) and the SA2 block as a whole contributed only
+# ~0.32% of total LightGBM gain. This curated set drops the four
+# heavily-correlated features and keeps only those with |r| < 0.5
+# against any non-SA2 feature. Goal: see whether Model B improves
+# once the noisy/redundant inputs are removed, while still preserving
+# the income / SEIFA / employment signals that genuinely add new info.
+#
+# `data/processed/features.parquet` still carries all 10 sa2_*
+# columns — the augmentor / make_features pipeline is unchanged.
+# We just stop showing four of them to the model.
+#
+# Audit: any SA2 feature added to features.parquet but absent from
+# this tuple is silently ignored by Model B. Use `_DROPPED_SA2_COLUMNS`
+# to remember which ones we excluded so the comparison report can
+# (eventually) flag them as such.
 SA2_COLUMNS: tuple[str, ...] = (
-    "sa2_total_population",
-    "sa2_median_age",
-    "sa2_median_household_income_weekly",
+    # |r| < 0.2 — clearly orthogonal to existing features
     "sa2_seifa_irsd_score",
-    "sa2_pct_drive_to_work",
-    "sa2_motor_vehicles_per_dwelling",
-    "sa2_pct_renters",
     "sa2_pct_employed_full_time",
+    # 0.3 ≤ |r| < 0.5 — borderline, kept for breadth
+    "sa2_total_population",
+    "sa2_median_household_income_weekly",
     "sa2_pct_aged_65_plus",
     "sa2_pct_one_parent_family",
+)
+
+# Tracked separately so the comparison report (and future audits) can
+# tell why these aren't in MODEL_B_BLOCKS. Re-enable individual entries
+# here if/when we want to test an alternative SA2 cut.
+_DROPPED_SA2_COLUMNS: tuple[str, ...] = (
+    "sa2_pct_drive_to_work",            # |r|=0.760 vs ctx_traffic_5km_radius_count
+    "sa2_pct_renters",                  # |r|=0.575 vs stn_competitors_within_2km
+    "sa2_motor_vehicles_per_dwelling",  # |r|=0.537 vs stn_competitors_within_5km
+    "sa2_median_age",                   # |r|=0.516 vs stn_competitors_within_5km
 )
 
 # Convenience: block-name → column tuple.

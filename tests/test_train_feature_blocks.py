@@ -44,6 +44,36 @@ def test_categoricals_are_a_subset_of_block_columns() -> None:
     assert all_block_cols >= fb.CATEGORICAL_COLUMNS
 
 
+def test_curated_sa2_block_excludes_high_correlation_features() -> None:
+    """v2 SA2 set: the four features with |r| >= 0.5 against existing
+    Model A features (per the first comparison.md) must NOT be in
+    SA2_COLUMNS, but should be tracked in _DROPPED_SA2_COLUMNS so the
+    audit trail survives.
+
+    Locks in the curation decision; if someone adds them back without
+    consciously updating the rationale, this test trips.
+    """
+    high_correlation_drops = {
+        "sa2_pct_drive_to_work",
+        "sa2_pct_renters",
+        "sa2_motor_vehicles_per_dwelling",
+        "sa2_median_age",
+    }
+    assert set(fb.SA2_COLUMNS).isdisjoint(high_correlation_drops), (
+        "high-correlation SA2 features must not be in the curated SA2_COLUMNS"
+    )
+    assert set(fb._DROPPED_SA2_COLUMNS) == high_correlation_drops, (
+        "_DROPPED_SA2_COLUMNS must track exactly the curation-dropped set"
+    )
+
+
+def test_curated_sa2_block_keeps_low_correlation_signals() -> None:
+    """The two genuinely orthogonal features (|r| < 0.2 against existing
+    Model A features) must remain in the curated set."""
+    must_keep = {"sa2_seifa_irsd_score", "sa2_pct_employed_full_time"}
+    assert must_keep <= set(fb.SA2_COLUMNS)
+
+
 def test_target_columns_in_exclude_list() -> None:
     """Targets must never reach the model — guard against accidental leakage."""
     assert "y_t1" in fb.EXCLUDE_FROM_FEATURES

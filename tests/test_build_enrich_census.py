@@ -1,7 +1,13 @@
 """Hermetic tests for build.enrich_census.
 
 The augmentor's `Pipeline` is replaced with a stub that returns a
-deterministic enriched frame — no S3, no boundaries download.
+deterministic enriched frame — no S3, no boundaries download, no
+DSS / ERP / ABS_PIA fetches.
+
+Augmentor v1.5+ unifies SEIFA / ERP / DSS / ABS_PIA dispatch through
+``Pipeline.augment(...)``; the previous bespoke ``SeifaDataSource``
+code path (and its ``seifa_loader`` test seam) is gone, so SEIFA
+columns now arrive on the same enriched frame as everything else.
 """
 from __future__ import annotations
 
@@ -20,7 +26,13 @@ class _StubResult:
 
 
 class _StubPipeline:
-    """Minimal stand-in for `census_augment.Pipeline.create(...)`."""
+    """Minimal stand-in for `census_augment.Pipeline.create(...)`.
+
+    Builds an output frame with every column listed in
+    ``ec.ENRICHED_COLUMNS`` so the test surface tracks the full v1.5
+    schema (28 columns at time of writing). Per-row values come from
+    ``sa2_lookup`` keyed on (rounded lat, rounded lon).
+    """
 
     def __init__(self, sa2_lookup: dict[tuple[float, float], dict[str, object]]) -> None:
         self.sa2_lookup = sa2_lookup
@@ -35,20 +47,7 @@ class _StubPipeline:
     ) -> _StubResult:
         self.calls.append(df.copy())
         out = df.copy()
-        added_cols = (
-            "sa2_code",
-            "sa2_name",
-            "sa2_total_population",
-            "sa2_median_age",
-            "sa2_median_household_income_weekly",
-            "sa2_pct_drive_to_work",
-            "sa2_motor_vehicles_per_dwelling",
-            "sa2_pct_renters",
-            "sa2_pct_employed_full_time",
-            "sa2_pct_aged_65_plus",
-            "sa2_pct_one_parent_family",
-        )
-        for col in added_cols:
+        for col in ec.ENRICHED_COLUMNS:
             out[col] = pd.NA
         for idx, row in df.iterrows():
             key = (round(row[latitude_column], 4), round(row[longitude_column], 4))
@@ -90,46 +89,48 @@ def stations_in(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def seifa_loader():
-    """A test seam returning a synthetic SEIFA frame in the augmentor's
-    native shape (indexed by `sa2_code_2021`).
-    """
-    def _loader() -> pd.DataFrame:
-        df = pd.DataFrame(
-            {
-                "sa2_code_2021": ["117011635", "122021422", "999999999"],
-                "irsd_score": [1098.0, 1102.0, 999.0],
-                "irsd_aus_decile": [9.0, 10.0, 5.0],
-            }
-        ).set_index("sa2_code_2021")
-        return df
-
-    return _loader
-
-
-@pytest.fixture
-def seifa_cache_dir(tmp_path: Path) -> Path:
-    """Cache dir; not actually written to in tests because seifa_loader
-    short-circuits the SeifaDataSource construction."""
-    return tmp_path / "seifa_cache"
-
-
-@pytest.fixture
 def lookup() -> dict[tuple[float, float], dict[str, object]]:
+    """A single per-station enrichment payload covering every column the
+    real augmentor would produce post v1.5.
+    """
     return {
         (-33.93, 151.20): {
             "sa2_code": "117011635",
             "sa2_name": "Mascot",
+            # GCP direct
             "sa2_total_population": 21573,
             "sa2_median_age": 30,
             "sa2_median_household_income_weekly": 1900,
-            # PRESET derivations (augmentor v1.4.2+).
+            # PRESETs
             "sa2_pct_drive_to_work": 38.5,
             "sa2_motor_vehicles_per_dwelling": 0.62,
             "sa2_pct_renters": 65.85,
             "sa2_pct_employed_full_time": 63.0,
             "sa2_pct_aged_65_plus": 14.82,
             "sa2_pct_one_parent_family": 18.0,
+            # SEIFA
+            "sa2_seifa_irsd_score": 1098.0,
+            "sa2_seifa_irsad_score": 1102.0,
+            "sa2_seifa_ier_score": 1085.0,
+            "sa2_seifa_ieo_score": 1110.0,
+            # ERP
+            "sa2_erp_population_density_per_km2": 6900.0,
+            "sa2_erp_population_0_14": 3500,
+            "sa2_erp_population_15_64": 16100,
+            "sa2_erp_population_65_plus": 1973,
+            "sa2_erp_median_age": 30.5,
+            # ABS_PIA
+            "sa2_pia_gini_coefficient": 0.42,
+            # DSS
+            "sa2_dss_age_pension_recipients": 850,
+            "sa2_dss_jobseeker_payment_recipients": 410,
+            "sa2_dss_disability_support_pension_recipients": 130,
+            "sa2_dss_parenting_payment_single_recipients": 90,
+            "sa2_dss_parenting_payment_partnered_recipients": 30,
+            "sa2_dss_carer_payment_recipients": 75,
+            "sa2_dss_youth_allowance_other_recipients": 60,
+            "sa2_dss_youth_allowance_student_recipients": 200,
+            "sa2_dss_commonwealth_rent_assistance_recipients": 4200,
         },
         (-33.65, 151.32): {
             "sa2_code": "122021422",
@@ -143,6 +144,25 @@ def lookup() -> dict[tuple[float, float], dict[str, object]]:
             "sa2_pct_employed_full_time": 58.1,
             "sa2_pct_aged_65_plus": 24.8,
             "sa2_pct_one_parent_family": 8.3,
+            "sa2_seifa_irsd_score": 1102.0,
+            "sa2_seifa_irsad_score": 1140.0,
+            "sa2_seifa_ier_score": 1095.0,
+            "sa2_seifa_ieo_score": 1130.0,
+            "sa2_erp_population_density_per_km2": 1100.0,
+            "sa2_erp_population_0_14": 2400,
+            "sa2_erp_population_15_64": 8100,
+            "sa2_erp_population_65_plus": 3181,
+            "sa2_erp_median_age": 46.2,
+            "sa2_pia_gini_coefficient": 0.48,
+            "sa2_dss_age_pension_recipients": 1250,
+            "sa2_dss_jobseeker_payment_recipients": 180,
+            "sa2_dss_disability_support_pension_recipients": 110,
+            "sa2_dss_parenting_payment_single_recipients": 50,
+            "sa2_dss_parenting_payment_partnered_recipients": 15,
+            "sa2_dss_carer_payment_recipients": 90,
+            "sa2_dss_youth_allowance_other_recipients": 25,
+            "sa2_dss_youth_allowance_student_recipients": 120,
+            "sa2_dss_commonwealth_rent_assistance_recipients": 1500,
         },
     }
 
@@ -150,69 +170,59 @@ def lookup() -> dict[tuple[float, float], dict[str, object]]:
 def test_writes_full_schema(
     tmp_path: Path,
     stations_in: Path,
-    seifa_cache_dir: Path,
-    seifa_loader,
     lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
     out = tmp_path / "stations_out.parquet"
     ec.enrich(
         stations_in,
         out,
-        seifa_cache_dir=seifa_cache_dir,
-        seifa_loader=seifa_loader,
         pipeline_factory=_make_stub_factory(lookup),
     )
 
     df = pd.read_parquet(out)
     for col in ec.ENRICHED_COLUMNS:
-        assert col in df.columns
+        assert col in df.columns, f"missing column {col}"
 
-    # Both stations enriched.
+    # Both stations enriched on the dense (GCP / SEIFA) columns.
     assert df["sa2_code"].notna().all()
     assert df["sa2_total_population"].notna().all()
     assert df["sa2_seifa_irsd_score"].notna().all()
+    assert df["sa2_seifa_irsad_score"].notna().all()
 
 
-def test_seifa_irsd_joins_correctly(
+def test_seifa_indexes_populate_via_unified_dispatch(
     tmp_path: Path,
     stations_in: Path,
-    seifa_cache_dir: Path,
-    seifa_loader,
     lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
+    """v1.5 routes ``SEIFA.<field>`` through the same Pipeline.augment call
+    as everything else. All four SEIFA scores land on the output frame.
+    """
     out = tmp_path / "stations_out.parquet"
     ec.enrich(
         stations_in,
         out,
-        seifa_cache_dir=seifa_cache_dir,
-        seifa_loader=seifa_loader,
         pipeline_factory=_make_stub_factory(lookup),
     )
     df = pd.read_parquet(out)
     by_id = {row["station_id"]: row for _, row in df.iterrows()}
     assert int(by_id["s1"]["sa2_seifa_irsd_score"]) == 1098
+    assert int(by_id["s1"]["sa2_seifa_irsad_score"]) == 1102
+    assert int(by_id["s1"]["sa2_seifa_ier_score"]) == 1085
+    assert int(by_id["s1"]["sa2_seifa_ieo_score"]) == 1110
     assert int(by_id["s2"]["sa2_seifa_irsd_score"]) == 1102
 
 
 def test_six_preset_derivations_populate(
     tmp_path: Path,
     stations_in: Path,
-    seifa_cache_dir: Path,
-    seifa_loader,
     lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
-    """Augmentor v1.4.2 — the 6 PRESET-derived percentages populate per row.
-
-    Previously these were stubbed null per spec §7.7.1; v1.4.2's PRESETs
-    fixed against the real GCP DataPack let us pass them as first-class
-    variables to the augmentor.
-    """
+    """The 6 PRESET-derived percentages populate per row (augmentor v1.4.2+)."""
     out = tmp_path / "stations_out.parquet"
     ec.enrich(
         stations_in,
         out,
-        seifa_cache_dir=seifa_cache_dir,
-        seifa_loader=seifa_loader,
         pipeline_factory=_make_stub_factory(lookup),
     )
     df = pd.read_parquet(out)
@@ -229,12 +239,31 @@ def test_six_preset_derivations_populate(
         assert df[col].notna().all(), f"{col} should be populated, got {df[col].tolist()}"
 
 
+def test_new_dataset_columns_populate(
+    tmp_path: Path,
+    stations_in: Path,
+    lookup: dict[tuple[float, float], dict[str, object]],
+) -> None:
+    """ERP / ABS_PIA / DSS columns from the v1.5 surface land on the output."""
+    out = tmp_path / "stations_out.parquet"
+    ec.enrich(
+        stations_in,
+        out,
+        pipeline_factory=_make_stub_factory(lookup),
+    )
+    df = pd.read_parquet(out)
+    for prefix in ("sa2_erp_", "sa2_pia_", "sa2_dss_"):
+        cols = [c for c in df.columns if c.startswith(prefix)]
+        assert cols, f"no columns with prefix {prefix!r} on output"
+        for col in cols:
+            assert df[col].notna().all(), (
+                f"{col} should be populated by the stub, got {df[col].tolist()}"
+            )
+
+
 def test_pipeline_receives_preset_variables(
     tmp_path: Path,
     stations_in: Path,
-    seifa_cache_dir: Path,
-    seifa_loader,
-    lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
     """The DIRECT_VARIABLES dict passes 6 PRESET refs to the augmentor."""
     preset_keys = [
@@ -257,10 +286,20 @@ def test_pipeline_receives_preset_variables(
             )
 
 
+def test_pipeline_includes_all_v15_namespaces() -> None:
+    """DIRECT_VARIABLES exercises every v1.5 dispatch namespace we expect.
+
+    The augmentor v1.5 surface registers G (GCP), PRESET, SEIFA, ERP,
+    ABS_PIA, and DSS. Phase 3 of this project pulls from all six.
+    """
+    namespaces = {v.split(".", 1)[0] for v in ec.DIRECT_VARIABLES.values()}
+    expected = {"G01", "G02", "PRESET", "SEIFA", "ERP", "ABS_PIA", "DSS"}
+    missing = expected - namespaces
+    assert not missing, f"DIRECT_VARIABLES missing namespaces: {missing}"
+
+
 def test_idempotent_skip_when_already_enriched(
     tmp_path: Path,
-    seifa_cache_dir: Path,
-    seifa_loader,
     lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
     """Re-running on a fully-enriched file should not call the augmentor."""
@@ -285,8 +324,6 @@ def test_idempotent_skip_when_already_enriched(
     stub = _StubPipeline(lookup)
     ec.enrich(
         p, p,
-        seifa_cache_dir=seifa_cache_dir,
-        seifa_loader=seifa_loader,
         pipeline_factory=lambda: stub,
     )
 
@@ -295,8 +332,6 @@ def test_idempotent_skip_when_already_enriched(
 
 def test_force_re_enriches_every_row(
     tmp_path: Path,
-    seifa_cache_dir: Path,
-    seifa_loader,
     lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
     df = pd.DataFrame(
@@ -317,8 +352,6 @@ def test_force_re_enriches_every_row(
     stub = _StubPipeline(lookup)
     ec.enrich(
         p, p,
-        seifa_cache_dir=seifa_cache_dir,
-        seifa_loader=seifa_loader,
         pipeline_factory=lambda: stub,
         force=True,
     )
@@ -330,8 +363,6 @@ def test_force_re_enriches_every_row(
 
 def test_partial_enrichment_only_processes_unseen_rows(
     tmp_path: Path,
-    seifa_cache_dir: Path,
-    seifa_loader,
     lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
     """One row already has sa2_code → only the other gets sent to the augmentor."""
@@ -359,8 +390,6 @@ def test_partial_enrichment_only_processes_unseen_rows(
     stub = _StubPipeline(lookup)
     ec.enrich(
         p, p,
-        seifa_cache_dir=seifa_cache_dir,
-        seifa_loader=seifa_loader,
         pipeline_factory=lambda: stub,
     )
 
@@ -372,9 +401,7 @@ def test_partial_enrichment_only_processes_unseen_rows(
         assert list(call["station_id"]) == ["s2"]
 
 
-def test_missing_lat_lon_raises(
-    tmp_path: Path, seifa_cache_dir: Path, seifa_loader
-) -> None:
+def test_missing_lat_lon_raises(tmp_path: Path) -> None:
     df = pd.DataFrame([{"station_id": "s1", "name": "X"}])
     p = tmp_path / "stations.parquet"
     df.to_parquet(p, engine="pyarrow", compression="zstd", index=False)
@@ -382,47 +409,21 @@ def test_missing_lat_lon_raises(
     with pytest.raises(RuntimeError, match="lat/lon"):
         ec.enrich(
             p, p,
-            seifa_cache_dir=seifa_cache_dir,
-            seifa_loader=seifa_loader,
             pipeline_factory=lambda: _StubPipeline({}),
         )
 
 
-def test_seifa_loader_failure_logs_warning_and_keeps_irsd_null(
+def test_acceptance_warns_below_95_percent_on_strict_columns(
     tmp_path: Path,
-    stations_in: Path,
-    seifa_cache_dir: Path,
     lookup: dict[tuple[float, float], dict[str, object]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """If the augmentor's SEIFA fetch raises (e.g. ABS down), degrade gracefully."""
-    out = tmp_path / "stations_out.parquet"
+    """Spec gate: log a clear warning if any *strict* column < 95% coverage.
 
-    def failing_loader() -> pd.DataFrame:
-        raise RuntimeError("ABS unreachable")
-
-    with caplog.at_level("WARNING", logger="fuel_pred.build.enrich_census"):
-        ec.enrich(
-            stations_in,
-            out,
-            seifa_cache_dir=seifa_cache_dir,
-            seifa_loader=failing_loader,
-            pipeline_factory=_make_stub_factory(lookup),
-        )
-
-    df = pd.read_parquet(out)
-    assert df["sa2_seifa_irsd_score"].isna().all()
-    assert any("SEIFA fetch via augmentor failed" in rec.message for rec in caplog.records)
-
-
-def test_acceptance_warns_below_95_percent(
-    tmp_path: Path,
-    seifa_cache_dir: Path,
-    seifa_loader,
-    lookup: dict[tuple[float, float], dict[str, object]],
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Spec gate: log a clear warning if any required column < 95% coverage."""
+    ERP / ABS_PIA / DSS columns are NOT in the strict set (they have
+    legitimate per-SA2 nulls), so partial enrichment of those alone
+    should not trigger a warning.
+    """
     df = pd.DataFrame(
         [
             {"station_id": "s1", "name": "X", "lat": -33.93, "lon": 151.20},
@@ -437,13 +438,18 @@ def test_acceptance_warns_below_95_percent(
     with caplog.at_level("WARNING", logger="fuel_pred.build.enrich_census"):
         ec.enrich(
             p, p,
-            seifa_cache_dir=seifa_cache_dir,
-            seifa_loader=seifa_loader,
             pipeline_factory=_make_stub_factory(lookup),
         )
 
-    # 1 of 3 enriched = 33%; well below 95%.
-    assert any("threshold" in rec.message and "not met" in rec.message for rec in caplog.records)
+    # 1 of 3 enriched = 33%; well below 95% on the strict columns.
+    def _is_strict_breach(msg: str) -> bool:
+        return (
+            "threshold" in msg
+            and "not met" in msg
+            and "sa2_total_population" in msg
+        )
+
+    assert any(_is_strict_breach(rec.message) for rec in caplog.records)
 
 
 def test_split_for_gcp_collision_passes_through_when_no_collision() -> None:
@@ -489,15 +495,11 @@ def test_split_for_gcp_collision_isolates_colliding_direct_var() -> None:
 def test_in_place_overwrite_is_atomic(
     tmp_path: Path,
     stations_in: Path,
-    seifa_cache_dir: Path,
-    seifa_loader,
     lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
     ec.enrich(
         stations_in,
         stations_in,
-        seifa_cache_dir=seifa_cache_dir,
-        seifa_loader=seifa_loader,
         pipeline_factory=_make_stub_factory(lookup),
     )
     df = pd.read_parquet(stations_in)

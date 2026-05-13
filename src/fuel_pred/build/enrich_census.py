@@ -1,40 +1,36 @@
-"""Enrich stations with SA2 code + Census-derived features + SEIFA.
+"""Enrich stations with SA2 code + Census-derived features + SEIFA + ERP + DSS + ABS_PIA.
 
 Reads:
-- ``data/interim/stations.parquet`` (post Phase 2 — has lat/lon)
-- SEIFA: lazy-fetched via the augmentor's ``SeifaDataSource``
-  (``data/raw/seifa/`` cache; ABS Census-tied, refreshed every 5 years)
+- ``data/interim/stations.parquet`` (post Phase 2 — has lat/lon).
+- The augmentor's local caches under ``data/raw/`` (one subdir per dataset:
+  ``boundaries/<edition>/``, ``census/<edition>/``, ``mb/<edition>/``,
+  ``seifa_2021/``, ``erp_by_sa2/``, ``dss_payments/``, ``abs_personal_income/``).
+  Per-edition layout is required by augmentor v1.5+ (Temporal Phase D).
 
 Writes (overwrites in place):
-- ``data/interim/stations.parquet`` with the §6.1 SA2 columns +
-  the §7.7 ``sa2_*`` enrichment block (now all 10 columns populated).
+- ``data/interim/stations.parquet`` with the §6.1 SA2 keys + the §7.7
+  ``sa2_*`` enrichment block (28 columns at v1.5).
 
 Pipeline:
-1. Call ``census_augment.Pipeline.augment(df, latitude_column='lat',
-   longitude_column='lon')`` with the 3 direct GCP variables AND the 6
-   PRESETs for the derived percentages. The augmentor (v1.4.0+) treats
-   ``PRESET.<id>`` as a first-class variable namespace, auto-loading
-   numerator + denominator GCP source columns and evaluating the ratio
-   against the right denominator (per
-   https://github.com/cauldnz/abs-census-augmentor/issues/11 + #18).
-2. Fetch SEIFA via ``census_augment.datasets._seifa.SeifaDataSource``
-   and join on ``sa2_code`` to add ``sa2_seifa_irsd_score``.
+1. One ``Pipeline.augment(stations, latitude_column='lat', longitude_column='lon')``
+   call requesting the full ``config.AUGMENTOR_VARIABLES`` set. The augmentor
+   v1.5 routes each ``<NAMESPACE>.<field>`` reference to the right dataset
+   (GCP, SEIFA, ERP, DSS, ABS_PIA) and returns one DataFrame with all columns
+   prefixed ``sa2_``. PRESET refs are evaluated through the same call.
+2. The result is written out.
 
-All 10 spec §7.7 ``sa2_*`` columns are now populated. The previous
-DEFERRED_DERIVED_COLUMNS null-stubbing is gone — closed by augmentor
-v1.4.2 which fixed the PRESET column refs against the real GCP DataPack
-(see https://github.com/cauldnz/abs-census-augmentor/issues/23).
+The previous bespoke SEIFA path (``SeifaDataSource`` direct call + post-augment
+join) is retired: v1.5 dispatches ``SEIFA.<field>`` through the same registry
+as the other namespaces, so we don't need a parallel code path.
 
-UPSTREAM_GCP_COLLISION: augmentor v1.4.2 has a bug where requesting a
-direct GCP variable (e.g. ``G01.Tot_P_P``) AND a PRESET that uses the
-same code as a source (e.g. ``PRESET.pct_aged_65_plus``) crashes inside
-``_build_gcp_lookup`` with ``ValueError: cannot reindex on an axis with
-duplicate labels`` because the dispatch's friendly→code mapping doesn't
-dedupe and ``table_df[codes].rename(...)`` collapses duplicates. We work
-around it here by splitting colliding requests across two
-``Pipeline.augment(...)`` passes and merging column-wise. Issue body
-queued in ``tools/upstream_issue_gcp_preset_collision.md`` for the
-maintainer to file.
+UPSTREAM_GCP_COLLISION (workaround retained pending verification): augmentor
+v1.4.2 had a bug where requesting a direct GCP variable (e.g. ``G01.Tot_P_P``)
+AND a PRESET that uses the same code as a source (e.g. ``PRESET.pct_aged_65_plus``)
+crashed inside ``_build_gcp_lookup`` with ``ValueError: cannot reindex on an
+axis with duplicate labels``. We work around it by splitting colliding requests
+across two ``Pipeline.augment(...)`` passes and merging column-wise. v1.5 may
+have fixed this — verify with an integration test before removing the splitter.
+Tracking comment: ``tools/upstream_issue_gcp_preset_collision.md``.
 
 Spec: spec.md §6.1, §7.7, §12 Phase 3.
 """
@@ -51,37 +47,32 @@ from fuel_pred import config
 logger = logging.getLogger(__name__)
 
 # Variables we ask the augmentor to compute on each station's SA2.
-# Three direct GCP fields + six PRESETs (curated derived ratios with the
-# right denominator pre-baked, augmentor v1.4.0+). Keys here become the
-# column suffixes — `total_population` → `sa2_total_population`,
-# `pct_renters` → `sa2_pct_renters`, etc.
-DIRECT_VARIABLES: dict[str, str] = {
-    "total_population": "G01.Tot_P_P",
-    "median_age": "G02.Median_age_persons",
-    "median_household_income_weekly": "G02.Median_tot_hhd_inc_weekly",
-    "pct_drive_to_work": "PRESET.pct_drive_to_work",
-    "motor_vehicles_per_dwelling": "PRESET.motor_vehicles_per_dwelling",
-    "pct_renters": "PRESET.pct_renters",
-    "pct_employed_full_time": "PRESET.pct_employed_full_time",
-    "pct_aged_65_plus": "PRESET.pct_aged_65_plus",
-    "pct_one_parent_family": "PRESET.pct_one_parent_family",
-}
+# Sourced from ``config.AUGMENTOR_VARIABLES`` so the spec / config file is the
+# single source of truth — see that module for per-namespace commentary.
+DIRECT_VARIABLES: dict[str, str] = dict(config.AUGMENTOR_VARIABLES)
 
-# Schema we add to stations.parquet — all 10 sa2_* columns from
-# spec §7.7 are now populated by augmentor v1.4.2+.
+# Schema we add to stations.parquet — sa2_code / sa2_name come from the
+# augmentor's geographic resolution; the rest are 1:1 with DIRECT_VARIABLES
+# keys (each prefixed ``sa2_`` per the augmentor's ``output_prefix`` default).
 ENRICHED_COLUMNS: tuple[str, ...] = (
+    "sa2_code",
+    "sa2_name",
+    *(f"sa2_{key}" for key in DIRECT_VARIABLES),
+)
+
+# Subset that gets the strict ≥95% acceptance check. ERP / ABS_PIA / DSS
+# columns are excluded because they have legitimate per-SA2 nulls (publication
+# coverage gaps + DSS small-cell suppression — see spec §7.7). We log per-column
+# coverage for them but don't fail the run.
+ACCEPTANCE_PREFIXES: tuple[str, ...] = (
     "sa2_code",
     "sa2_name",
     "sa2_total_population",
     "sa2_median_age",
     "sa2_median_household_income_weekly",
-    "sa2_seifa_irsd_score",
-    "sa2_pct_drive_to_work",
+    "sa2_pct_",
     "sa2_motor_vehicles_per_dwelling",
-    "sa2_pct_renters",
-    "sa2_pct_employed_full_time",
-    "sa2_pct_aged_65_plus",
-    "sa2_pct_one_parent_family",
+    "sa2_seifa_",
 )
 
 
@@ -158,6 +149,7 @@ def _augment_one_pass(
     variables: dict[str, str],
     *,
     pipeline_factory: object | None = None,
+    data_dir: Path | None = None,
 ) -> pd.DataFrame:
     """Single ``Pipeline.augment`` call. See ``_augment`` for the multi-pass driver."""
     if pipeline_factory is None:
@@ -168,6 +160,7 @@ def _augment_one_pass(
             user_agent=config.USER_AGENT,
             latitude_column="lat",
             longitude_column="lon",
+            data_dir=data_dir,
         )
     else:
         # Test seam: stubs may take no args (legacy) or accept variables (preferred).
@@ -182,7 +175,12 @@ def _augment_one_pass(
     return result.df  # type: ignore[no-any-return]
 
 
-def _augment(stations: pd.DataFrame, *, pipeline_factory: object | None = None) -> pd.DataFrame:
+def _augment(
+    stations: pd.DataFrame,
+    *,
+    pipeline_factory: object | None = None,
+    data_dir: Path | None = None,
+) -> pd.DataFrame:
     """Call the augmentor on ``stations`` and return the enriched DataFrame.
 
     Splits into multiple passes when ``DIRECT_VARIABLES`` triggers the
@@ -191,7 +189,12 @@ def _augment(stations: pd.DataFrame, *, pipeline_factory: object | None = None) 
     the row scaffold.
     """
     groups = _split_for_gcp_collision(DIRECT_VARIABLES)
-    frames = [_augment_one_pass(stations, g, pipeline_factory=pipeline_factory) for g in groups]
+    frames = [
+        _augment_one_pass(
+            stations, g, pipeline_factory=pipeline_factory, data_dir=data_dir
+        )
+        for g in groups
+    ]
     if len(frames) == 1:
         return frames[0]
 
@@ -203,101 +206,35 @@ def _augment(stations: pd.DataFrame, *, pipeline_factory: object | None = None) 
     return merged
 
 
-def _load_seifa(seifa_cache_dir: Path, seifa_loader: object | None = None) -> pd.DataFrame:
-    """Fetch + parse SEIFA via the augmentor's native SeifaDataSource.
-
-    Returns a DataFrame indexed by `sa2_code_2021` (string, 9-digit) with
-    one column per index/flavour (irsd_score, irsd_aus_decile, etc).
-
-    `seifa_loader` is a test seam — when provided, it's called instead
-    of constructing a real SeifaDataSource. Returns a DataFrame.
-    """
-    if seifa_loader is not None:
-        return seifa_loader()  # type: ignore[operator,no-any-return]
-
-    # SeifaDataSource is exposed under the private `_seifa` submodule in
-    # v1.3.0 (the public `census_augment.datasets` namespace ships only
-    # `Registry`, `DatasetSpec`, etc — see augmentor #19).
-    from census_augment.datasets._seifa import SeifaDataSource
-
-    seifa_cache_dir.mkdir(parents=True, exist_ok=True)
-    ds = SeifaDataSource(root=seifa_cache_dir)
-    return ds.load()
-
-
-def _join_seifa(
-    stations: pd.DataFrame,
-    seifa_cache_dir: Path,
-    *,
-    seifa_loader: object | None = None,
-) -> pd.DataFrame:
-    """Add `sa2_seifa_irsd_score` by joining augmentor SEIFA on sa2_code.
-
-    The augmentor's SEIFA frame is indexed by `sa2_code_2021` (string)
-    and exposes 46 columns (4 indexes x score+ranks+deciles+percentiles
-    + state breakdowns + suppression indicators). For Phase 3 v1 we lift
-    only `irsd_score` into `sa2_seifa_irsd_score` per spec §7.7; the
-    additional richness lands as a follow-up.
-    """
-    out = stations.copy()
-    if "sa2_code" not in out.columns:
-        logger.warning("stations have no sa2_code yet — skipping SEIFA join")
-        return out
-
-    try:
-        seifa = _load_seifa(seifa_cache_dir, seifa_loader=seifa_loader)
-    except Exception as exc:
-        logger.warning(
-            "SEIFA fetch via augmentor failed (%s: %s) — sa2_seifa_irsd_score stays null",
-            type(exc).__name__,
-            exc,
-        )
-        return out
-
-    if "irsd_score" not in seifa.columns:
-        logger.warning(
-            "augmentor SEIFA frame missing `irsd_score` (cols=%s) — skipping join",
-            list(seifa.columns)[:10],
-        )
-        return out
-
-    seifa_lookup = (
-        seifa.reset_index()
-        .rename(columns={"sa2_code_2021": "sa2_code", "irsd_score": "sa2_seifa_irsd_score"})
-        [["sa2_code", "sa2_seifa_irsd_score"]]
-    )
-    seifa_lookup["sa2_code"] = seifa_lookup["sa2_code"].astype(str)
-    out["sa2_code"] = out["sa2_code"].astype(str)
-
-    # Drop the null stub column added by `_ensure_columns_exist` so the
-    # merge brings in fresh values rather than producing _x / _y suffixes.
-    if "sa2_seifa_irsd_score" in out.columns:
-        out = out.drop(columns=["sa2_seifa_irsd_score"])
-    return out.merge(seifa_lookup, on="sa2_code", how="left")
-
-
 def _check_acceptance(stations: pd.DataFrame, threshold: float = 0.95) -> None:
-    """Spec §12 Phase 3: at least `threshold` of stations enriched."""
+    """Spec §12 Phase 3: at least `threshold` of stations enriched.
+
+    Strict (warn-on-fail) check applies only to the dense GCP / SEIFA
+    columns enumerated by ``ACCEPTANCE_PREFIXES``. ERP / ABS_PIA / DSS
+    columns are logged at INFO without a coverage gate — they have
+    legitimate per-SA2 nulls (small-cell suppression, coverage gaps),
+    so a < 95% rate isn't necessarily a regression.
+    """
     n = len(stations)
     if n == 0:
         logger.warning("acceptance check skipped: zero stations")
         return
 
-    # All 10 sa2_* spec §7.7 columns are now populated post augmentor v1.4.2.
-    columns_to_check = ENRICHED_COLUMNS
-    for col in columns_to_check:
+    for col in ENRICHED_COLUMNS:
         if col not in stations.columns:
             logger.warning("acceptance: column %s missing", col)
             continue
         non_null = int(stations[col].notna().sum())
         coverage = non_null / n
-        marker = "OK" if coverage >= threshold else "FAIL"
+        is_strict = any(col.startswith(p) for p in ACCEPTANCE_PREFIXES)
+        marker = "OK" if (not is_strict or coverage >= threshold) else "FAIL"
         logger.info(
             "[%s] %s coverage: %.1f%% (%d / %d)", marker, col, 100 * coverage, non_null, n
         )
-        if coverage < threshold:
+        if is_strict and coverage < threshold:
             logger.warning(
-                "acceptance threshold (%.0f%%) not met for %s — investigate", threshold * 100, col
+                "acceptance threshold (%.0f%%) not met for %s — investigate",
+                threshold * 100, col,
             )
 
 
@@ -305,24 +242,24 @@ def enrich(
     stations_path: Path,
     out_path: Path,
     *,
-    seifa_cache_dir: Path | None = None,
+    data_dir: Path | None = None,
     force: bool = False,
     pipeline_factory: object | None = None,
-    seifa_loader: object | None = None,
 ) -> None:
-    """Add SA2 + Census + SEIFA columns to ``stations.parquet``.
+    """Add SA2 + Census + SEIFA + ERP + DSS + ABS_PIA columns to ``stations.parquet``.
 
     Args:
         stations_path: input stations parquet (post Phase 2 — needs lat/lon).
         out_path: output parquet (in-place safe; written atomically via .tmp).
-        seifa_cache_dir: where SeifaDataSource caches the downloaded ABS
-            workbook (~150 KB, refreshed on a 5-year Census cycle).
-            Defaults to ``data/raw/seifa/``.
+        data_dir: where the augmentor stores per-dataset caches. Defaults to
+            ``config.DATA_RAW`` so caches live under ``data/raw/`` alongside
+            our other raw inputs (each dataset gets its own subdir per the
+            v1.5 layout: ``seifa_2021/``, ``erp_by_sa2/``, ``dss_payments/``,
+            ``abs_personal_income/``, plus ``boundaries/<edition>/`` etc.).
         force: if True, re-enrich every row even if `sa2_code` is populated.
         pipeline_factory: test seam — replaces the real augmentor pipeline.
-        seifa_loader: test seam — replaces SeifaDataSource construction.
     """
-    seifa_cache_dir = seifa_cache_dir or (config.DATA_RAW / "seifa")
+    data_dir = data_dir or config.DATA_RAW
 
     stations = pd.read_parquet(stations_path)
     stations = _ensure_columns_exist(stations)
@@ -356,7 +293,9 @@ def enrich(
                 errors="ignore",
             ).reset_index(drop=True)
             original_index = usable.index
-            augmented = _augment(stripped, pipeline_factory=pipeline_factory)
+            augmented = _augment(
+                stripped, pipeline_factory=pipeline_factory, data_dir=data_dir
+            )
             augmented.index = original_index
 
             # Cast each target column to `object` first — pandas refuses to
@@ -368,9 +307,6 @@ def enrich(
             for col in target_cols:
                 if col in augmented.columns:
                     stations.loc[original_index, col] = augmented.loc[original_index, col].values
-
-    # SEIFA join always runs against the latest sa2_code values.
-    stations = _join_seifa(stations, seifa_cache_dir, seifa_loader=seifa_loader)
 
     _check_acceptance(stations)
 
@@ -386,15 +322,18 @@ def main() -> None:
     parser.add_argument("--in", dest="in_path", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument(
-        "--seifa-cache",
+        "--data-dir",
         type=Path,
         default=None,
-        help="Cache dir for the augmentor's SeifaDataSource (default: data/raw/seifa)",
+        help=(
+            "Augmentor cache root (defaults to data/raw). Each dataset writes "
+            "to its own subdir under here per the v1.5 layout."
+        ),
     )
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    enrich(args.in_path, args.out, seifa_cache_dir=args.seifa_cache, force=args.force)
+    enrich(args.in_path, args.out, data_dir=args.data_dir, force=args.force)
 
 
 if __name__ == "__main__":

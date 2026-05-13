@@ -344,19 +344,52 @@ Note on leakage: v1 uses Historical Weather (ERA5 reanalysis) across the full sp
 ### 7.7 Demographic block (`sa2_*`) — the augmentor block
 
 ```
-sa2_median_age                        # G02.Median_age_persons (direct)
-sa2_median_household_income_weekly    # G02.Median_tot_hhd_inc_weekly (direct)
-sa2_total_population                  # G01.Tot_P_P (direct)
-sa2_seifa_irsd_score                  # ABS SEIFA 2021 SA2 IRSD score (augmentor SEIFA join)
-sa2_pct_drive_to_work                 # PRESET.pct_drive_to_work
-sa2_motor_vehicles_per_dwelling       # PRESET.motor_vehicles_per_dwelling
-sa2_pct_renters                       # PRESET.pct_renters
-sa2_pct_employed_full_time            # PRESET.pct_employed_full_time
-sa2_pct_aged_65_plus                  # PRESET.pct_aged_65_plus
-sa2_pct_one_parent_family             # PRESET.pct_one_parent_family
+# Census 2021 GCP — direct fields
+sa2_median_age                                    # G02.Median_age_persons
+sa2_median_household_income_weekly                # G02.Median_tot_hhd_inc_weekly
+sa2_total_population                              # G01.Tot_P_P
+
+# Census 2021 PRESET ratios (six derived percentages, augmentor v1.4.2+)
+sa2_pct_drive_to_work                             # PRESET.pct_drive_to_work
+sa2_motor_vehicles_per_dwelling                   # PRESET.motor_vehicles_per_dwelling
+sa2_pct_renters                                   # PRESET.pct_renters
+sa2_pct_employed_full_time                        # PRESET.pct_employed_full_time
+sa2_pct_aged_65_plus                              # PRESET.pct_aged_65_plus
+sa2_pct_one_parent_family                         # PRESET.pct_one_parent_family
+
+# SEIFA 2021 — four indexes (one-shot per Census)
+sa2_seifa_irsd_score                              # SEIFA.irsd_score   — disadvantage continuum
+sa2_seifa_irsad_score                             # SEIFA.irsad_score  — advantage + disadvantage two-direction
+sa2_seifa_ier_score                               # SEIFA.ier_score    — economic resources (income, assets, dwelling)
+sa2_seifa_ieo_score                               # SEIFA.ieo_score    — education + occupation
+
+# ABS Estimated Resident Population (latest annual release, currently 2024)
+sa2_erp_population_density_per_km2                # ERP.population_density_per_km2
+sa2_erp_population_0_14                           # ERP.population_0_14   — kid count by SA2
+sa2_erp_population_15_64                          # ERP.population_15_64  — working-age
+sa2_erp_population_65_plus                        # ERP.population_65_plus — retiree count
+sa2_erp_median_age                                # ERP.median_age        — current vs Census 2021 snapshot
+
+# ABS Personal Income in Australia (latest annual release, currently 2022-23)
+sa2_pia_gini_coefficient                          # ABS_PIA.gini_coefficient — within-SA2 inequality
+
+# DSS Payment Demographic Data — quarterly welfare-recipient counts
+# Pinned to latest available release (currently 2025-Q3) for v1; temporal
+# per-row resolution is a deferred follow-up — see §7.7.2.
+sa2_dss_age_pension_recipients                    # DSS.age_pension_recipients
+sa2_dss_jobseeker_payment_recipients              # DSS.jobseeker_payment_recipients
+sa2_dss_disability_support_pension_recipients     # DSS.disability_support_pension_recipients
+sa2_dss_parenting_payment_single_recipients       # DSS.parenting_payment_single_recipients
+sa2_dss_parenting_payment_partnered_recipients    # DSS.parenting_payment_partnered_recipients
+sa2_dss_carer_payment_recipients                  # DSS.carer_payment_recipients
+sa2_dss_youth_allowance_other_recipients          # DSS.youth_allowance_other_recipients
+sa2_dss_youth_allowance_student_recipients        # DSS.youth_allowance_student_recipients
+sa2_dss_commonwealth_rent_assistance_recipients   # DSS.commonwealth_rent_assistance_recipients
 ```
 
 This block is the *only* difference between Model A and Model B.
+
+**Coverage / acceptance.** The v1 acceptance gate (≥ 95% non-null) applies to the GCP-derived columns (the 9 Census + 6 PRESET ones) and SEIFA — those are dense ABS publications. ERP / ABS_PIA / DSS columns may be null for SA2s that fall outside the publication's coverage (e.g. "Migratory / offshore / shipping" pseudo-SA2s, or SA2s under DSS small-cell suppression where < ~20 recipients of a given payment type are reported as null). Coverage is logged per-column on every `make enrich` run; columns persistently below 95% on substantive NSW SA2s are investigated, not silenced.
 
 #### 7.7.1 Derived variables — RESOLVED
 
@@ -364,10 +397,21 @@ Originally Phase 3 v1 stubbed the 6 derived percentages with nulls because (a) t
 
 - [abs-census-augmentor#11](https://github.com/cauldnz/abs-census-augmentor/issues/11) → v1.3 shipped curated PRESET specs.
 - [abs-census-augmentor#19](https://github.com/cauldnz/abs-census-augmentor/issues/19) → v1.4.1 ships the spec markdown in the wheel so registries populate on a fresh install.
-- [abs-census-augmentor#18](https://github.com/cauldnz/abs-census-augmentor/pull/18) → v1.4.0 makes `PRESET.<id>` a first-class variable namespace alongside `G\d+.<col>` / `SEIFA.*` / `ERP.*` / `DSS.*` / `ATO.*`.
+- [abs-census-augmentor#18](https://github.com/cauldnz/abs-census-augmentor/pull/18) → v1.4.0 makes `PRESET.<id>` a first-class variable namespace alongside `G\d+.<col>` / `SEIFA.*` / `ERP.*` / `DSS.*` / `ABS_PIA.*`.
 - [abs-census-augmentor#23](https://github.com/cauldnz/abs-census-augmentor/issues/23) → v1.4.2 rewrites the PRESETs against the **real** GCP DataPack (the v1.3 PRESETs referenced columns that didn't actually exist; tests passed because synthetic fixtures encoded the same broken names).
 
-`build.enrich_census` now passes all 6 PRESETs as variables to `Pipeline.augment(...)`. All 10 sa2_* columns from §7.7 are populated. Acceptance threshold (≥ 95% non-null on all 10) applies as spec'd. No null-stub framework remains.
+`build.enrich_census` now passes all 6 PRESETs as variables to `Pipeline.augment(...)`. All Census-derived columns are populated. Acceptance threshold (≥ 95% non-null on the GCP / SEIFA columns) applies as spec'd. No null-stub framework remains.
+
+#### 7.7.2 Temporal DSS — deferred to a follow-up PR
+
+The DSS Payment Demographic Data feed publishes one snapshot per calendar quarter going back to 2022-Q4. The augmentor's v1.5 Temporal mode (`Pipeline.augment(df, date_column=...)`) can resolve each row to the closest quarter independently, giving per-(station, date) DSS values rather than a single static snapshot. This is the natural fit for the augmentor-narrative story — fortnightly Centrelink-day pricing cycles depend on *current* welfare populations, not a 2025-Q3 snapshot held constant across the panel.
+
+Two reasons we defer the temporal version to its own PR:
+
+1. **Architectural change.** Temporal augmentation runs against a panel-shaped DataFrame (one row per (station, date)), not the per-station stations.parquet. That requires a new pipeline step between `panel_grid` and `make_features`, and a Makefile rewire.
+2. **Cross-edition support is not yet available upstream.** Temporal Phase E.2 is single-edition; pre-2023-Q2 DSS releases are on ASGS Edition 2 and would need Phase F (deferred upstream) to mix with our Edition-3 boundaries. For our train fold (≤ 2022-12-31) the augmentor would either fail or null out. Workaround design (e.g. clamp to earliest Edition-3 release for old rows) is its own conversation.
+
+For v1, DSS lives in the static block at the latest-release pin. The signal it adds (per-SA2 welfare recipient counts) is meaningful even as a constant-across-time feature; the temporal upgrade adds *per-quarter variation*, which only kicks in for val + test data.
 
 ### 7.8 Target
 
@@ -616,11 +660,14 @@ Each phase produces a runnable artefact and a testable outcome. Designed for seq
 - Acceptance: `data/interim/stations.parquet` and `data/interim/fuel_daily.parquet` exist with the schemas in §6
 
 ### Phase 3 — Census enrichment (1 session) ✅
-- `build.enrich_census` — wraps `census_augment.Pipeline.augment(...)` (uses pre-resolved lat/lon from Phase 2). All 10 §7.7 sa2_* columns are populated:
-  - 3 direct GCP fields (`G01.Tot_P_P`, `G02.Median_age_persons`, `G02.Median_tot_hhd_inc_weekly`)
+- `build.enrich_census` — wraps `census_augment.Pipeline.augment(...)` (uses pre-resolved lat/lon from Phase 2). All §7.7 `sa2_*` columns are populated through a single unified augmentor call:
+  - 3 direct GCP fields (`G01.Tot_P_P`, `G02.Median_age_persons`, `G02.Median_tot_hhd_inc_weekly`).
   - 6 PRESET derivations (`PRESET.pct_drive_to_work`, `motor_vehicles_per_dwelling`, `pct_renters`, `pct_employed_full_time`, `pct_aged_65_plus`, `pct_one_parent_family`) via augmentor v1.4.2+ — see §7.7.1 for the resolution history.
-  - `sa2_seifa_irsd_score` via the augmentor's native `SeifaDataSource` (v1.3+; previously a local `fetch.seifa` module that's been removed).
-- Acceptance: `data/interim/stations.parquet` has all 10 `sa2_*` columns + `sa2_code` / `sa2_name` populated for ≥ 95% of stations.
+  - 4 SEIFA scores (`SEIFA.irsd_score`, `irsad_score`, `ier_score`, `ieo_score`).
+  - 5 ERP variables (`ERP.population_density_per_km2`, `population_0_14`, `population_15_64`, `population_65_plus`, `median_age`) — pinned to the latest annual release.
+  - 1 ABS_PIA variable (`ABS_PIA.gini_coefficient`) — pinned to the latest financial-year release.
+  - 9 DSS welfare-payment recipient counts (`DSS.age_pension_recipients`, `jobseeker_payment_recipients`, `disability_support_pension_recipients`, `parenting_payment_single_recipients`, `parenting_payment_partnered_recipients`, `carer_payment_recipients`, `youth_allowance_other_recipients`, `youth_allowance_student_recipients`, `commonwealth_rent_assistance_recipients`) — pinned to the latest quarterly release; per-row temporal resolution deferred to a follow-up (§7.7.2).
+- Acceptance: `data/interim/stations.parquet` has all `sa2_*` columns + `sa2_code` / `sa2_name` populated for ≥ 95% of stations on the GCP / SEIFA columns. ERP / ABS_PIA / DSS columns may legitimately be null on the small handful of NSW SA2s outside their publication coverage (or under DSS small-cell suppression); coverage is logged per column.
 
 ### Phase 4 — Feature build (1 session)
 - `build.panel_grid` — assemble the (station, fuel, date) grid

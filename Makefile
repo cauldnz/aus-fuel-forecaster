@@ -76,7 +76,7 @@ clean-data:
 
 enrich: clean-data
 	$(PYTHON) -m $(PKG).spatial.resolve_addrs --in $(DATA_INTERIM)/stations.parquet --out $(DATA_INTERIM)/stations.parquet
-	$(PYTHON) -m $(PKG).build.enrich_census --in $(DATA_INTERIM)/stations.parquet --out $(DATA_INTERIM)/stations.parquet --seifa-cache $(DATA_RAW)/seifa
+	$(PYTHON) -m $(PKG).build.enrich_census --in $(DATA_INTERIM)/stations.parquet --out $(DATA_INTERIM)/stations.parquet --data-dir $(DATA_RAW)
 
 features: enrich
 	$(PYTHON) -m $(PKG).spatial.nearest --stations $(DATA_INTERIM)/stations.parquet --counters $(DATA_INTERIM)/traffic_stations.parquet --out $(DATA_INTERIM)/station_to_counter.parquet

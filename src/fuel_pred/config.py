@@ -106,18 +106,20 @@ AUGMENTOR_VARIABLES: dict[str, str] = {
     # 2024). The augmentor's ERP fetcher only exposes a single point-in-time
     # value (`population_total`) plus per-year history columns; the dataset
     # spec markdown promises age bands / density / median age but those
-    # aren't wired up in v1.5 (verified empirically — see PR #46 description
-    # for the upstream-issue pointer). Useful signal here is the
-    # post-Census drift: ERP `population_total` (2024) vs `G01.Tot_P_P`
-    # (2021) lets the model see growth corridors that Census alone misses.
+    # aren't wired up in v1.5. See upstream
+    # <https://github.com/cauldnz/abs-census-augmentor/issues/65> for the
+    # spec-drift discussion. Useful signal here is the post-Census drift:
+    # ERP `population_total` (2024) vs `G01.Tot_P_P` (2021) lets the model
+    # see growth corridors that Census alone misses.
     "erp_population_total": "ERP.population_total",
     # ABS Personal Income in Australia — latest financial-year release
     # (currently 2022-23). LEED-derived from ATO data, so different bias
     # profile to Census's self-report household income (`G02.Median_tot_hhd_inc_weekly`):
     # ABS_PIA captures the high-income tail without top-coding, but
-    # excludes non-filers (low end). Both signals worth keeping. Note: the
-    # dataset spec markdown promises `gini_coefficient` but the v1.5
-    # fetcher only emits these 4 summary stats.
+    # excludes non-filers (low end). Both signals worth keeping. The dataset
+    # spec markdown promises `gini_coefficient` + 4 income-by-source medians
+    # but the v1.5 fetcher only parses Table 1.4 (the summary sheet); see
+    # upstream issue #65.
     "pia_median_total_income": "ABS_PIA.median_total_income",
     "pia_mean_total_income": "ABS_PIA.mean_total_income",
     "pia_income_earners_count": "ABS_PIA.income_earners_count",

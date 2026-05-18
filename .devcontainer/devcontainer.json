@@ -4,17 +4,6 @@
     "dockerfile": "Dockerfile"
   },
 
-  // Pin DNS to public resolvers. Rootless Podman's default DNS proxy
-  // (aardvark-dns / slirp4netns) periodically wedges — typical symptom is
-  // `curl 1.1.1.1` working while `curl www.abs.gov.au` returns
-  // `Could not resolve host`. That blocks `make enrich` cold because the
-  // augmentor needs www.abs.gov.au, data.gov.au, and nominatim.openstreetmap.org.
-  // Honoured by both Podman and Docker; no lock-in.
-  "runArgs": [
-    "--dns=1.1.1.1",
-    "--dns=8.8.8.8"
-  ],
-
   // First-attach setup: install project deps via uv. The wheel install of
   // abs-census-augmentor (a git+https dep) takes ~30s; subsequent attaches
   // hit the uv cache.

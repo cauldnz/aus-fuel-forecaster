@@ -17,6 +17,18 @@ if [ -d "$HOME/.cache/uv" ] && [ "$(stat -c %U "$HOME/.cache/uv")" != "vscode" ]
     sudo chown -R vscode:vscode "$HOME/.cache/uv"
 fi
 
+# Same heal for the .venv volume. A freshly-created Podman/Docker named
+# volume mounts as root:root mode 755 — fine for read, but uv can't create
+# the venv inside it. Without this chown, `uv sync` fails with
+#   "failed to open file `.venv/CACHEDIR.TAG`: Permission denied (os error 13)"
+# on the first attach after a clean rebuild. Cheap on populated volumes
+# (ownership already correct → no-op recurse).
+VENV_DIR="$(pwd)/.venv"
+if [ -d "$VENV_DIR" ] && [ "$(stat -c %U "$VENV_DIR")" != "vscode" ]; then
+    echo ">>> repairing $VENV_DIR ownership (named-volume init quirk)"
+    sudo chown -R vscode:vscode "$VENV_DIR"
+fi
+
 echo ">>> uv sync (installing project deps)"
 uv sync --extra dev --extra notebooks
 

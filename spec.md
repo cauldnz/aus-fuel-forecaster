@@ -437,6 +437,34 @@ This is the second occurrence of the same root-cause pattern — [augmentor #23]
 
 Lesson on our side: when integrating a 3rd-party data library, don't trust documentation as schema. Probe-fetch one record of each registered dataset and call `.columns` before writing any variable list. Construction-time validation (`Pipeline.create(variables=...)` succeeding) only proves variable refs *parse*, not that they'll *resolve to columns the fetcher returns*. A 5-second probe would have made this a single PR instead of two.
 
+#### 7.7.4 Block curation — 31 columns broadened, then trimmed to 15
+
+PR #45/#46 broadened the SA2 block from 10 → 31 columns by adding the new DSS welfare, ERP, ABS_PIA, and broader-SEIFA features the augmentor v1.5 surface exposed. The first training run with the broadened block produced:
+
+| Iteration | SA2 cols | Val MAE | best_iter | Test_normal Δ MAE | Test_crisis Δ MAE |
+|---|--:|--:|--:|--:|--:|
+| v1.0 (original 10) | 10 | 4.85 | 696 | **−0.059** | **−0.396** |
+| v1.1 (broadened to 31) | 31 | 4.78 | 585 | −0.025 | −0.191 |
+
+Classic overfitting signature: **better val, worse test**. The 31-col model fit val-fold (2023) patterns that didn't generalise into test_normal (2024-25) or test_crisis (2026).
+
+Feature-importance analysis attributes the regression to noise: of the 21 added features, only 5 ranked at ≥ 0.02% gain (ranks 45-51 in Model B); the bottom 16 had gain ≤ 0.01% (effectively noise floor) but still consumed parameter budget that LightGBM could have spent on better features. The high-correlation additions in particular — e.g. `sa2_dss_youth_allowance_student_and_apprentice_recipients` ↔ `stn_competitors_within_5km` at +0.66 — were *partially re-encoding* urban density that the model already gets from the `stn_competitors_*` and `ctx_traffic_*` blocks.
+
+The v1.2 curation keeps the original 10 + the 5 top-by-gain new features:
+
+| Kept | Reason |
+|------|--------|
+| All 10 original (Census GCP + SEIFA IRSD) | Proven baseline across 3 iterations |
+| `sa2_seifa_ieo_score` (rank 51) | Only Education + Occupation SEIFA we'd have; distinct from IRSD |
+| `sa2_dss_parenting_payment_partnered_recipients` (rank 45) | Highest-impact new feature |
+| `sa2_dss_carer_payment_recipients` (rank 48) | Care-giver demographic proxy |
+| `sa2_dss_carer_allowance_recipients` (rank 50) | Broader complement to carer_payment |
+| `sa2_dss_youth_allowance_student_and_apprentice_recipients` (rank 49) | Young-cohort proxy; distinct generational signal despite collinearity with competitor count |
+
+`AUGMENTOR_VARIABLES` in `config.py` still requests all 31 columns so they remain available in `stations.parquet` for future ablation studies. The model just doesn't consume them.
+
+**Implication for temporal-DSS (§7.7.2):** if *static* DSS recipient counts contribute ≤ 0.04% gain at the top end (and most at noise floor), the marginal value of per-quarter temporal resolution is questionable — the temporal hypothesis would need to live entirely in quarter-to-quarter variation that the static snapshot misses. Temporal-DSS is **further deprioritised** until a separate experiment demonstrates the static signal floor isn't the ceiling.
+
 ### 7.8 Target
 
 Built from U91 rows only:

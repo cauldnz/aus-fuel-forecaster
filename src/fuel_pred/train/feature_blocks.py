@@ -133,23 +133,33 @@ WX_COLUMNS: tuple[str, ...] = (
 # §7.7 SA2 demographic block — the augmentor block; the ONLY difference
 # between Models A and B.
 #
-# Note on PR #43 (reverted by PR #44): we briefly trimmed this block to
-# drop 4 features whose linear correlation with Model A columns was
-# |r| ≥ 0.5. That intuition was wrong. Linear correlation isn't a
-# tree-model redundancy measure: LightGBM's `feature_fraction=0.8`
-# randomly drops 20% of columns per tree specifically so it can extract
-# independent signal from correlated inputs. Two features correlated in
-# the population (e.g. `sa2_pct_renters` and `stn_competitors_within_2km`
-# are both downstream of urban density) doesn't stop the model from
-# using each one's residual signal in different splits. Restored.
+# Three iterations behind us:
 #
-# The right next move was adding NEW SA2 variables (more breadth, more
-# orthogonal axes), which is what this PR does: 18 additional columns
-# spanning 3 new datasets the augmentor v1.5 surface registered (DSS
-# welfare, ERP demographics, ABS_PIA income inequality) plus three
-# additional SEIFA scores. The block is kept in spec block-order.
+# 1. v1.0 (PR #43, reverted by #44): briefly trimmed the original 10-col
+#    block to drop 4 features with |r| ≥ 0.5 against traffic/competitor
+#    features. WRONG — LightGBM's `feature_fraction=0.8` extracts
+#    independent signal from correlated inputs by sampling. Reverted.
+#
+# 2. v1.1 (PR #45/#46): broadened from 10 → 31 columns by adding the new
+#    DSS / ERP / ABS_PIA dataset families from the augmentor v1.5 surface
+#    plus the 3 extra SEIFA scores (IRSAD, IER, IEO). Goal: test whether
+#    more variables = more signal.
+#
+# 3. v1.2 (this iteration): the 31-col block REGRESSED on test (Δ MAE
+#    -0.025 vs -0.059 with 10 cols on test_normal). Val improved (4.78
+#    vs 4.85) — classic overfitting signal. Diagnosis: of the 21 new
+#    features, only the top 5 by gain importance contributed meaningfully
+#    (≥ 0.02% gain); the bottom 16 added overfitting capacity without
+#    signal. Curated back to 15: original 10 (proven baseline) + top 5
+#    new by gain importance.
+#
+# Detailed gain ranks from the 31-col run (where every new feature was
+# allowed in) drove the keep/drop decision. See spec.md §7.7.4 for the
+# full reasoning + the kept/dropped table.
 SA2_COLUMNS: tuple[str, ...] = (
-    # Census 2021 GCP — direct + PRESET ratios
+    # ---- The original 10 (Census 2021 GCP + SEIFA IRSD) ----------------
+    # Proven baseline. Each contributes meaningful or marginal-but-stable
+    # signal across iterations 1-3; keep the lot.
     "sa2_total_population",
     "sa2_median_age",
     "sa2_median_household_income_weekly",
@@ -159,36 +169,19 @@ SA2_COLUMNS: tuple[str, ...] = (
     "sa2_pct_employed_full_time",
     "sa2_pct_aged_65_plus",
     "sa2_pct_one_parent_family",
-    # SEIFA 2021 — four indexes
     "sa2_seifa_irsd_score",
-    "sa2_seifa_irsad_score",
-    "sa2_seifa_ier_score",
-    "sa2_seifa_ieo_score",
-    # ABS Estimated Resident Population (annual; pinned to latest).
-    # Only `population_total` is wired up in the augmentor v1.5 fetcher;
-    # the dataset spec's promised age bands / density / median age aren't
-    # actually emitted (PR #46 fix).
-    "sa2_erp_population_total",
-    # ABS Personal Income in Australia (annual; pinned to latest)
-    "sa2_pia_median_total_income",
-    "sa2_pia_mean_total_income",
-    "sa2_pia_income_earners_count",
-    "sa2_pia_median_age_of_earners",
-    # DSS Payment Demographic Data (quarterly; pinned to latest snapshot
-    # for v1 — temporal per-row resolution deferred, see spec §7.7.2)
-    "sa2_dss_age_pension_recipients",
-    "sa2_dss_jobseeker_payment_recipients",
-    "sa2_dss_disability_support_pension_recipients",
-    "sa2_dss_parenting_payment_single_recipients",
-    "sa2_dss_parenting_payment_partnered_recipients",
-    "sa2_dss_carer_payment_recipients",
-    "sa2_dss_carer_allowance_recipients",
-    "sa2_dss_youth_allowance_other_recipients",
-    "sa2_dss_youth_allowance_student_and_apprentice_recipients",
-    "sa2_dss_commonwealth_rent_assistance_recipients",
-    "sa2_dss_commonwealth_seniors_health_card_recipients",
-    "sa2_dss_family_tax_benefit_a_recipients",
-    "sa2_dss_family_tax_benefit_b_recipients",
+    # ---- Top 5 from the broadened experiment by gain importance --------
+    # Each ranked ≥ 0.02% gain in the 31-col run (ranks 45-51). Features
+    # below that threshold (16 of them) added overfitting capacity without
+    # measurable signal and are intentionally excluded. AUGMENTOR_VARIABLES
+    # in `config.py` still requests all 31 so they're available in
+    # stations.parquet for future ablation studies, but the model only
+    # consumes what's in this list.
+    "sa2_seifa_ieo_score",                                     # rank 51, 0.02% gain; only Education+Occupation SEIFA we have (complements IRSD's disadvantage-only continuum)
+    "sa2_dss_parenting_payment_partnered_recipients",          # rank 45, 0.04% gain; highest-impact new feature
+    "sa2_dss_carer_payment_recipients",                        # rank 48, 0.02% gain; care-giver population proxy
+    "sa2_dss_carer_allowance_recipients",                      # rank 50, 0.02% gain; complements carer_payment (allowance is broader, lower-test)
+    "sa2_dss_youth_allowance_student_and_apprentice_recipients",  # rank 49, 0.02% gain; young-cohort proxy (despite |r|=0.66 with competitors_5km, captures distinct generational signal)
 )
 
 # Convenience: block-name → column tuple.

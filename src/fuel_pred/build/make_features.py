@@ -153,7 +153,7 @@ def _add_cross_fuel_features(df: pd.DataFrame) -> pd.DataFrame:
         "xfuel_dl_roll_mean_7",
         "xfuel_u91_minus_dl_lag_1",
     ):
-        out.loc[dl_mask, col] = pd.NA
+        out.loc[dl_mask, col] = np.nan
 
     return out
 
@@ -245,7 +245,9 @@ def add_upstream_features(
             "upstream_tgp_sydney_lag_7",
             "upstream_tgp_minus_brent_aud_lag_7",
         ):
-            daily[col] = pd.NA
+            # np.nan (not pd.NA) so the column is float64 not object —
+            # LightGBM handles NaN-on-float natively, but rejects object.
+            daily[col] = np.nan
 
     upstream_cols = [c for c in daily.columns if c.startswith("upstream_")]
     out = df.merge(
@@ -465,8 +467,8 @@ def add_context_features(
             out[f"ctx_traffic_top{rank}_lag_7"] = joined["traffic_lag_7"].values
     else:
         for rank in (1, 2, 3):
-            out[f"ctx_traffic_top{rank}_lag_1"] = pd.NA
-            out[f"ctx_traffic_top{rank}_lag_7"] = pd.NA
+            out[f"ctx_traffic_top{rank}_lag_1"] = np.nan
+            out[f"ctx_traffic_top{rank}_lag_7"] = np.nan
 
     # Radius count from summary.
     radius_col = next(
@@ -482,14 +484,14 @@ def add_context_features(
             how="left",
         )
     else:
-        out["ctx_traffic_5km_radius_count"] = pd.NA
+        out["ctx_traffic_5km_radius_count"] = np.nan
 
     # Apply 50 km cutoff per spec §7.4.
     if "ctx_traffic_top1_distance_km" in out.columns:
         too_far = out["ctx_traffic_top1_distance_km"] > 50.0
         for col in out.columns:
             if col.startswith("ctx_traffic_"):
-                out.loc[too_far, col] = pd.NA
+                out.loc[too_far, col] = np.nan
 
     # Phase 5 macro features. Each is None-tolerant: if the upstream
     # parquet wasn't fetched, the column ships as null and LightGBM
@@ -533,7 +535,7 @@ def _add_macro_feature(
     """
     out = df.copy()
     if macro is None or macro.empty or value_col not in macro.columns:
-        out[feature_col] = pd.NA
+        out[feature_col] = np.nan
         return out
 
     macro = macro.assign(date=pd.to_datetime(macro["date"]).dt.date).sort_values("date")
@@ -581,14 +583,17 @@ def add_station_features(df: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFra
     if "sa2_name" in s.columns:
         s["stn_is_metro"] = s["sa2_name"].apply(_is_metro_sa2_name)
     else:
-        s["stn_is_metro"] = pd.NA
+        s["stn_is_metro"] = np.nan
 
     # Competitor counts via spatial join on station coords.
     competitors = _compute_competitor_counts(stations)
     s = s.merge(competitors, on="station_id", how="left")
 
     # Stn_is_franchisee: stub null per spec §13 Q3.
-    s["stn_is_franchisee"] = pd.NA
+    # np.nan → float64 (not pd.NA → object) so LightGBM accepts the
+    # column as a numeric feature with all-missing values rather than
+    # raising "pandas dtypes must be int, float or bool".
+    s["stn_is_franchisee"] = np.nan
 
     # Drop columns we used for derivation but don't want to expose.
     s = s.drop(columns=[c for c in ("lat", "lon", "sa2_name") if c in s.columns])
@@ -663,7 +668,7 @@ def add_weather_features(df: pd.DataFrame, weather_dir: Path | None) -> pd.DataF
     if weather_dir is None or not weather_dir.exists():
         out = df.copy()
         for col in wx_cols:
-            out[col] = pd.NA
+            out[col] = np.nan
         return out
 
     pieces: list[pd.DataFrame] = []
@@ -679,7 +684,7 @@ def add_weather_features(df: pd.DataFrame, weather_dir: Path | None) -> pd.DataF
     if not pieces:
         out = df.copy()
         for col in wx_cols:
-            out[col] = pd.NA
+            out[col] = np.nan
         return out
 
     weather = pd.concat(pieces, ignore_index=True)
@@ -714,9 +719,11 @@ def add_sa2_features(df: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:
     out = df.merge(sa2, on="station_id", how="left")
 
     # Add any deferred columns that aren't in stations yet, as nulls.
+    # np.nan → float64 (not pd.NA → object) per the convention
+    # documented in the upstream / ctx / stn / wx blocks above.
     for col in SA2_FEATURE_COLS:
         if col not in out.columns:
-            out[col] = pd.NA
+            out[col] = np.nan
 
     return out
 
@@ -746,8 +753,8 @@ def add_targets(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # Null out targets on Diesel rows.
-    out.loc[~is_u91, "y_t1"] = pd.NA
-    out.loc[~is_u91, "y_t1_t7"] = pd.NA
+    out.loc[~is_u91, "y_t1"] = np.nan
+    out.loc[~is_u91, "y_t1_t7"] = np.nan
 
     return out
 

@@ -78,7 +78,23 @@
 
   // Persist the uv cache across container rebuilds so re-installing deps
   // is fast even after a clean rebuild.
+  //
+  // Also mount `.venv` as a volume rather than letting it live inside the
+  // workspace bind mount. Two reasons:
+  //   1. EPERM on cross-filesystem fast copies. uv uses `copy_file_range` /
+  //      `clonefile` to install packages from its cache; those syscalls
+  //      fail with "Operation not permitted" when source is on the
+  //      container FS and destination is on the bind mount (commonly hit
+  //      on Podman-on-Windows via WSL2). With both cache + venv on real
+  //      volumes, uv's fast paths work.
+  //   2. Performance. Bind mounts go through 9p / virtiofs and are
+  //      noticeably slower than container-native FS for many-small-files
+  //      workloads like Python package installs.
+  // Side-effect: `.venv/` is no longer visible from the Windows host. That
+  // is fine — VS Code's Python interpreter discovery happens INSIDE the
+  // container, where the volume mount is fully visible.
   "mounts": [
-    "source=fuel-pred-uv-cache,target=/home/vscode/.cache/uv,type=volume"
+    "source=fuel-pred-uv-cache,target=/home/vscode/.cache/uv,type=volume",
+    "source=fuel-pred-venv,target=/workspaces/aus-fuel-forecaster/.venv,type=volume"
   ]
 }

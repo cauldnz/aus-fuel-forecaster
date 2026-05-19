@@ -692,25 +692,22 @@ def add_weather_features(df: pd.DataFrame, weather_dir: Path | None) -> pd.DataF
 # 7.7 Demographic block
 # ============================================================
 
-SA2_FEATURE_COLS: tuple[str, ...] = (
-    "sa2_total_population",
-    "sa2_median_age",
-    "sa2_median_household_income_weekly",
-    "sa2_seifa_irsd_score",
-    "sa2_pct_drive_to_work",
-    "sa2_motor_vehicles_per_dwelling",
-    "sa2_pct_renters",
-    "sa2_pct_employed_full_time",
-    "sa2_pct_aged_65_plus",
-    "sa2_pct_one_parent_family",
-)
+# The single source of truth for the SA2 block is `feature_blocks.SA2_COLUMNS`
+# (which the model code consumes via BLOCK_COLUMNS). Re-importing it here keeps
+# make_features in lockstep — when the SA2 block is broadened (PR #45 added
+# DSS/ERP/PIA columns; #46 corrected them against the v1.5 augmentor's real
+# schema), this module picks up the new columns without an extra edit.
+from fuel_pred.train.feature_blocks import SA2_COLUMNS as SA2_FEATURE_COLS
 
 
 def add_sa2_features(df: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:
     """Join the §7.7 demographic block from `stations.parquet`.
 
-    Phase 3 ships 4 of these populated; the other 6 are null stubs
-    per spec §7.7.1. This function joins whatever is present.
+    The SA2 columns are sourced from ``feature_blocks.SA2_COLUMNS`` so this
+    function stays in lockstep with what the model code expects. Columns
+    in the block that don't exist in ``stations`` yet are added as nulls
+    (then either populated downstream or filtered out by the model's
+    feature-list logic).
     """
     cols = ["station_id"] + [c for c in SA2_FEATURE_COLS if c in stations.columns]
     sa2 = stations[cols].copy()

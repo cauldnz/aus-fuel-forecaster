@@ -705,7 +705,7 @@ Each phase produces a runnable artefact and a testable outcome. Designed for seq
 - Hermetic tests for each fetcher (responses-mocked)
 - Acceptance: `make fetch-tier1` populates `data/raw/` end-to-end on a fresh machine. `make fetch-weather` runs separately after `make clean-data`.
 
-### Phase 2 — Cleaning + station roster (1 session)
+### Phase 2 — Cleaning + station roster (1 session) ✅
 - `clean.fuelcheck` — read all monthly Parquets, normalise brand strings via `data/static/brand_aliases.csv`, hash `(name, address, suburb, postcode)` into `station_id`, aggregate per `(station_id, fuel_code, date)` for both U91 and Diesel
 - `spatial.resolve_addrs` — uses `abs-census-augmentor` (now `census-augment` import) with `GnafConfig(mode='remote')` + Nominatim fallback. One geocode per `station_id` (not per unique address — see §13 resolved). Idempotent: rows that already have `(lat, lon, geocoder)` populated are skipped unless `--force`. Nominatim responses cached on disk under `data/raw/geocode_cache/` to keep usage polite (Nominatim usage policy: 1 req/sec, no bulk).
 - `clean.traffic` — daily aggregation from hourly. Drop rows from non-permanent stations and `quality_rating < 3` (TfNSW's data-quality scale runs 1-5; ratings 1-2 indicate sparse coverage that produces unreliable daily totals — see the dataset's Data Quality Statement)
@@ -721,13 +721,13 @@ Each phase produces a runnable artefact and a testable outcome. Designed for seq
   - 13 DSS welfare-payment recipient counts (age pension, jobseeker, DSP, parenting × 2, carer × 2, youth allowance × 2, CRA, seniors health card, FTB-A, FTB-B) — pinned to the latest quarterly release; per-row temporal resolution deferred to a follow-up (§7.7.2).
 - Acceptance: `data/interim/stations.parquet` has all `sa2_*` columns + `sa2_code` / `sa2_name` populated for ≥ 95% of stations on the GCP / SEIFA columns. ERP / ABS_PIA / DSS columns may legitimately be null on the small handful of NSW SA2s outside their publication coverage (or under DSS small-cell suppression); coverage is logged per column.
 
-### Phase 4 — Feature build (1 session)
+### Phase 4 — Feature build (1 session) ✅
 - `build.panel_grid` — assemble the (station, fuel, date) grid
 - `build.make_features` — implement all blocks from §7
 - Forward-fill, lag, rolling, calendar features, weather join, traffic join
 - Acceptance: `data/processed/features.parquet` exists, schema matches §7, no rows where every feature is null
 
-### Phase 5 — Tier 2 fetchers + features (1 session)
+### Phase 5 — Tier 2 fetchers + features (1 session) ✅
 - `fetch.cash_rate`, `fetch.asx200`, `fetch.inflation_expectations` (replaces `consumer_confidence` per §5.2 — Roy Morgan unavailable as a clean feed), `fetch.aip_tgp`
 - AIP TGP scraper (start collecting forward; no historical backfill required)
 - Add corresponding feature columns
@@ -743,14 +743,14 @@ Each phase produces a runnable artefact and a testable outcome. Designed for seq
 - `evaluate.compare` — implemented; consumes the prediction parquets and writes `results/comparison.md` with overall + four segmented tables (metro/regional, brand top-8 + Other, fuel, SEIFA quintile) per spec §8.5/§9.2.
 - Acceptance: both models saved, prediction parquets persisted, `results/comparison.md` generated.
 
-### Phase 7 — Notebooks (1-2 sessions)
+### Phase 7 — Notebooks (1-2 sessions) ✅
 - Implement `01_eda`, `02_modeling`, `03_explainability` per §9
 - Acceptance: all three run top-to-bottom without errors against the saved feature matrix
 
-### Phase 8 — Polish (1 session)
+### Phase 8 — Polish (1 session) ✅
 - README with quickstart
 - CLAUDE.md with contributor conventions
-- Test coverage check
+- Test coverage check (310 passed, 5 previously-skipped feature-engineering tests now implemented)
 - One end-to-end run from a clean checkout to confirm reproducibility
 
 ## 13. Open Questions

@@ -5,15 +5,17 @@ A regression model that forecasts daily retail fuel prices at NSW service statio
 The headline experiment compares two LightGBM models with identical pipelines except for one feature block:
 
 - **Model A** — lag, upstream commodity, calendar, demand context, station-static, weather features
-- **Model B** — Model A + 10 SA2-level Census demographic features
+- **Model B** — Model A + 15 SA2-level Census / SEIFA / DSS demographic features
 
 The "result" of the project is the lift from Model A to Model B on a held-out future test set, segmented by metro/regional, brand, fuel type, and SEIFA quintile, with SHAP explanations of the top SA2 features and their interactions with calendar features.
+
+**Headline result:** Model B beats Model A by **−0.391 c/L MAE** (−6.2%) on the 2024–25 test fold and **−0.183 c/L** on the 2026 crisis fold. Full metrics, segmentation, and SHAP analysis in [`results/README.md`](./results/README.md).
 
 See [`spec.md`](./spec.md) for the full design specification — it is the source of truth for this repository.
 
 ## Status
 
-🚧 v1 implementation in progress — see [`spec.md` §12](./spec.md) for phase tracking.
+✅ v1 complete — all 8 implementation phases done. See [`spec.md` §12](./spec.md) for phase detail and [`results/README.md`](./results/README.md) for the full experimental write-up.
 
 ## Requirements
 
@@ -101,7 +103,7 @@ Tier 2 sources (additive features, fail-soft if unavailable):
 - ASX 200
 - ANZ-Roy Morgan Consumer Confidence
 
-The augmentation block uses 10 SA2-level variables from the 2021 ABS Census GCP DataPack plus SEIFA IRSD scores. See [`spec.md` §5.4](./spec.md) for the exact list.
+The augmentation block uses 15 SA2-level variables: 10 from the 2021 ABS Census GCP DataPack + SEIFA IRSD, plus 5 DSS welfare-payment columns selected by feature importance (see [`spec.md` §7.7.4](./spec.md) and [`results/README.md`](./results/README.md) for the curation story).
 
 ## Methodological notes
 

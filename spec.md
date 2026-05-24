@@ -775,6 +775,32 @@ To be resolved during implementation, not blocking spec sign-off:
    For Phase 2 / 3, ship `brand_raw` + `brand_canonical` only and defer `is_franchisee` to a dedicated research pass before Phase 4 feature build.
 4. **Petrol cycle as a sanity check** — should `01_eda.ipynb` verify the cycle is endogenously captured by lag features (e.g., by training a tiny model on lag features alone and inspecting predictions on a held-out station)? Nice-to-have.
 5. **Crisis-period reporting** — confirm whether the test (crisis) fold is reported in the headline `comparison.md` or only as a sub-section. Suggest sub-section to keep the headline numbers comparable to a "normal world" baseline.
+6. **Major events and spatially-granular holiday features** — v1 has two statewide calendar signals: `cal_is_public_holiday` (from `python-holidays`, NSW-wide) and `cal_is_school_holiday_nsw` (from the manual `nsw_school_terms.csv`). These are coarse: a public holiday affects all stations identically regardless of proximity to the event. Hypothesis: price behaviour near a major stadium on game day differs from the statewide average — and that signal is currently invisible to the model.
+
+   **Research spike needed before implementation:**
+
+   *a) Spatial events (high travel-demand generators)*
+   - **Ticketek / Ticketmaster / Moshtix APIs** — most require commercial auth. Public-facing pages are scrapable but fragile; check if any publish a machine-readable calendar (iCal, JSON feed).
+   - **NSW Government "What's On"** — https://www.destinationnsw.com.au/ has a public events search. No documented API, but the underlying Decibel/Simpleview CRM sometimes exposes a JSON endpoint — worth inspecting network traffic.
+   - **Sport-specific feeds:** NRL (nrl.com fixture API, open), AFL (afltables.com, text files), A-League (footballaustralia.com.au), Cricket Australia (cricketaustralia.com.au/api), Sydney Speedway, V8 Supercars. Each is a separate integration; prioritise venues near high-station-density areas (ANZ/Accor Stadium, SCG/Allianz, Qudos/Kia Forum, Parramatta, Newcastle).
+   - **Eventbrite API** — free tier exposes public events with lat/lon, date, category, attendance estimate. Covers festivals, concerts, markets. Rate limit: 50 req/min, 2 000 results/query. Most useful of the commercial options.
+   - **Public venue capacity registers** — ABS or local council data may enumerate major venues (stadium, racecourse, convention centre) with capacity; useful even without per-event data because proximity to a high-capacity venue is a static station feature.
+
+   *b) Long weekends and bridge days*
+   - `python-holidays` already fires on the public holiday itself. Missing: the **travel surge day** (typically the Friday before a Monday holiday, or the day before school holidays start). Could be derived from the existing calendar features without a new source — worth measuring in EDA first.
+   - **State-level gazetted show days** — NSW has regional show holidays (e.g. Sydney Royal Easter Show, regional shows declared by postcode). The Fair Work Commission gazettal is published as a PDF; no machine-readable feed exists, but the list is short and stable enough for a manual CSV.
+
+   *c) Spatial granularity strategy*
+   - Full event-level lat/lon joined to nearest stations would be ideal but adds pipeline complexity. A pragmatic middle path: `data/static/major_venues.csv` (venue_id, name, lat, lon, capacity, type) joined by distance to each station at feature-build time → `ctx_nearest_venue_km`, `ctx_nearest_venue_capacity`. Then a rolling "is there an event at the nearest venue today / tomorrow?" computed from an event feed. Two separate data assets with a clean join at feature build.
+   - Don't try to build an exhaustive event database; focus on events with attendance > ~5 000 and venues within 5 km of an existing station.
+
+   **Suggested implementation order (once research resolves sources):**
+   1. `data/static/major_venues.csv` → static station feature `ctx_nearest_venue_km` / `ctx_nearest_venue_capacity` — immediate, no API needed.
+   2. Eventbrite API fetch → `data/raw/eventbrite/` → rolling event-day indicator per station.
+   3. Sport-specific feeds (NRL + AFL first; biggest attendance densities) → same rolling indicator.
+   4. Regional show days → manual CSV, same mechanism as `nsw_school_terms.csv`.
+
+   **Before any implementation:** run an EDA cell that correlates station-level residuals against `cal_is_public_holiday` split by distance-to-nearest-stadium quintile. If there's no signal in the existing data there's no point fetching event feeds.
 
 ## 14. References
 

@@ -31,6 +31,13 @@ import pandas as pd
 
 from fuel_pred import config
 
+# Imported here (not inline at point-of-use) to keep ruff E402 clean.
+# SA2_FEATURE_COLS is the single source of truth for the SA2 block; importing
+# it from feature_blocks keeps make_features in lockstep with the model code —
+# when the SA2 block changes, this module picks up the new column list without
+# a separate edit.
+from fuel_pred.train.feature_blocks import SA2_COLUMNS as SA2_FEATURE_COLS
+
 logger = logging.getLogger(__name__)
 
 # Day-of-fortnight anchor — spec §7.3, set in config.
@@ -696,13 +703,6 @@ def add_weather_features(df: pd.DataFrame, weather_dir: Path | None) -> pd.DataF
 # ============================================================
 # 7.7 Demographic block
 # ============================================================
-
-# The single source of truth for the SA2 block is `feature_blocks.SA2_COLUMNS`
-# (which the model code consumes via BLOCK_COLUMNS). Re-importing it here keeps
-# make_features in lockstep — when the SA2 block is broadened (PR #45 added
-# DSS/ERP/PIA columns; #46 corrected them against the v1.5 augmentor's real
-# schema), this module picks up the new columns without an extra edit.
-from fuel_pred.train.feature_blocks import SA2_COLUMNS as SA2_FEATURE_COLS
 
 
 def add_sa2_features(df: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:

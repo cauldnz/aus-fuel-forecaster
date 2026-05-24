@@ -177,11 +177,18 @@ SA2_COLUMNS: tuple[str, ...] = (
     # in `config.py` still requests all 31 so they're available in
     # stations.parquet for future ablation studies, but the model only
     # consumes what's in this list.
-    "sa2_seifa_ieo_score",                                     # rank 51, 0.02% gain; only Education+Occupation SEIFA we have (complements IRSD's disadvantage-only continuum)
-    "sa2_dss_parenting_payment_partnered_recipients",          # rank 45, 0.04% gain; highest-impact new feature
-    "sa2_dss_carer_payment_recipients",                        # rank 48, 0.02% gain; care-giver population proxy
-    "sa2_dss_carer_allowance_recipients",                      # rank 50, 0.02% gain; complements carer_payment (allowance is broader, lower-test)
-    "sa2_dss_youth_allowance_student_and_apprentice_recipients",  # rank 49, 0.02% gain; young-cohort proxy (despite |r|=0.66 with competitors_5km, captures distinct generational signal)
+    # rank 51, 0.02% gain; only Education+Occupation SEIFA we have
+    # (complements IRSD's disadvantage-only continuum)
+    "sa2_seifa_ieo_score",
+    # rank 45, 0.04% gain; highest-impact new feature
+    "sa2_dss_parenting_payment_partnered_recipients",
+    # rank 48, 0.02% gain; care-giver population proxy
+    "sa2_dss_carer_payment_recipients",
+    # rank 50, 0.02% gain; complements carer_payment (allowance is broader, lower-test)
+    "sa2_dss_carer_allowance_recipients",
+    # rank 49, 0.02% gain; young-cohort proxy
+    # (|r|=0.66 with competitors_5km, but captures distinct generational signal)
+    "sa2_dss_youth_allowance_student_and_apprentice_recipients",
 )
 
 # Convenience: block-name → column tuple.

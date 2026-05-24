@@ -106,7 +106,9 @@ def test_day_of_fortnight_anchors_correctly() -> None:
     # school_terms_path=None falls back to the static file path in config;
     # pass a missing path so the function falls through to an empty term list.
     from fuel_pred import config
-    result = add_calendar_features(df, school_terms_path=config.DATA_STATIC / "nsw_school_terms.csv")
+    result = add_calendar_features(
+        df, school_terms_path=config.DATA_STATIC / "nsw_school_terms.csv"
+    )
 
     dofs = result.sort_values("date")["cal_day_of_fortnight"].tolist()
     assert dofs == [0, 1, 13, 0, 1], (

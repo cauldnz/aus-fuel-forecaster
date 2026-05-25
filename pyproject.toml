@@ -60,6 +60,7 @@ notebooks = [
     "jupyterlab>=4.0",
     "ipykernel>=6.29",
     "plotly>=5.20",
+    "nbstripout>=0.9.1",
 ]
 
 [project.scripts]

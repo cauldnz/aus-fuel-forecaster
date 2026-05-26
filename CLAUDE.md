@@ -86,6 +86,19 @@ Do *not*:
 - Bundle hyperparameter changes with feature additions.
 - Touch files outside the phase you're working on.
 
+## Research notes — commit them, even the null results
+
+`docs/research/` is the home for research spikes and retrospectives. Two kinds belong there:
+
+- **Forward-looking spikes** — when scoping a feature (sources surveyed, APIs probed, decision gates defined). Link from the relevant `spec.md` §13 backlog item.
+- **Retrospectives and null results** — what we tried, what worked, what didn't. **Commit these even when the conclusion is "don't build it."** The next person on a similar problem benefits from seeing the dead-end without re-running the spike.
+
+Naming: `YYYY-MM_short_topic_slug.md`. Don't skip the date prefix — it gives readers chronological context.
+
+Operational tips (Podman networking, environment gotchas) go in `docs/troubleshooting/` instead — those are not research.
+
+See `docs/research/README.md` for the current index and the rationale in full.
+
 ## File ownership map
 
 If a file isn't listed here, it's owned by `spec.md` §10 (repo layout). Edit at your own risk.
@@ -98,6 +111,9 @@ If a file isn't listed here, it's owned by `spec.md` §10 (repo layout). Edit at
 | `data/static/brand_aliases.csv` | maintainer + agent | Append rows when new brands appear in FuelCheck. Don't reorder. |
 | `data/static/nsw_school_terms.csv` | maintainer | Update annually when NSW Education publishes new dates. |
 | `data/static/crisis_events.csv` | informational only | Not used as features in v1. Curate as historical record. |
+| `data/static/major_venues.csv` | maintainer + agent | Append-only. Hand-curated venue list for the events-feature backlog (spec §13.6). Schema: `venue_id,name,lat,lon,capacity,type`. |
+| `docs/research/*.md` | maintainer + agent (any) | Commit before / during / after the spike. Null results explicitly welcome. |
+| `docs/troubleshooting/*.md` | maintainer + agent (any) | Operational tips. Keep short and copy-pasteable. |
 | `pyproject.toml` | maintainer + agent | Add deps freely; remove deps via PR with justification. |
 
 ## Phase status

@@ -1,0 +1,222 @@
+# Weather leakage fix — implementation plan
+
+**Date:** 2026-05
+**Status:** research complete, ready to scope as v2 work
+**Spec section:** `spec.md` §7.6 (current state — to be updated), proposed new §13.7 (this plan)
+**Related:** `results/README.md` caveat #4 (the v1 known compromise)
+
+## TL;DR
+
+v1 joins ERA5 reanalysis weather *actuals* onto the panel at the same date as the prediction row — this is leakage because in real deployment you would have a *forecast* for tomorrow, not retrospective truth. The fix is to swap the Open-Meteo Archive API for the Historical Forecast API and shift the join key by one day. Coverage starts 2017-01-01 for Australia (empirically confirmed), creating a 4-month ERA5-fallback window for late 2016. A-vs-B comparison is unaffected; absolute MAE will rise modestly (estimated 0.05–0.15 c/L).
+
+## The leakage problem (precise diagnosis)
+
+In `add_weather_features()` (`src/fuel_pred/build/make_features.py`), weather is joined on `["station_id", "date"]`. The weather Parquet for station `s` contains one row per calendar date, where values are ERA5 reanalysis actuals for that date.
+
+The panel row for `(station_id=s, date=t)` therefore receives:
+- `wx_temp_max_c` = ERA5 actual max temperature on day `t`
+- `wx_temp_min_c` = ERA5 actual min temperature on day `t`
+- `wx_precipitation_mm` = ERA5 actual precipitation on day `t`
+- `wx_wind_speed_max_kmh` = ERA5 actual max wind on day `t`
+- `wx_weather_code` = ERA5 actual WMO code on day `t`
+
+The target for the same row is `y_t1 = price_mean at t+1`.
+
+**Why this is leakage:** on prediction day `t` in deployment, a forecaster knows weather actuals through `t-1` and only has a *forecast* for `t+1`. ERA5 actuals for `t` are not known until several days later (ERA5 has ~5-day publication lag, which the fetcher's `_clamp_end_to_yesterday()` already acknowledges). The values currently in the matrix are retrospectively accurate — closer to ground truth than any operational forecast could be. The model learns to use today's highly-accurate ERA5 as a proxy for tomorrow's weather.
+
+**The correct join for t+1 horizon:** for a feature row at date `t` predicting `y_t1` (price at `t+1`), we want the weather *forecast* for `t+1` as it would have been issued at or before day `t`. The Open-Meteo Historical Forecast API serves exactly this — the actual NWP forecast that was operationally issued for that date, not a reanalysis.
+
+## Historical Forecast API verdict
+
+**Endpoint:** `https://historical-forecast-api.open-meteo.com/v1/forecast`
+
+**Call signature:** Identical to the archive API — `latitude`, `longitude`, `start_date`, `end_date`, `daily`, `timezone`. No `forecast_days` or `past_days` needed for bulk historical fetches.
+
+**Variables available (all 5 current `wx_*` confirmed):**
+- `temperature_2m_max` → `wx_temp_max_c`
+- `temperature_2m_min` → `wx_temp_min_c`
+- `precipitation_sum` → `wx_precipitation_mm`
+- `wind_speed_10m_max` → `wx_wind_speed_max_kmh`
+- `weather_code` → `wx_weather_code`
+
+**Coverage — empirically probed for Sydney (-33.87, 151.21):**
+
+| Date | Result |
+|---|---|
+| 2016-09-01 | All null |
+| 2016-12-01 | All null |
+| **2017-01-01** | **Real values** |
+| 2018-01-01 | Real values |
+| 2019-01-01 | Real values |
+| 2020-12-01 | Real values |
+| 2021-01-01 | Real values |
+
+**Conservative boundary: coverage starts 2017-01-01 for Australian coordinates** using the default "Best Match" model. The Open-Meteo docs mention "coverage starts around 2022" — that refers to premium high-resolution models (BOM ACCESS-G, available 2024+). The free-tier fallback resolves to a global model (likely ECMWF IFS or GFS) extending further back.
+
+**What the API returns:** the actual NWP forecast as it was operationally issued for the requested date, with lead-time approximately 0–24h baked into the daily aggregates (the API stitches early hours of each day from the run initialised the prior day). This is exactly what a deployed forecaster would have had.
+
+**Rate limits (free tier):** 600 calls/min, 5,000/hour, 10,000/day. Current `fetch.weather` uses `DEFAULT_INTER_CALL_SECONDS = 0.1s` (≤ 600/min). With ~1,500 NSW stations, a full refetch is ~150 seconds wall-clock. Well within limits.
+
+**API key:** Empirically not required for the Best-Match default model at Australian coordinates. The pricing page suggests "Professional API Plan" is needed but probes returned data unauthenticated. Open-Meteo's free API key is registrable in 30 seconds if required later.
+
+**Drop-in viability: high.** Identical call signature, identical output schema, identical variable names, free-tier accessible. Only the values change (forecast vs reanalysis) and the coverage start date (~2017 vs 1940).
+
+## Coverage gap strategy
+
+The gap: training data runs from `2016-09-01`. The Historical Forecast API returns null for September–December 2016 (4 months, ~2.2% of training rows).
+
+### Option 1 — Hybrid (recommended)
+
+Use ERA5 archive for 2016-09-01 → 2016-12-31; use Historical Forecast API from 2017-01-01 onwards. The 4 months of ERA5-contaminated data are entirely within the training fold (train ≤ 2022-12-31), so val and test metrics are unaffected. With `min_data_in_leaf=200`, the model will not over-fit on 2.2% contamination. The boundary is documented; the spec is honest.
+
+### Option 2 — Drop 2016 weather (null fill)
+
+Set `wx_*` to null for 2016 dates. LightGBM handles nulls natively. Wastes signal for those rows. **Not recommended** — Option 1 is strictly better.
+
+### Option 3 — ERA5 throughout with shifted join
+
+Use ERA5 yesterday's actuals as a persistence-forecast proxy. ERA5 day `t-1` joined onto panel row `t` is genuinely available on day `t`. **Not recommended** — a real NWP day-ahead forecast (~1–2°C RMSE at Sydney) is much cleaner signal than persistence (~3–5°C RMSE), and Option 1 makes both available.
+
+### Option 4 — Narrow training to 2017+
+
+Drop 4 months of training data. **Not recommended** — Option 1 preserves the rows without meaningfully contaminating test metrics.
+
+**Recommendation: Option 1 (hybrid).** Documented in the spec, with the 2017-01-01 boundary as a config constant.
+
+## Schema changes
+
+**No column renames.** The five `wx_*` column names stay exactly as in `WX_COLUMNS`:
+```python
+"wx_temp_max_c", "wx_temp_min_c", "wx_precipitation_mm",
+"wx_wind_speed_max_kmh", "wx_weather_code"
+```
+
+**Values change.** `data/raw/weather/<station_id>.parquet` files contain forecast data (2017+) or ERA5 (2016) instead of pure ERA5 throughout. Parquet schema is identical.
+
+**Cache invalidation required.** All existing `data/raw/weather/*.parquet` files must be deleted and re-fetched. `make fetch-weather --force` covers this; the Makefile `clean-all` target also handles it.
+
+**One new config constant:**
+```python
+# config.py
+WEATHER_FORECAST_COVERAGE_START: str = "2017-01-01"
+```
+
+**Trained model artefacts (`models/model_a.pkl`, `models/model_b.pkl`, prediction parquets, `results/comparison.md`) are invalidated.** Full pipeline re-run required: weather re-fetch (~150s) + feature build (~20 min) + training (~30–60 min). G-NAF geocoding (~85 min, the longest step) is not affected — `stations.parquet` is unchanged.
+
+## Pipeline changes
+
+### `src/fuel_pred/fetch/weather.py`
+
+Add a second API URL constant:
+```python
+FORECAST_URL: str = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+ARCHIVE_URL: str = "https://archive-api.open-meteo.com/v1/archive"  # existing
+```
+
+New function `_request_daily_forecast(lat, lon, start, end)` — same signature as `_request_daily`, same `@retry`, calls `FORECAST_URL`.
+
+Modify `fetch_one()` for hybrid logic:
+1. If `end < WEATHER_FORECAST_COVERAGE_START`: archive only (existing behaviour).
+2. If `start >= WEATHER_FORECAST_COVERAGE_START`: forecast only.
+3. If range straddles: archive for `[start, 2016-12-31]`, forecast for `[2017-01-01, end]`, concatenate, deduplicate on `date`.
+4. Safety net: any rows where all 5 `wx_*` are null after forecast call get backfilled from archive for those specific dates.
+
+Module docstring updated to remove the v1 "methodological compromise" language; replaced with hybrid description and the 2016 boundary note.
+
+### `src/fuel_pred/build/make_features.py` — `add_weather_features()`
+
+Add a 1-day shift when merging. The forecast parquet's `date` column holds the *valid date* (the day the weather occurs). To get the day-ahead forecast onto the row predicting that day, shift the join key back by 1:
+
+```python
+# Before merging:
+# weather row "valid on date d" → joins onto panel row "predicts date d"
+# which lives at panel.date = d - 1
+wx["date"] = pd.to_datetime(wx["date"]).dt.date
+wx["date"] = [d - dt.timedelta(days=1) for d in wx["date"]]
+return df.merge(weather, on=["station_id", "date"], how="left")
+```
+
+After the fix: `wx_*` columns on panel row `t` contain the day-ahead NWP forecast for `t+1`, issued on `t`. That's what the model will have in deployment.
+
+For 2016 ERA5-fallback rows, the same shift applies — yesterday's actual weather as a persistence-forecast proxy. Documented as such in the spec.
+
+### `src/fuel_pred/config.py`
+
+```python
+# Historical Forecast API coverage start for Australia (empirically probed).
+# Below this date, ERA5 archive is used as a fallback in fetch.weather.
+WEATHER_FORECAST_COVERAGE_START: str = "2017-01-01"
+```
+
+### `Makefile`
+
+No structural changes — `fetch-weather` already passes `--start` / `--end`. Add a comment on the target:
+```make
+# Weather: hybrid fetch — ERA5 for 2016 (forecast API has no coverage),
+# Historical Forecast API from 2017 onwards. See spec §7.6 + fetch.weather.
+```
+
+### Tests
+
+`tests/test_fetch_weather.py`:
+- Add test: `fetch_one()` calls `FORECAST_URL` for dates ≥ 2017-01-01.
+- Add test: `fetch_one()` calls `ARCHIVE_URL` for dates < 2017-01-01.
+- Add test: straddling case calls both, concatenates, deduplicates.
+- Existing archive-only tests remain valid.
+
+`tests/test_features.py`:
+- Modify the `add_weather_features()` test to verify the 1-day shift: output `wx_temp_max_c` on row `date=t` equals the input weather fixture's value for `date=t+1`.
+
+### Documentation
+
+- `spec.md` §7.6 — rewrite to describe the hybrid approach, the 2016 boundary, the join-shift mechanic, and expected impact.
+- `spec.md` §5.1 weather row — confirm the table reads accurately (both URLs).
+- `results/README.md` caveat #4 — mark the v1 leakage as resolved in v2, with the new headline figures.
+- `results/comparison.md` header — note v2 figures are leakage-corrected; show v1 vs v2 absolute MAE comparison table.
+
+## Expected impact on metrics
+
+**Absolute MAE: rises by ~0.05–0.15 c/L** (rough upper bound). Weather features rank below lag and upstream blocks in SHAP importance (top drivers: `lag_price_1`, Brent lags, `cal_day_of_month`, brand). The `wx_*` block captures extreme-weather demand shocks (heat waves, rain) rather than routine variation — relatively rare events. Order-of-magnitude estimate: `6.0 c/L × 0.03 SHAP fraction × 0.30 RMSE inflation ≈ 0.05 c/L`. Likely in the 0.05–0.15 range.
+
+**A-vs-B comparison: unaffected.** Both Model A and Model B receive identical `wx_*` features. The leakage fix degrades both equally. The Δ MAE between models (−0.391 on test_normal, v1 figure) measures the SA2 block's contribution and is invariant to what values the `wx_*` columns carry — there's no asymmetry introduced.
+
+**Honesty:** v1's absolute MAE figures (6.3 c/L Model A, 5.9 c/L Model B on test_normal) are slightly optimistic. v2's corrected figures will be marginally higher. The −6.2% lift from SA2 features is unbiased either way.
+
+## Implementation order
+
+| Phase | Scope | Effort |
+|---|---|---|
+| **A** | Fetcher: add forecast endpoint, hybrid logic, hermetic tests; re-fetch all stations | ½ session |
+| **B** | Feature builder: 1-day shift in `add_weather_features()`, update tests, re-build features.parquet | ½ session |
+| **C** | Retrain + evaluate: `make train && make evaluate`, regenerate notebooks | 1 session (mostly wall-clock for training) |
+| **D** | Documentation: update spec §7.6, results/README.md, results/comparison.md headers | ½ session |
+
+Total: ~2.5 sessions, of which ~1 session is wall-clock for model training.
+
+## Risks and open questions
+
+### R1. Exact coverage boundary needs confirmation for non-coastal NSW
+The probe was Sydney coordinates. The coverage boundary is global (same NWP model worldwide), so it should be consistent — but recommend one extra probe at a western NSW coordinate (e.g. Broken Hill -31.95, 141.45) for 2016-12-31 and 2017-01-01 before locking the config constant.
+
+### R2. What the Historical Forecast API actually provides at the daily aggregate level
+The API stitches each NWP run's first few hours into a continuous timeseries, then aggregates. Daily values represent ~0–24h lead-time — the closest available approximation to a day-ahead forecast at no cost. Acceptable and honest representation, but the spec should describe it as "historical forecast archive" rather than "day-ahead forecast" to avoid overpromising.
+
+### R3. Paid plan requirement ambiguity
+Open-Meteo's pricing page is unclear on whether the free-tier fallback model is genuinely free for the historical-forecast endpoint or if rate limits / auth walls will appear in production use. Recommend a burst test of 100 sequential requests before committing to the architecture. If auth is required, the free API key takes 30 seconds to register.
+
+### R4. The 2.2% ERA5-contaminated training rows
+Even with the hybrid approach, 4 months of training data carries ERA5-derived persistence values rather than real forecasts. **Decision needed:** accept the 2.2% contamination (recommended — current spec accepts 100%) or drop those rows entirely (loses signal). Accept with documentation.
+
+### R5. Whether to add a `wx_source` diagnostic column
+Adding a categorical column (`era5_persistence` / `historical_forecast`) would let analysts audit treatment per row. Must be in `EXCLUDE_FROM_FEATURES` so the model doesn't see it. **Decision needed:** include for traceability or skip for simplicity. Recommend skip — the date boundary (< 2017-01-01) is the effective indicator.
+
+### R6. Retraining invalidates v1 model artefacts
+This is unavoidable. The PR landing the fix must either regenerate artefacts or include a clear "run `make all`" note. The 2026 crisis test fold uses 2026 data — full pipeline re-run is required to get fresh comparison numbers.
+
+## See also
+
+- `spec.md` §7.6 — current weather block spec (to be updated)
+- `results/README.md` caveat #4 — the v1 acknowledged compromise
+- `src/fuel_pred/fetch/weather.py` — current fetcher (archive only)
+- `src/fuel_pred/build/make_features.py` — current `add_weather_features()` (unshifted join)
+- Open-Meteo Historical Forecast API: https://open-meteo.com/en/docs/historical-forecast-api

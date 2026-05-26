@@ -538,6 +538,11 @@ def test_station_is_franchisee_stub_null() -> None:
 
 
 def test_weather_features_join_per_station(tmp_path: Path) -> None:
+    """Weather joins on (station_id, date) with the spec §13.7 −1-day shift.
+
+    Panel row at date `t` receives the day-ahead forecast for `t+1`, so the
+    weather fixture's value for `t+1` lands on the row at `t`.
+    """
     panel = _panel([
         {"station_id": "s1", "fuel_code": "U91", "date": "2024-01-01"},
         {"station_id": "s1", "fuel_code": "U91", "date": "2024-01-02"},
@@ -555,11 +560,47 @@ def test_weather_features_join_per_station(tmp_path: Path) -> None:
     }).to_parquet(weather_dir / "s1.parquet", engine="pyarrow", compression="zstd", index=False)
 
     out = mf.add_weather_features(panel, weather_dir)
+    # Spec §13.7: panel row at 2024-01-01 carries the forecast for 2024-01-02 → 26.0.
     s1_jan1 = out[(out["station_id"] == "s1") & (out["date"] == dt.date(2024, 1, 1))].iloc[0]
-    assert s1_jan1["wx_temp_max_c"] == 25.0
+    assert s1_jan1["wx_temp_max_c"] == 26.0
+    # Panel row at 2024-01-02 carries the forecast for 2024-01-03 → 27.0.
+    s1_jan2 = out[(out["station_id"] == "s1") & (out["date"] == dt.date(2024, 1, 2))].iloc[0]
+    assert s1_jan2["wx_temp_max_c"] == 27.0
     # s2 has no parquet — wx columns are null.
     s2_jan1 = out[out["station_id"] == "s2"].iloc[0]
     assert pd.isna(s2_jan1["wx_temp_max_c"])
+
+
+def test_weather_features_use_t_plus_1_forecast(tmp_path: Path) -> None:
+    """Spec §13.7 leakage fix: panel row at date `t` joins to weather valid at `t+1`.
+
+    Synthetic fixture sets `wx_temp_max_c = day_of_month` on three consecutive
+    days. After the shift, panel row at day-of-month `d` carries the value
+    for `d+1`, not `d`.
+    """
+    panel = _panel([
+        {"station_id": "s1", "fuel_code": "U91", "date": "2024-03-10"},
+        {"station_id": "s1", "fuel_code": "U91", "date": "2024-03-11"},
+        {"station_id": "s1", "fuel_code": "U91", "date": "2024-03-12"},
+    ])
+    weather_dir = tmp_path / "weather"
+    weather_dir.mkdir()
+    pd.DataFrame({
+        "date": pd.date_range("2024-03-10", periods=4, freq="D").date,
+        "wx_temp_max_c": [10.0, 11.0, 12.0, 13.0],
+        "wx_temp_min_c": [0.0, 1.0, 2.0, 3.0],
+        "wx_precipitation_mm": [0.0, 0.0, 0.0, 0.0],
+        "wx_wind_speed_max_kmh": [10.0, 10.0, 10.0, 10.0],
+        "wx_weather_code": [0, 0, 0, 0],
+    }).to_parquet(weather_dir / "s1.parquet", engine="pyarrow", compression="zstd", index=False)
+
+    out = mf.add_weather_features(panel, weather_dir).sort_values("date").reset_index(drop=True)
+    # Row at 2024-03-10 → forecast for 2024-03-11 → 11.0 (NOT 10.0).
+    assert float(out["wx_temp_max_c"].iloc[0]) == 11.0
+    # Row at 2024-03-11 → forecast for 2024-03-12 → 12.0.
+    assert float(out["wx_temp_max_c"].iloc[1]) == 12.0
+    # Row at 2024-03-12 → forecast for 2024-03-13 → 13.0.
+    assert float(out["wx_temp_max_c"].iloc[2]) == 13.0
 
 
 def test_weather_missing_dir_yields_null_columns(tmp_path: Path) -> None:

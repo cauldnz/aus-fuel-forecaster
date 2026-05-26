@@ -746,7 +746,19 @@ def _compute_competitor_counts(stations: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_weather_features(df: pd.DataFrame, weather_dir: Path | None) -> pd.DataFrame:
-    """Join per-station weather parquets on `(station_id, date)`.
+    """Join per-station weather parquets, leakage-corrected per spec §13.7.
+
+    Each cached parquet stores ``date`` as the *valid date* of the weather
+    observation/forecast. To deliver the day-ahead forecast to a panel row
+    at date ``t`` (whose target is price at ``t+1``), we shift the weather
+    ``date`` back by 1 day before merging — so the row representing
+    weather valid on ``d`` joins onto the panel row at ``d - 1``.
+
+    After the shift, ``wx_*`` columns on the panel row at ``t`` carry the
+    day-ahead NWP forecast for ``t+1`` issued on ``t`` (post-2017, via the
+    Open-Meteo Historical Forecast API), or the ERA5 persistence proxy
+    for 2016 dates (a single, documented residual). See
+    ``docs/research/2026-05_weather_leakage_fix.md`` for the full rationale.
 
     Weather is best-effort — if the directory doesn't exist or a station
     has no cached weather file, the wx_* columns are added as nulls and
@@ -780,6 +792,15 @@ def add_weather_features(df: pd.DataFrame, weather_dir: Path | None) -> pd.DataF
     weather = pd.concat(pieces, ignore_index=True)
     keep = ["station_id", "date", *wx_cols]
     weather = weather[[c for c in keep if c in weather.columns]]
+    # Spec §13.7 (v2.0 leakage fix): shift the weather valid-date back by
+    # one day so panel row `t` receives the day-ahead forecast for `t+1`.
+    # See docs/research/2026-05_weather_leakage_fix.md §"Pipeline changes".
+    # `date` is a Series of python `dt.date` (object dtype); promote to
+    # datetime for vectorised arithmetic, then drop back to dt.date so the
+    # merge dtype matches the panel's `date` column.
+    weather["date"] = (
+        pd.to_datetime(weather["date"]) - pd.Timedelta(days=1)
+    ).dt.date
     return df.merge(weather, on=["station_id", "date"], how="left")
 
 

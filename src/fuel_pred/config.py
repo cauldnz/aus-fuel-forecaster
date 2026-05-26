@@ -66,6 +66,11 @@ REQUEST_TIMEOUT: int = 30
 RETRY_MAX_ATTEMPTS: int = 5
 RETRY_BACKOFF_SECONDS: float = 2.0
 
+# Historical Forecast API coverage start for Australia (empirically probed,
+# preflight 2026-05). Below this date, ERA5 archive is used as a fallback in
+# fetch.weather. See docs/research/2026-05_weather_leakage_preflight.md.
+WEATHER_FORECAST_COVERAGE_START: str = "2017-01-01"
+
 # ----------------------------- Modeling -----------------------------
 
 LGBM_PARAMS: dict[str, object] = {

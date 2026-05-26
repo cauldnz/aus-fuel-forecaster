@@ -135,9 +135,11 @@ def test_cache_covers_false_when_file_missing(tmp_path: Path) -> None:
 @responses.activate
 def test_fetch_writes_per_station_parquet(tmp_path: Path, stations_two: Path) -> None:
     out_dir = tmp_path / "weather"
+    # 2024-01-01 is post-WEATHER_FORECAST_COVERAGE_START, so routes to the
+    # Historical Forecast API (spec §13.7).
     responses.add(
         responses.GET,
-        weather.ARCHIVE_URL,
+        weather.FORECAST_URL,
         json=_open_meteo_response(["2024-01-01", "2024-01-02"]),
         status=200,
     )
@@ -181,9 +183,10 @@ def test_fetch_force_bypasses_cache(tmp_path: Path, stations_two: Path) -> None:
     (out_dir / "s1.parquet").write_bytes(b"placeholder")
     (out_dir / "s2.parquet").write_bytes(b"placeholder")
 
+    # 2024-01-01 routes to the forecast API under v2.0 hybrid logic.
     responses.add(
         responses.GET,
-        weather.ARCHIVE_URL,
+        weather.FORECAST_URL,
         json=_open_meteo_response(["2024-01-01"]),
         status=200,
     )
@@ -206,9 +209,10 @@ def test_fetch_handles_missing_lat_lon(tmp_path: Path) -> None:
         ],
     )
     out_dir = tmp_path / "weather"
+    # Post-2017 dates route to forecast (spec §13.7).
     responses.add(
         responses.GET,
-        weather.ARCHIVE_URL,
+        weather.FORECAST_URL,
         json=_open_meteo_response(["2024-01-01"]),
         status=200,
     )
@@ -224,12 +228,12 @@ def test_fetch_continues_on_per_station_failure(tmp_path: Path, stations_two: Pa
     """One station failing shouldn't kill the whole run."""
     out_dir = tmp_path / "weather"
     # First station call: HTTP 500 (after 5 retries → permanent failure).
-    # Second station call: success.
+    # Second station call: success. Post-2017 routes to forecast (spec §13.7).
     for _ in range(weather.config.RETRY_MAX_ATTEMPTS):
-        responses.add(responses.GET, weather.ARCHIVE_URL, status=500)
+        responses.add(responses.GET, weather.FORECAST_URL, status=500)
     responses.add(
         responses.GET,
-        weather.ARCHIVE_URL,
+        weather.FORECAST_URL,
         json=_open_meteo_response(["2024-01-01"]),
         status=200,
     )
@@ -248,9 +252,10 @@ def test_fetch_clamps_end_date_when_in_future(tmp_path: Path, stations_two: Path
     today = dt.datetime.now(dt.UTC).date()
     yesterday = today - dt.timedelta(days=1)
 
+    # Today is well after 2017-01-01, so the call routes to the forecast API.
     responses.add(
         responses.GET,
-        weather.ARCHIVE_URL,
+        weather.FORECAST_URL,
         json=_open_meteo_response([yesterday.isoformat()]),
         status=200,
     )
@@ -270,7 +275,7 @@ def test_fetch_uses_sydney_timezone(tmp_path: Path, stations_two: Path) -> None:
     out_dir = tmp_path / "weather"
     responses.add(
         responses.GET,
-        weather.ARCHIVE_URL,
+        weather.FORECAST_URL,
         json=_open_meteo_response(["2024-01-01"]),
         status=200,
     )
@@ -284,9 +289,10 @@ def test_fetch_uses_sydney_timezone(tmp_path: Path, stations_two: Path) -> None:
 @responses.activate
 def test_fetch_one_returns_path_on_success(tmp_path: Path) -> None:
     out_dir = tmp_path / "weather"
+    # Post-2017 → forecast API under v2.0 hybrid logic.
     responses.add(
         responses.GET,
-        weather.ARCHIVE_URL,
+        weather.FORECAST_URL,
         json=_open_meteo_response(["2024-01-01"]),
         status=200,
     )
@@ -306,3 +312,147 @@ def test_open_meteo_error_payload_raises() -> None:
     )
     with pytest.raises(Exception):  # noqa: B017
         weather._request_daily(999.0, 999.0, "2024-01-01", "2024-01-01")
+
+
+# ----------------------------- hybrid routing (spec §13.7) -----------------------------
+
+
+@responses.activate
+def test_fetch_one_uses_archive_for_pre_2017_dates(tmp_path: Path) -> None:
+    """Dates entirely before WEATHER_FORECAST_COVERAGE_START hit the ERA5 archive only."""
+    out_dir = tmp_path / "weather"
+    responses.add(
+        responses.GET,
+        weather.ARCHIVE_URL,
+        json=_open_meteo_response(["2016-09-01", "2016-09-02"]),
+        status=200,
+    )
+
+    weather.fetch_one("s1", -33.93, 151.20, "2016-09-01", "2016-09-02", out_dir)
+
+    archive_calls = [c for c in responses.calls if c.request.url.startswith(weather.ARCHIVE_URL)]
+    forecast_calls = [c for c in responses.calls if c.request.url.startswith(weather.FORECAST_URL)]
+    assert len(archive_calls) == 1
+    assert len(forecast_calls) == 0
+
+
+@responses.activate
+def test_fetch_one_uses_forecast_for_post_2017_dates(tmp_path: Path) -> None:
+    """Dates entirely on/after WEATHER_FORECAST_COVERAGE_START hit the forecast API only."""
+    out_dir = tmp_path / "weather"
+    responses.add(
+        responses.GET,
+        weather.FORECAST_URL,
+        json=_open_meteo_response(["2024-01-01", "2024-01-02"]),
+        status=200,
+    )
+
+    weather.fetch_one("s1", -33.93, 151.20, "2024-01-01", "2024-01-02", out_dir)
+
+    archive_calls = [c for c in responses.calls if c.request.url.startswith(weather.ARCHIVE_URL)]
+    forecast_calls = [c for c in responses.calls if c.request.url.startswith(weather.FORECAST_URL)]
+    assert len(forecast_calls) == 1
+    assert len(archive_calls) == 0
+
+
+@responses.activate
+def test_fetch_one_straddle_calls_both(tmp_path: Path) -> None:
+    """A range that straddles 2017-01-01 hits archive for the pre-2017 half
+    and forecast for the post-2017 half, deduplicating at the seam."""
+    out_dir = tmp_path / "weather"
+
+    archive_dates = [d.isoformat() for d in pd.date_range("2016-12-15", "2016-12-31").date]
+    forecast_dates = [d.isoformat() for d in pd.date_range("2017-01-01", "2017-01-15").date]
+
+    responses.add(
+        responses.GET,
+        weather.ARCHIVE_URL,
+        json=_open_meteo_response(archive_dates),
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        weather.FORECAST_URL,
+        json=_open_meteo_response(forecast_dates),
+        status=200,
+    )
+
+    weather.fetch_one("s1", -33.93, 151.20, "2016-12-15", "2017-01-15", out_dir)
+
+    archive_calls = [c for c in responses.calls if c.request.url.startswith(weather.ARCHIVE_URL)]
+    forecast_calls = [c for c in responses.calls if c.request.url.startswith(weather.FORECAST_URL)]
+    assert len(archive_calls) == 1, f"expected 1 archive call, got {len(archive_calls)}"
+    assert len(forecast_calls) == 1, f"expected 1 forecast call, got {len(forecast_calls)}"
+
+    df = pd.read_parquet(out_dir / "s1.parquet")
+    # 17 archive + 15 forecast = 32 unique dates, no duplicates at the seam.
+    assert len(df) == 32
+    assert df["date"].is_unique
+    assert df["date"].min() == dt.date(2016, 12, 15)
+    assert df["date"].max() == dt.date(2017, 1, 15)
+
+
+@responses.activate
+def test_fetch_one_safety_net_backfills_all_null_forecast_rows(tmp_path: Path) -> None:
+    """Per preflight: forecast API returns null precip on 2017-01-01.
+
+    If a forecast-window row has every wx_* null, a follow-up archive
+    backfill must populate it. This test makes the entire 2017-01-01 row
+    null (extreme case) and confirms the archive is hit a second time
+    for that date and the values land in the cached parquet.
+    """
+    out_dir = tmp_path / "weather"
+    forecast_dates = ["2017-01-01", "2017-01-02"]
+
+    # 2017-01-01 returns all nulls on the forecast call (worst-case version
+    # of the preflight's precip-null finding).
+    forecast_payload = _open_meteo_response(
+        forecast_dates,
+        temp_max=[None, 25.0],  # type: ignore[list-item]
+        temp_min=[None, 14.0],  # type: ignore[list-item]
+        precip=[None, 0.5],  # type: ignore[list-item]
+        wind=[None, 12.0],  # type: ignore[list-item]
+        code=[None, 1],  # type: ignore[list-item]
+    )
+    responses.add(responses.GET, weather.FORECAST_URL, json=forecast_payload, status=200)
+    # The backfill archive call should ask for 2017-01-01 specifically.
+    responses.add(
+        responses.GET,
+        weather.ARCHIVE_URL,
+        json=_open_meteo_response(
+            ["2017-01-01"], temp_max=[22.0], temp_min=[13.0], precip=[0.0], wind=[10.0], code=[0]
+        ),
+        status=200,
+    )
+
+    weather.fetch_one("s1", -33.93, 151.20, "2017-01-01", "2017-01-02", out_dir)
+
+    archive_calls = [c for c in responses.calls if c.request.url.startswith(weather.ARCHIVE_URL)]
+    forecast_calls = [c for c in responses.calls if c.request.url.startswith(weather.FORECAST_URL)]
+    assert len(forecast_calls) == 1
+    assert len(archive_calls) == 1  # the backfill
+
+    df = pd.read_parquet(out_dir / "s1.parquet").sort_values("date").reset_index(drop=True)
+    assert len(df) == 2
+    # 2017-01-01 row now carries archive values, not nulls.
+    assert float(df.loc[df["date"] == dt.date(2017, 1, 1), "wx_temp_max_c"].iloc[0]) == 22.0
+    # 2017-01-02 keeps its forecast values.
+    assert float(df.loc[df["date"] == dt.date(2017, 1, 2), "wx_temp_max_c"].iloc[0]) == 25.0
+
+
+def test_split_at_boundary_pre_only() -> None:
+    archive, forecast = weather._split_at_boundary("2016-09-01", "2016-12-31", "2017-01-01")
+    assert archive == ("2016-09-01", "2016-12-31")
+    assert forecast is None
+
+
+def test_split_at_boundary_post_only() -> None:
+    archive, forecast = weather._split_at_boundary("2017-01-01", "2017-12-31", "2017-01-01")
+    assert archive is None
+    assert forecast == ("2017-01-01", "2017-12-31")
+
+
+def test_split_at_boundary_straddles() -> None:
+    archive, forecast = weather._split_at_boundary("2016-12-15", "2017-01-15", "2017-01-01")
+    assert archive == ("2016-12-15", "2016-12-31")
+    assert forecast == ("2017-01-01", "2017-01-15")

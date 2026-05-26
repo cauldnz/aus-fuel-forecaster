@@ -1,15 +1,31 @@
 """Fetch daily weather aggregates from Open-Meteo for each station lat/lon.
 
-Source: Historical Weather API (ERA5 reanalysis):
-    https://archive-api.open-meteo.com/v1/archive
+Hybrid source — v2.0 leakage fix (spec §13.7):
 
-Granularity: daily, with day boundaries in `Australia/Sydney` local time so
-that the resulting `date` column joins cleanly to the FuelCheck-derived
+- **Historical Forecast API** (`historical-forecast-api.open-meteo.com/v1/forecast`)
+  for dates ``>= WEATHER_FORECAST_COVERAGE_START`` (2017-01-01).
+  This returns the actual NWP day-ahead forecast as it was operationally
+  issued — what a deployed predictor would have had — instead of ERA5
+  reanalysis truth. Joining these values onto a panel row at date ``t``
+  with the 1-day shift in ``add_weather_features`` then gives the model
+  the forecast for ``t+1`` as known on ``t``.
+
+- **Historical Weather (ERA5) Archive** (`archive-api.open-meteo.com/v1/archive`)
+  as a fallback for dates before the forecast API's Australian coverage
+  begins. The pre-2017 window (2016-09 → 2016-12) sits entirely inside
+  the training fold, so val/test metrics are unaffected. Documented as
+  a known persistence-proxy in the spec.
+
+Per the preflight (`docs/research/2026-05_weather_leakage_preflight.md`),
+the boundary day 2017-01-01 has a one-day precipitation gap on the
+forecast API (other four variables populate). Any rows where all five
+``wx_*`` variables are null after the forecast call are backfilled from
+a follow-up archive call so the cached parquet has no all-null rows from
+fixable causes.
+
+Granularity: daily, with day boundaries in `Australia/Sydney` local time
+so that the resulting `date` column joins cleanly to the FuelCheck-derived
 `date` column in `fuel_daily.parquet` (also a local-date).
-
-Coverage: 2016-09 → present. Open-Meteo's archive serves ERA5 with a
-~5-day publication lag; the API returns ERA5T (preliminary) for very
-recent dates. We don't ask for dates in the future.
 
 Per-station caching: `data/raw/weather/<station_id>.parquet`. Stations
 share lat/lon with thousands of neighbours so this isn't optimal — a
@@ -25,19 +41,7 @@ Variables returned (spec.md §7.6):
     wx_wind_speed_max_kmh   # Open-Meteo: wind_speed_10m_max (km/h)
     wx_weather_code         # Open-Meteo: weather_code (WMO code)
 
-## Leakage caveat (spec §7.6)
-
-ERA5 is a *reanalysis* — its values for date `t` are computed
-retrospectively from observations gathered after `t`. Using the value
-for date `t` to predict price[`t+1`] is therefore using future
-information that wasn't available on day `t`. v1 accepts this as a
-methodological compromise; the README must call it out, and v2 should
-switch to Open-Meteo's Previous Runs API (lead-time = 1 day) for the
-2024+ portion. The fetcher itself just pulls archive data — the
-discipline of joining wx_* features at day `t` to predict `t+1` lives
-in the feature builder.
-
-Spec: spec.md §5.1, §7.6.
+Spec: spec.md §5.1, §7.6, §13.7.
 """
 from __future__ import annotations
 
@@ -57,6 +61,7 @@ from fuel_pred import config
 logger = logging.getLogger(__name__)
 
 ARCHIVE_URL: str = "https://archive-api.open-meteo.com/v1/archive"
+FORECAST_URL: str = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 
 # Local time matters — Open-Meteo aggregates daily values in this timezone,
 # so the `date` column in the cached parquet is a local-date that joins
@@ -73,6 +78,7 @@ DAILY_VARIABLES: dict[str, str] = {
 }
 
 OUTPUT_COLUMNS: tuple[str, ...] = ("date", *DAILY_VARIABLES.values())
+WX_VALUE_COLUMNS: tuple[str, ...] = tuple(DAILY_VARIABLES.values())
 
 # Polite delay between station calls. Open-Meteo's free tier allows
 # ~600 calls/min; 0.1s = 600/min upper bound. We're well under.
@@ -85,7 +91,31 @@ DEFAULT_INTER_CALL_SECONDS: float = 0.1
     reraise=True,
 )
 def _request_daily(lat: float, lon: float, start: str, end: str) -> dict[str, Any]:
-    """One Open-Meteo archive call. Retries on transient errors."""
+    """One Open-Meteo *archive* (ERA5) call. Retries on transient errors."""
+    return _open_meteo_get(ARCHIVE_URL, lat, lon, start, end)
+
+
+@retry(
+    stop=stop_after_attempt(config.RETRY_MAX_ATTEMPTS),
+    wait=wait_exponential(multiplier=config.RETRY_BACKOFF_SECONDS, max=30),
+    reraise=True,
+)
+def _request_daily_forecast(
+    lat: float, lon: float, start: str, end: str
+) -> dict[str, Any]:
+    """One Open-Meteo *Historical Forecast* call. Retries on transient errors.
+
+    Identical call shape to :func:`_request_daily` but hits the forecast
+    endpoint (`historical-forecast-api.open-meteo.com`) instead of the
+    ERA5 archive. The returned payload schema is the same.
+    """
+    return _open_meteo_get(FORECAST_URL, lat, lon, start, end)
+
+
+def _open_meteo_get(
+    url: str, lat: float, lon: float, start: str, end: str
+) -> dict[str, Any]:
+    """Shared HTTP shim for the two Open-Meteo endpoints (same params shape)."""
     params: dict[str, str | float] = {
         "latitude": lat,
         "longitude": lon,
@@ -95,7 +125,7 @@ def _request_daily(lat: float, lon: float, start: str, end: str) -> dict[str, An
         "timezone": TIMEZONE,
     }
     response = requests.get(
-        ARCHIVE_URL,
+        url,
         params=params,
         headers={"User-Agent": config.USER_AGENT, "Accept": "application/json"},
         timeout=config.REQUEST_TIMEOUT,
@@ -103,7 +133,9 @@ def _request_daily(lat: float, lon: float, start: str, end: str) -> dict[str, An
     response.raise_for_status()
     body: dict[str, Any] = response.json()
     if "error" in body and body.get("error"):
-        raise RuntimeError(f"Open-Meteo error for ({lat}, {lon}): {body.get('reason', body)}")
+        raise RuntimeError(
+            f"Open-Meteo error for ({lat}, {lon}) at {url}: {body.get('reason', body)}"
+        )
     return body
 
 
@@ -154,15 +186,169 @@ def _cache_covers(path: Path, start: str, end: str) -> bool:
 def _clamp_end_to_yesterday(end: str) -> str:
     """ERA5 has a ~5-day lag. Asking for today/tomorrow returns nulls or 400s.
 
-    We clamp `end` to yesterday (in Sydney local time) so callers don't have
-    to do their own date arithmetic. Logged as INFO when clamping happens.
+    The forecast API has a similar publication boundary (it stitches each run's
+    initial hours into a continuous timeseries; very recent dates haven't been
+    processed yet). Clamping to yesterday is conservative for both endpoints.
+
+    We clamp `end` to yesterday (in UTC; the timezone offset is small enough
+    that one extra day of buffer is fine) so callers don't have to do their
+    own date arithmetic. Logged as INFO when clamping happens.
     """
     requested = dt.date.fromisoformat(end)
     yesterday = dt.datetime.now(dt.UTC).date() - dt.timedelta(days=1)
     if requested > yesterday:
-        logger.info("clamping end %s -> %s (ERA5 publication lag)", end, yesterday.isoformat())
+        logger.info(
+            "clamping end %s -> %s (Open-Meteo publication lag)",
+            end, yesterday.isoformat(),
+        )
         return yesterday.isoformat()
     return end
+
+
+def _split_at_boundary(
+    start: str, end: str, boundary: str
+) -> tuple[tuple[str, str] | None, tuple[str, str] | None]:
+    """Split `[start, end]` at `boundary` (forecast-API coverage start).
+
+    Returns ``(archive_range, forecast_range)``; either may be ``None``.
+
+    - ``archive_range = (start, min(end, boundary-1))`` when ``start < boundary``.
+    - ``forecast_range = (max(start, boundary), end)`` when ``end >= boundary``.
+    """
+    start_d = dt.date.fromisoformat(start)
+    end_d = dt.date.fromisoformat(end)
+    boundary_d = dt.date.fromisoformat(boundary)
+
+    archive_range: tuple[str, str] | None = None
+    forecast_range: tuple[str, str] | None = None
+
+    if start_d < boundary_d:
+        archive_end = min(end_d, boundary_d - dt.timedelta(days=1))
+        if archive_end >= start_d:
+            archive_range = (start_d.isoformat(), archive_end.isoformat())
+
+    if end_d >= boundary_d:
+        forecast_start = max(start_d, boundary_d)
+        forecast_range = (forecast_start.isoformat(), end_d.isoformat())
+
+    return archive_range, forecast_range
+
+
+def _all_wx_null_dates(df: pd.DataFrame) -> list[dt.date]:
+    """Return dates from `df` where every wx_* value is null.
+
+    These are candidates for a follow-up archive backfill — the forecast
+    API has known one-day gaps at its coverage boundary.
+    """
+    if df.empty:
+        return []
+    cols = [c for c in WX_VALUE_COLUMNS if c in df.columns]
+    if not cols:
+        return []
+    all_null = df[cols].isna().all(axis=1)
+    return [d for d in df.loc[all_null, "date"].tolist()]
+
+
+def _fetch_hybrid(
+    lat: float, lon: float, start: str, end: str
+) -> pd.DataFrame:
+    """Build a per-station weather frame for `[start, end]` using the hybrid
+    archive/forecast strategy.
+
+    Pipeline (matches `docs/research/2026-05_weather_leakage_fix.md`
+    §"Pipeline changes / fetch/weather.py"):
+
+    1. Split the requested range at ``WEATHER_FORECAST_COVERAGE_START``.
+    2. Fetch the archive portion (if any) and the forecast portion (if any).
+    3. Concatenate, drop duplicate ``date`` rows (later — forecast — wins).
+    4. **Safety net:** any rows where all five ``wx_*`` are null get
+       backfilled by a follow-up archive call for those specific dates.
+       Handles the known precip-null on 2017-01-01 and any analogous
+       single-day gaps elsewhere in the forecast API.
+    """
+    archive_range, forecast_range = _split_at_boundary(
+        start, end, config.WEATHER_FORECAST_COVERAGE_START
+    )
+
+    pieces: list[pd.DataFrame] = []
+    if archive_range is not None:
+        a_start, a_end = archive_range
+        logger.info(
+            "weather fetch: archive (ERA5) for (%s, %s) %s..%s",
+            lat, lon, a_start, a_end,
+        )
+        pieces.append(_frame_from_payload(_request_daily(lat, lon, a_start, a_end)))
+    if forecast_range is not None:
+        f_start, f_end = forecast_range
+        logger.info(
+            "weather fetch: forecast (Historical Forecast API) for (%s, %s) %s..%s",
+            lat, lon, f_start, f_end,
+        )
+        pieces.append(
+            _frame_from_payload(_request_daily_forecast(lat, lon, f_start, f_end))
+        )
+
+    if not pieces:
+        # Defensive — would mean start > end. Return an empty frame with
+        # the expected schema so callers don't crash on schema lookups.
+        return _frame_from_payload({"daily": {"time": [], **{k: [] for k in DAILY_VARIABLES}}})
+
+    df = pd.concat(pieces, ignore_index=True)
+    # Forecast rows are appended last; keep them when a date appears in both.
+    df = df.drop_duplicates(subset=["date"], keep="last").sort_values("date").reset_index(
+        drop=True
+    )
+
+    # Safety-net backfill from archive for any all-null rows in the forecast window.
+    null_dates = _all_wx_null_dates(df)
+    if null_dates and forecast_range is not None:
+        # Backfill is only meaningful on the forecast side (the archive call
+        # produced concrete values where it covered). Reduce to forecast-window
+        # dates and call the archive endpoint for each contiguous run.
+        f_start = dt.date.fromisoformat(forecast_range[0])
+        f_end = dt.date.fromisoformat(forecast_range[1])
+        backfill_dates = sorted(d for d in null_dates if f_start <= d <= f_end)
+        if backfill_dates:
+            backfill_runs = _contiguous_runs(backfill_dates)
+            for run_start, run_end in backfill_runs:
+                logger.info(
+                    "weather fetch: archive backfill for (%s, %s) %s..%s "
+                    "(%d all-null forecast rows)",
+                    lat, lon, run_start.isoformat(), run_end.isoformat(),
+                    (run_end - run_start).days + 1,
+                )
+                backfill_df = _frame_from_payload(
+                    _request_daily(
+                        lat, lon, run_start.isoformat(), run_end.isoformat()
+                    )
+                )
+                # Overlay: replace the null rows for these dates.
+                df = (
+                    pd.concat([df, backfill_df], ignore_index=True)
+                    .drop_duplicates(subset=["date"], keep="last")
+                    .sort_values("date")
+                    .reset_index(drop=True)
+                )
+
+    return df
+
+
+def _contiguous_runs(dates: list[dt.date]) -> list[tuple[dt.date, dt.date]]:
+    """Compress a sorted list of dates into contiguous (start, end) runs."""
+    if not dates:
+        return []
+    runs: list[tuple[dt.date, dt.date]] = []
+    run_start = dates[0]
+    prev = dates[0]
+    for d in dates[1:]:
+        if (d - prev).days == 1:
+            prev = d
+            continue
+        runs.append((run_start, prev))
+        run_start = d
+        prev = d
+    runs.append((run_start, prev))
+    return runs
 
 
 def fetch_one(
@@ -175,14 +361,17 @@ def fetch_one(
     *,
     force: bool = False,
 ) -> Path | None:
-    """Fetch and cache weather for a single station. Returns the cached path."""
+    """Fetch and cache weather for a single station. Returns the cached path.
+
+    Uses the hybrid archive+forecast strategy (spec §13.7) — see
+    :func:`_fetch_hybrid` for the per-range routing logic.
+    """
     out_path = out_dir / f"{station_id}.parquet"
     if not force and _cache_covers(out_path, start, end):
         logger.debug("cache hit %s — covers %s..%s", out_path, start, end)
         return out_path
 
-    payload = _request_daily(lat, lon, start, end)
-    df = _frame_from_payload(payload)
+    df = _fetch_hybrid(lat, lon, start, end)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     df.to_parquet(out_path, engine="pyarrow", compression="zstd", index=False)
@@ -205,7 +394,7 @@ def fetch(
         stations_path: parquet with at least `station_id, lat, lon`.
         start: ISO date, inclusive.
         end: ISO date, inclusive. Clamped to yesterday if it's today or
-            later (ERA5 publication lag).
+            later (Open-Meteo publication lag).
         out_dir: directory for per-station `<station_id>.parquet` files.
         force: re-fetch ignoring cache.
         inter_call_seconds: delay between station calls. Default 0.1s

@@ -77,6 +77,44 @@ Two surprises worth flagging to the human reviewer:
 3. **One open question deferred to a follow-up.** The pilot list is 10 greater-Sydney/Newcastle venues. A null result on this slice doesn't formally rule out signal from a *richer* venue catalogue (e.g. including the 39 AFL/NRL home grounds nationwide, or large outdoor music venues). But the EDA caveat already explained the metro/regional confound mechanically — extending the list is unlikely to change the verdict without a structural feature-design rethink (e.g. event-day × venue-precinct interactions, not static distance-to-nearest).
 4. **No action on `cal_is_pre_long_weekend`.** The feature is harmless (zero gain → no effect on splits) but adds 5 bytes per row of parquet on disk. Leaving it in for now keeps the schema stable; remove if it causes friction later.
 
+## Generalisation: lessons for similar prediction problems
+
+If you're using this repo as a template for a different panel-time-series prediction problem — **retail sales by store, in-person bank transactions by branch, ATM cash withdrawals by location, foot traffic by venue, restaurant cover counts, parcel delivery volumes, etc.** — the spatial-event hypothesis we tested here recurs in slightly different forms. The null result is reusable. Four lessons:
+
+### 1. Static "distance to nearest X" features often just re-encode urban density
+
+Our `stn_nearest_venue_km` ranked **#20 of 93** features by gain importance and still hurt test MAE by 0.68 c/L. The model used it heavily but it was a noisy proxy for things the existing feature set already captured cleanly (`stn_is_metro`, `stn_competitors_within_2km`, `sa2_total_population`). For your problem: if you already have a metro/urban/regional flag, or competitor density, or population density, an explicit "km to nearest stadium / shopping centre / airport" feature is likely to do the same thing — bleed splits from features that generalise better.
+
+**Test discipline:** measure additivity over the existing feature set, not predictivity in isolation. EDA charts can show a real residual gap that the model still finds zero marginal value from.
+
+### 2. EDA-visible signal does not imply model-usable signal
+
+The Phase 0 EDA `cal_is_pre_long_weekend` (Friday before a Monday public holiday) showed the **cleanest** signal of any feature we tested — a +4.28 c/L Q1 vs Q5 gap by venue distance. In the trained model, that feature received **zero gain importance** (rank 93 of 93). Why? LightGBM was already building the equivalent split from `cal_day_of_week × cal_days_to_next_public_holiday` interactions. The signal was real; it was just already being captured.
+
+**Test discipline:** before adding a derived feature, check whether the model could (or already does) extract the same partition from existing columns. Tree models with interaction depth ≥ 2 build derived features implicitly for many "obvious" hand-crafted ones (day-of-week × holiday-proximity, lat × lon for region effects, lag × cycle position, etc.).
+
+### 3. Val MAE improvement + test MAE regression is a textbook overfit signal
+
+Model B' had the **best** validation MAE (4.8404) but the **worst** test MAE (6.594 vs B's 5.912). Same pattern as the SA2 v1.1 → v1.2 episode recorded in `spec.md` §7.7.4 — broadening a feature block from 10 → 31 columns improved val and regressed test. Watch for this fingerprint especially when adding spatial proxies, geographic interactions, or anything that risks encoding fold-specific noise. A single time-based held-out test fold catches this; a random k-fold often doesn't.
+
+### 4. Static vs event-day features for spatial events
+
+Our null is on the **static** version of the venue feature ("how close are you to a major venue, always"). It does *not* rule out the **event-day** version ("is there an event at the nearest venue today / tomorrow"). The mechanism we hypothesised (price discrimination on event days near demand-surge venues) requires the event-day join — which we deferred to Phase 2 (AFL/NRL fixture API integration) and then cancelled because the Phase 1 sanity check showed the static base feature was a net negative.
+
+For your problem: this exact null result is not transferable. If you're predicting ATM withdrawals near a stadium, the right feature is `is_event_day_at_nearest_venue × distance_within_2km`, not `distance_to_nearest_venue`. The static distance is downstream of urban density and will lose to the categorical features that already capture density; the event-day flag is genuinely time-varying and decorrelated from population. **Plan your spatial-event experiment around event-day features, not static-distance features, unless you have a specific reason to believe the static version is uniquely informative.**
+
+### When this null does and doesn't apply
+
+| Your problem | Likely behaviour |
+|---|---|
+| Retail sales by store, with existing urban-density features | Static distance-to-venue ≈ null. Event-day × proximity is the lever to test. |
+| ATM withdrawals near event precincts | Same. Event-day proximity is plausibly strong; static distance to nearest entertainment venue probably loses to existing density features. |
+| Bank branch transactions, B2B-heavy | Static distance to major venues likely irrelevant entirely (corporate transactions don't correlate with stadium events). Skip. |
+| Foot traffic / parking demand | Event-day proximity is the obvious lever and likely strong. Static distance still probably loses to density. |
+| Delivery / logistics density | Static density features dominate; event-day signal exists but is small relative to the urban density backbone. |
+
+If your existing feature set is **thin** on density/urbanisation proxies (no metro flag, no population density, no competitor counts), static distance-to-venue might survive as a useful proxy in the absence of those features. The null we documented is specifically about *adding* it on top of a feature set that already captures urban density several ways over.
+
 ## Files changed
 
 Code (Commit 1):

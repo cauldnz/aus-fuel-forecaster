@@ -17,7 +17,7 @@ The convention exists because research artefacts often have lasting value beyond
 
 | File | Topic | Spec ref |
 |---|---|---|
-| [`2026-05_major_events_features.md`](2026-05_major_events_features.md) | Spatial event features (AFL/NRL fixtures, major venues, long weekends). Gated on a Phase 0 EDA check. **EDA gate run — see [`2026-05_major_events_eda_outcome.md`](2026-05_major_events_eda_outcome.md) (verdict: PROCEED with caveats).** | spec §13.6 |
+| [`2026-05_major_events_features.md`](2026-05_major_events_features.md) | Spatial event features (AFL/NRL fixtures, major venues, long weekends). Gated on a Phase 0 EDA check. **EDA gate run — see [`2026-05_major_events_eda_outcome.md`](2026-05_major_events_eda_outcome.md) (verdict: PROCEED with caveats). Phase 1 sanity check run — see [`2026-05_major_events_phase1_outcome.md`](2026-05_major_events_phase1_outcome.md) (verdict: STOP, venue features regress test MAE).** | spec §13.6 |
 | [`2026-05_weather_leakage_fix.md`](2026-05_weather_leakage_fix.md) | Switch Open-Meteo Archive → Historical Forecast API + 1-day join shift. ~2.5 sessions of work. | spec §13.7 |
 
 ### Retrospectives (work already done)

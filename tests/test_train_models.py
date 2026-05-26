@@ -101,6 +101,13 @@ def _synth_panel(
                     row[col] = float(rng.normal(20, 5))
             for col in BLOCK_COLUMNS["sa2"]:
                 row[col] = float(rng.normal(50, 10))
+            for col in BLOCK_COLUMNS["venue"]:
+                if col == "stn_nearest_venue_type":
+                    row[col] = "stadium"  # categorical
+                elif col == "cal_is_pre_long_weekend":
+                    row[col] = bool(d.dayofweek == 4 and (i % 21) == 0)
+                else:
+                    row[col] = float(rng.normal(50, 10))
             rows.append(row)
 
     df = pd.DataFrame(rows)
@@ -140,21 +147,22 @@ def features_path(tmp_path: Path) -> Path:
 
 
 def test_train_writes_all_artefacts(features_path: Path, tmp_path: Path) -> None:
-    """End-to-end: orchestrator produces both pickles + feature_lists.json
-    + per-fold prediction parquets."""
+    """End-to-end: orchestrator produces all three pickles + feature_lists.json
+    + per-fold prediction parquets (Model A, B, B' per spec §13.6 Phase 1)."""
     out_dir = tmp_path / "models"
     result = tm.train(features_path, out_dir, fold=_short_fold_config())
 
     assert (out_dir / "model_a.pkl").exists()
     assert (out_dir / "model_b.pkl").exists()
+    assert (out_dir / "model_b_prime.pkl").exists()
     assert (out_dir / "feature_lists.json").exists()
     assert (out_dir / "predictions_test_normal.parquet").exists()
     assert (out_dir / "predictions_test_crisis.parquet").exists()
     # No leftover .tmp files from the atomic rename.
     assert not any(p.suffix == ".tmp" for p in out_dir.iterdir())
 
-    # Returned dict carries both fits.
-    assert set(result.keys()) == {"A", "B"}
+    # Returned dict carries all three fits.
+    assert set(result.keys()) == {"A", "B", "B_PRIME"}
 
 
 def test_feature_lists_json_records_correct_block_membership(
@@ -164,17 +172,28 @@ def test_feature_lists_json_records_correct_block_membership(
     tm.train(features_path, out_dir, fold=_short_fold_config())
 
     payload = json.loads((out_dir / "feature_lists.json").read_text(encoding="utf-8"))
-    assert set(payload) == {"A", "B", "config"}
+    assert set(payload) == {"A", "B", "B_PRIME", "config"}
 
     cols_a = payload["A"]["feature_columns"]
     cols_b = payload["B"]["feature_columns"]
+    cols_bp = payload["B_PRIME"]["feature_columns"]
     # Model B is Model A + sa2 (per spec §8.4).
     assert set(cols_b) - set(cols_a) == set(BLOCK_COLUMNS["sa2"])
     assert set(cols_a) - set(cols_b) == set()
+    # Model B' is Model B + venue (spec §13.6 Phase 1).
+    # The venue block is only added to B'; we accept whatever subset is
+    # present in the synthetic feature set (the venue cols may have
+    # been dropped from _synth_panel if they didn't make it into
+    # BLOCK_COLUMNS["venue"] when the panel was generated, so just
+    # require that no venue col leaked into A or B).
+    for col in BLOCK_COLUMNS["venue"]:
+        assert col not in cols_a, f"{col!r} leaked into Model A"
+        assert col not in cols_b, f"{col!r} leaked into Model B"
     # Targets and identifiers stayed out.
     for col in EXCLUDE_FROM_FEATURES:
         assert col not in cols_a, f"{col!r} leaked into Model A"
         assert col not in cols_b, f"{col!r} leaked into Model B"
+        assert col not in cols_bp, f"{col!r} leaked into Model B'"
 
 
 def test_predictions_parquet_has_expected_schema(
@@ -191,10 +210,12 @@ def test_predictions_parquet_has_expected_schema(
         "y_true",
         "y_pred_a",
         "y_pred_b",
+        "y_pred_b_prime",
     }
     assert len(preds) > 0
     assert preds["y_pred_a"].notna().all()
     assert preds["y_pred_b"].notna().all()
+    assert preds["y_pred_b_prime"].notna().all()
 
 
 def test_pickled_models_can_be_reloaded_and_predict(

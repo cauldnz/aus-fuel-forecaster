@@ -1,18 +1,26 @@
-"""Fit Models A (no SA2) and B (with SA2) on the feature matrix.
+"""Fit Models A (no SA2), B (with SA2), and B' (B + venue) on the feature matrix.
 
-Both models use identical hyperparameters (``config.LGBM_PARAMS``) and
-identical training rows: only rows where every Model B column is non-null
-are used in EITHER model. This prevents the augmentor from looking better
-just because its richer column set excluded harder examples.
+All three models use identical hyperparameters (``config.LGBM_PARAMS``)
+and identical training rows: only rows where every SA2 column is non-null
+are used. This prevents the augmentor from looking better just because
+its richer column set excluded harder examples. Venue columns can be null
+on a small set of rows and LightGBM handles them natively, so they are
+NOT subject to the row-filter.
+
+Model B' (spec §13.6 Phase 1) adds the VENUE feature block — 4 static
+nearest-venue features + ``cal_is_pre_long_weekend`` — to test whether
+they carry signal beyond what Model B already extracts from
+``stn_is_metro`` and other existing features.
 
 Splits per spec.md §8.3 (delegated to ``train.folds.split_folds``).
 
 Outputs (under ``out_dir``, typically ``models/``):
     model_a.pkl                          # pickled LGBMRegressor
     model_b.pkl                          # pickled LGBMRegressor
+    model_b_prime.pkl                    # pickled LGBMRegressor (Phase 1 ablation)
     feature_lists.json                   # column lists per model + audit
-    predictions_test_normal.parquet      # both models' preds on the headline test fold
-    predictions_test_crisis.parquet      # both models' preds on the crisis fold
+    predictions_test_normal.parquet      # all three models' preds (y_pred_a/b/b_prime)
+    predictions_test_crisis.parquet      # all three models' preds (y_pred_a/b/b_prime)
 """
 from __future__ import annotations
 
@@ -30,6 +38,7 @@ from fuel_pred.train.feature_blocks import (
     BLOCK_COLUMNS,
     MODEL_A_BLOCKS,
     MODEL_B_BLOCKS,
+    MODEL_B_PRIME_BLOCKS,
     categorical_columns,
     feature_columns,
 )
@@ -109,17 +118,22 @@ def train(
     # is intended for callers (notebooks / interactive use) that want the
     # spec drift to surface as a hard error; the production training
     # pipeline should be defensive about known-pending feature columns.
-    _warn_on_missing_blocks(work, MODEL_B_BLOCKS)
+    _warn_on_missing_blocks(work, MODEL_B_PRIME_BLOCKS)
     cols_a = feature_columns(work, MODEL_A_BLOCKS, strict=False)
     cols_b = feature_columns(work, MODEL_B_BLOCKS, strict=False)
+    cols_b_prime = feature_columns(work, MODEL_B_PRIME_BLOCKS, strict=False)
     cat_a = categorical_columns(cols_a)
     cat_b = categorical_columns(cols_b)
+    cat_b_prime = categorical_columns(cols_b_prime)
     logger.info(
-        "feature counts: Model A = %d (%d categorical) ; Model B = %d (%d categorical)",
+        "feature counts: Model A = %d (%d cat) ; "
+        "Model B = %d (%d cat) ; Model B' = %d (%d cat)",
         len(cols_a),
         len(cat_a),
         len(cols_b),
         len(cat_b),
+        len(cols_b_prime),
+        len(cat_b_prime),
     )
 
     # ---- Identical-rows guard (spec §8.4) --------------------------------
@@ -153,9 +167,9 @@ def train(
     #    dataset categorical_feature do not match" error if the predict
     #    input has different dtype (object vs categorical) than what the
     #    model stored at fit time.
-    # We use the union cat_a ∪ cat_b so both Model A and Model B see
+    # We use the union cat_a ∪ cat_b ∪ cat_b_prime so every model sees
     # consistent dtypes throughout.
-    union_cat_cols = sorted(set(cat_a) | set(cat_b))
+    union_cat_cols = sorted(set(cat_a) | set(cat_b) | set(cat_b_prime))
     if union_cat_cols:
         train_eligible, val_eligible, folds = _coerce_categorical_union(
             train_eligible, val_eligible, folds, union_cat_cols
@@ -172,7 +186,7 @@ def train(
     # Both cases are make_features.py bugs we should fix at the source,
     # but the coercion here unblocks training on existing features.parquet.
     # Tracked separately as an issue.
-    non_cat_feature_cols = [c for c in cols_b if c not in union_cat_cols]
+    non_cat_feature_cols = [c for c in cols_b_prime if c not in union_cat_cols]
     train_eligible, val_eligible, folds = _coerce_object_to_numeric(
         train_eligible, val_eligible, folds, non_cat_feature_cols
     )
@@ -234,17 +248,32 @@ def train(
         params=fit_params,
         log_period=log_period,
     )
+    logger.info(
+        "fitting Model B' (%d feature columns, B + venue block — spec §13.6 Phase 1)",
+        len(cols_b_prime),
+    )
+    fit_b_prime = fit_lgbm(
+        X_train=train_eligible,
+        y_train=y_train,
+        X_val=val_eligible,
+        y_val=y_val,
+        feature_columns=cols_b_prime,
+        categorical_columns=cat_b_prime,
+        params=fit_params,
+        log_period=log_period,
+    )
 
     # ---- Persist ---------------------------------------------------------
     _save_pickle(fit_a.model, out_dir / "model_a.pkl")
     _save_pickle(fit_b.model, out_dir / "model_b.pkl")
-    _save_feature_lists(out_dir / "feature_lists.json", fit_a, fit_b)
+    _save_pickle(fit_b_prime.model, out_dir / "model_b_prime.pkl")
+    _save_feature_lists(out_dir / "feature_lists.json", fit_a, fit_b, fit_b_prime)
 
     if save_predictions:
-        _save_predictions(folds, fit_a, fit_b, out_dir, target=target)
+        _save_predictions(folds, fit_a, fit_b, fit_b_prime, out_dir, target=target)
 
     logger.info("wrote models + audit to %s", out_dir)
-    return {"A": fit_a, "B": fit_b}
+    return {"A": fit_a, "B": fit_b, "B_PRIME": fit_b_prime}
 
 
 # ---- internals -------------------------------------------------------------
@@ -369,12 +398,18 @@ def _save_pickle(obj: object, path: Path) -> None:
     logger.info("wrote %s", path)
 
 
-def _save_feature_lists(path: Path, fit_a: FitResult, fit_b: FitResult) -> None:
+def _save_feature_lists(
+    path: Path,
+    fit_a: FitResult,
+    fit_b: FitResult,
+    fit_b_prime: FitResult,
+) -> None:
     """Serialise the feature lists + best-iteration audit trail.
 
     Lets the comparison report (Phase 8) and the explainability notebook
     (Phase 7 §9.3) recover exactly which columns each model used without
-    re-loading the pickles.
+    re-loading the pickles. Includes Model B' (spec §13.6 Phase 1) under
+    the ``"B_PRIME"`` key alongside ``"A"`` and ``"B"``.
     """
     payload = {
         "A": {
@@ -396,6 +431,14 @@ def _save_feature_lists(path: Path, fit_a: FitResult, fit_b: FitResult) -> None:
             "importance_gain": fit_b.importance_gain,
             "importance_split": fit_b.importance_split,
         },
+        "B_PRIME": {
+            "feature_columns": fit_b_prime.feature_columns,
+            "categorical_columns": fit_b_prime.categorical_columns,
+            "best_iteration": fit_b_prime.best_iteration,
+            "best_val_mae": fit_b_prime.best_score,
+            "importance_gain": fit_b_prime.importance_gain,
+            "importance_split": fit_b_prime.importance_split,
+        },
         "config": {
             # Snapshot the hyperparameters used so a future re-run can be
             # diffed against this one.
@@ -413,15 +456,16 @@ def _save_predictions(
     folds: dict[str, pd.DataFrame],
     fit_a: FitResult,
     fit_b: FitResult,
+    fit_b_prime: FitResult,
     out_dir: Path,
     *,
     target: str,
 ) -> None:
-    """Write per-fold parquet with both models' predictions side-by-side.
+    """Write per-fold parquet with all three models' predictions side-by-side.
 
-    Schema: ``station_id, fuel_code, date, y_true, y_pred_a, y_pred_b``.
-    This is what ``evaluate.compare`` consumes — keeps the eval pass fast
-    and re-runnable without invoking LightGBM again.
+    Schema: ``station_id, fuel_code, date, y_true, y_pred_a, y_pred_b,
+    y_pred_b_prime``. This is what ``evaluate.compare`` consumes — keeps
+    the eval pass fast and re-runnable without invoking LightGBM again.
     """
     for fold_name in ("test_normal", "test_crisis"):
         df = folds[fold_name]
@@ -436,6 +480,9 @@ def _save_predictions(
                 "y_true": df[target].to_numpy(),
                 "y_pred_a": fit_a.model.predict(df[fit_a.feature_columns]),
                 "y_pred_b": fit_b.model.predict(df[fit_b.feature_columns]),
+                "y_pred_b_prime": fit_b_prime.model.predict(
+                    df[fit_b_prime.feature_columns]
+                ),
             }
         )
         path = out_dir / f"predictions_{fold_name}.parquet"

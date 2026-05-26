@@ -191,6 +191,20 @@ SA2_COLUMNS: tuple[str, ...] = (
     "sa2_dss_youth_allowance_student_and_apprentice_recipients",
 )
 
+# §13.6 Phase 1 venue + long-weekend block — the additive sanity check
+# against Model B. ``stn_nearest_venue_type`` is categorical (stadium /
+# showground / entertainment_centre in the v1 pilot); the others are
+# numeric. ``cal_is_pre_long_weekend`` is added here rather than to the
+# canonical CALENDAR_COLUMNS so Model A / Model B stay unchanged and only
+# Model B' picks up the long-weekend signal alongside the venue features.
+VENUE_COLUMNS: tuple[str, ...] = (
+    "stn_nearest_venue_km",
+    "stn_nearest_venue_capacity",
+    "stn_nearest_venue_type",
+    "stn_n_venues_within_5km",
+    "cal_is_pre_long_weekend",
+)
+
 # Convenience: block-name → column tuple.
 BLOCK_COLUMNS: dict[str, tuple[str, ...]] = {
     "lag": LAG_COLUMNS,
@@ -200,6 +214,7 @@ BLOCK_COLUMNS: dict[str, tuple[str, ...]] = {
     "stn": STN_COLUMNS,
     "wx": WX_COLUMNS,
     "sa2": SA2_COLUMNS,
+    "venue": VENUE_COLUMNS,
 }
 
 
@@ -209,6 +224,13 @@ BLOCK_COLUMNS: dict[str, tuple[str, ...]] = {
 # the column set as unordered.
 MODEL_A_BLOCKS: tuple[str, ...] = ("lag", "upstream", "cal", "ctx", "stn", "wx")
 MODEL_B_BLOCKS: tuple[str, ...] = (*MODEL_A_BLOCKS, "sa2")
+# Model B' — Model B plus the venue + long-weekend block (spec §13.6 Phase 1).
+# The Phase 1 sanity check trains this alongside A and B with identical
+# hyperparameters / identical training rows; if Model B' beats B by ≥ 0.05
+# c/L MAE on test_normal the venue features carry additive signal, otherwise
+# they re-encode stn_is_metro / other existing features and Phase 2-3
+# AFL/NRL fixture work isn't justified.
+MODEL_B_PRIME_BLOCKS: tuple[str, ...] = (*MODEL_B_BLOCKS, "venue")
 
 
 # ---- Categoricals ----------------------------------------------------------
@@ -222,6 +244,8 @@ CATEGORICAL_COLUMNS: frozenset[str] = frozenset(
         "stn_brand_raw",
         "stn_brand_canonical",
         "wx_weather_code",
+        # Venue type — small categorical (~3 levels in the pilot list).
+        "stn_nearest_venue_type",
     }
 )
 

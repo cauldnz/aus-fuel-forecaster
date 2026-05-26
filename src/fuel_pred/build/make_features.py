@@ -308,6 +308,15 @@ def add_calendar_features(
         dt_col.dt.date.tolist(), set(holiday_dates)
     )
 
+    # Pre-long-weekend Friday flag (spec §13.6 Phase 1). Friday before a
+    # Monday public holiday: cal_day_of_week == 4 AND
+    # cal_days_to_next_public_holiday == 3 (today=Fri, Sat=1, Sun=2,
+    # Mon=3). Derivation is a pure function of the two columns just
+    # written, so dtype matches other cal_is_* boolean flags.
+    out["cal_is_pre_long_weekend"] = (
+        (out["cal_day_of_week"] == 4) & (out["cal_days_to_next_public_holiday"] == 3)
+    ).astype("boolean")
+
     return out
 
 
@@ -563,8 +572,21 @@ def _add_macro_feature(
 # ============================================================
 
 
-def add_station_features(df: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:
-    """Brand columns, competitor counts, terminal distance, metro flag."""
+def add_station_features(
+    df: pd.DataFrame,
+    stations: pd.DataFrame,
+    stations_venues_path: Path | None = None,
+) -> pd.DataFrame:
+    """Brand columns, competitor counts, terminal distance, metro flag, venues.
+
+    Args:
+        df: panel rows with at least ``station_id``.
+        stations: roster from ``data/interim/stations.parquet``.
+        stations_venues_path: optional path to a parquet from
+            ``spatial.venues``. When None or the file doesn't exist,
+            the 5 venue columns are added as nulls / zero — same
+            None-tolerant pattern used for the Tier-2 macros in §7.4.
+    """
     cols = ["station_id"]
     for c in (
         "brand_raw",
@@ -602,10 +624,71 @@ def add_station_features(df: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFra
     # raising "pandas dtypes must be int, float or bool".
     s["stn_is_franchisee"] = np.nan
 
+    # Venue features (spec §13.6 Phase 1). Optional — when the parquet
+    # isn't on disk, attach nulls so the columns are always in the
+    # output schema and LightGBM handles them natively.
+    s = _attach_venue_features(s, stations_venues_path)
+
     # Drop columns we used for derivation but don't want to expose.
     s = s.drop(columns=[c for c in ("lat", "lon", "sa2_name") if c in s.columns])
 
     return df.merge(s, on="station_id", how="left")
+
+
+# Names of the venue feature columns added by ``_attach_venue_features``;
+# kept in lockstep with feature_blocks.VENUE_COLUMNS station-side names.
+VENUE_STATION_COLUMNS: tuple[str, ...] = (
+    "stn_nearest_venue_km",
+    "stn_nearest_venue_capacity",
+    "stn_nearest_venue_type",
+    "stn_n_venues_within_5km",
+)
+
+
+def _attach_venue_features(
+    s: pd.DataFrame, stations_venues_path: Path | None
+) -> pd.DataFrame:
+    """Merge venue features onto the per-station block; null-fill if absent."""
+    if stations_venues_path is None or not stations_venues_path.exists():
+        if stations_venues_path is not None:
+            logger.info(
+                "stations_venues parquet not found at %s — venue columns will be null",
+                stations_venues_path,
+            )
+        for col in VENUE_STATION_COLUMNS:
+            if col == "stn_nearest_venue_type":
+                # Match the parquet schema (object) so the column doesn't
+                # collide with a categorical dtype downstream.
+                s[col] = pd.Series([pd.NA] * len(s), dtype="object")
+            else:
+                s[col] = np.nan
+        return s
+
+    venues = pd.read_parquet(stations_venues_path)
+    # Only keep the columns the model actually consumes; drop the
+    # nearest-venue-id (high-cardinality identifier, redundant with the
+    # capacity + type pair).
+    keep = ["station_id", *VENUE_STATION_COLUMNS]
+    available = [c for c in keep if c in venues.columns]
+    missing = [c for c in keep if c not in venues.columns]
+    if missing:
+        logger.warning(
+            "stations_venues missing %d expected column(s): %s — filled with nulls",
+            len(missing),
+            missing,
+        )
+    merged = s.merge(venues[available], on="station_id", how="left")
+    for col in missing:
+        if col == "stn_nearest_venue_type":
+            merged[col] = pd.Series([pd.NA] * len(merged), dtype="object")
+        else:
+            merged[col] = np.nan
+    logger.info(
+        "merged venue features for %d stations (%d had a nearest-venue match)",
+        len(merged),
+        int(merged["stn_nearest_venue_km"].notna().sum()),
+    )
+    return merged
 
 
 def _is_metro_sa2_name(sa2_name: object) -> bool:
@@ -779,12 +862,15 @@ def make_features(
     cash_rate: pd.DataFrame | None = None,
     asx200: pd.DataFrame | None = None,
     inflation_expectations: pd.DataFrame | None = None,
+    stations_venues_path: Path | None = None,
 ) -> pd.DataFrame:
     """Compose all feature blocks. Returns the full features.parquet shape.
 
     Phase-5 inputs (`aip_tgp`, `cash_rate`, `asx200`,
     `inflation_expectations`) are optional — when omitted, the
-    corresponding columns ship as null.
+    corresponding columns ship as null. ``stations_venues_path`` (spec
+    §13.6 Phase 1) is likewise optional: when None or missing, the
+    venue columns ship as null.
     """
     logger.info("starting feature build: %d panel rows", len(panel))
 
@@ -808,7 +894,9 @@ def make_features(
     )
     logger.info("after ctx block: %d cols", len(df.columns))
 
-    df = add_station_features(df, stations=stations)
+    df = add_station_features(
+        df, stations=stations, stations_venues_path=stations_venues_path
+    )
     logger.info("after stn block: %d cols", len(df.columns))
 
     df = add_weather_features(df, weather_dir=weather_dir)
@@ -839,12 +927,14 @@ def make_features_from_paths(
     cash_rate_path: Path | None = None,
     asx200_path: Path | None = None,
     inflation_expectations_path: Path | None = None,
+    stations_venues_path: Path | None = None,
 ) -> None:
     """File-IO convenience wrapper around `make_features`.
 
     Phase-5 paths are optional — missing files become null feature
     columns rather than fatal errors, so feature builds work
-    incrementally as upstream fetchers come online.
+    incrementally as upstream fetchers come online. Same applies to
+    ``stations_venues_path`` (spec §13.6 Phase 1).
     """
     raw = config.DATA_RAW
     interim = config.DATA_INTERIM
@@ -862,6 +952,7 @@ def make_features_from_paths(
     inflation_expectations_path = (
         inflation_expectations_path or raw / "inflation_expectations.parquet"
     )
+    stations_venues_path = stations_venues_path or config.INTERIM_STATIONS_VENUES
 
     panel = pd.read_parquet(panel_path)
     brent = pd.read_parquet(brent_path)
@@ -880,6 +971,10 @@ def make_features_from_paths(
         if inflation_expectations_path.exists()
         else None
     )
+    # `stations_venues_path` is passed through to `add_station_features`
+    # (which lazy-loads); pass None when the file doesn't exist so the
+    # function takes the graceful-null branch.
+    venues_path = stations_venues_path if stations_venues_path.exists() else None
 
     features = make_features(
         panel,
@@ -895,6 +990,7 @@ def make_features_from_paths(
         cash_rate=cash_rate,
         asx200=asx200,
         inflation_expectations=inflation_expectations,
+        stations_venues_path=venues_path,
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -914,6 +1010,17 @@ def main() -> None:
     parser.add_argument("--traffic-daily", type=Path, default=None)
     parser.add_argument("--weather-dir", type=Path, default=None)
     parser.add_argument("--school-terms", type=Path, default=None)
+    parser.add_argument(
+        "--stations-venues",
+        type=Path,
+        default=None,
+        help=(
+            "optional path to data/interim/stations_venues.parquet "
+            "(from spatial.venues). When omitted, defaults to "
+            "config.INTERIM_STATIONS_VENUES; null feature columns "
+            "when the file doesn't exist."
+        ),
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     make_features_from_paths(
@@ -927,6 +1034,7 @@ def main() -> None:
         traffic_daily_path=args.traffic_daily,
         weather_dir=args.weather_dir,
         school_terms_path=args.school_terms,
+        stations_venues_path=args.stations_venues,
     )
 
 

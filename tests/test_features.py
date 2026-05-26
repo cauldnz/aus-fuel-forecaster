@@ -16,6 +16,7 @@ from fuel_pred.build.make_features import (
     DOF_ANCHOR_DATE,
     add_calendar_features,
     add_lag_features,
+    add_station_features,
     add_targets,
 )
 
@@ -114,6 +115,109 @@ def test_day_of_fortnight_anchors_correctly() -> None:
     assert dofs == [0, 1, 13, 0, 1], (
         f"Expected [0, 1, 13, 0, 1], got {dofs}"
     )
+
+
+def test_pre_long_weekend_fires_friday_before_monday_holiday() -> None:
+    """`cal_is_pre_long_weekend` = True iff Fri AND next public holiday is Mon (3 days out).
+
+    The right test case is a *non-holiday* Friday three days before a Monday
+    public holiday. NSW examples from 2024 (verified against python-holidays):
+
+    - 2024-06-07 (Fri) → 2024-06-10 (Mon, King's Birthday)  → expect True
+    - 2024-10-04 (Fri) → 2024-10-07 (Mon, NSW Labour Day)   → expect True
+
+    Counter-examples on the same calendar:
+    - 2024-06-10 (Mon, the holiday itself) → False
+    - 2024-06-08 (Sat, weekend) → False
+    - 2024-06-14 (Fri, ordinary) → False
+    """
+    dates = pd.to_datetime(
+        [
+            "2024-06-07",  # Fri before King's Birthday Mon → True
+            "2024-10-04",  # Fri before NSW Labour Day Mon → True
+            "2024-06-10",  # Mon (holiday itself) → False
+            "2024-06-08",  # Sat → False
+            "2024-06-14",  # ordinary Fri → False
+        ]
+    )
+    df = pd.DataFrame(
+        {
+            "station_id": ["s1"] * len(dates),
+            "fuel_code": ["U91"] * len(dates),
+            "date": dates,
+        }
+    )
+    from fuel_pred import config
+    result = add_calendar_features(
+        df, school_terms_path=config.DATA_STATIC / "nsw_school_terms.csv"
+    )
+
+    # Pivot to date-indexed dict so the assertion is order-independent.
+    by_date = dict(
+        zip(
+            pd.to_datetime(result["date"]).dt.strftime("%Y-%m-%d").tolist(),
+            result["cal_is_pre_long_weekend"].tolist(),
+            strict=True,
+        )
+    )
+    # bool(pd.NA) raises; cast to a regular Python bool via int-equality
+    # so the assertions are robust against the column being a pandas
+    # `boolean` (nullable) dtype.
+    def _truthy(v: object) -> bool:
+        return v is True or v == 1
+
+    def _falsy(v: object) -> bool:
+        return v is False or v == 0
+
+    assert _truthy(by_date["2024-06-07"]), by_date  # Fri before King's Birthday Mon
+    assert _truthy(by_date["2024-10-04"]), by_date  # Fri before NSW Labour Day Mon
+    assert _falsy(by_date["2024-06-10"]), by_date  # the holiday itself
+    assert _falsy(by_date["2024-06-08"]), by_date  # Sat
+    assert _falsy(by_date["2024-06-14"]), by_date  # ordinary Fri
+
+
+def test_venue_features_null_when_stations_venues_missing(tmp_path) -> None:
+    """`add_station_features` with no venue parquet ships null venue cols.
+
+    Graceful-null contract per CLAUDE.md "preserve raw alongside normalised"
+    and the §7.4 None-tolerant pattern used for aip_tgp / cash_rate.
+    """
+    df = pd.DataFrame(
+        {
+            "station_id": ["s1", "s2"],
+            "fuel_code": ["U91", "U91"],
+            "date": pd.to_datetime(["2024-01-01", "2024-01-01"]),
+        }
+    )
+    # Minimal stations roster — no lat/lon needed; we're testing the
+    # null-fill path which precedes any spatial join.
+    stations = pd.DataFrame(
+        {
+            "station_id": ["s1", "s2"],
+            "brand_raw": ["BrandA", "BrandB"],
+            "brand_canonical": ["BrandA", "BrandB"],
+            "brand_is_major": [True, False],
+            "lat": [-33.870, -34.000],
+            "lon": [151.210, 151.000],
+            "sa2_name": ["Sydney - CBD", "Goulburn"],
+        }
+    )
+
+    # Path that doesn't exist — function must fall back to null venue cols.
+    missing_path = tmp_path / "does_not_exist.parquet"
+    out = add_station_features(df, stations, stations_venues_path=missing_path)
+
+    for col in (
+        "stn_nearest_venue_km",
+        "stn_nearest_venue_capacity",
+        "stn_nearest_venue_type",
+        "stn_n_venues_within_5km",
+    ):
+        assert col in out.columns, f"missing column {col!r}"
+        assert out[col].isna().all(), (
+            f"{col} should be all-null when stations_venues parquet absent, "
+            f"got {out[col].tolist()}"
+        )
 
 
 def test_models_a_and_b_train_on_identical_rows() -> None:

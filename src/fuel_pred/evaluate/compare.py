@@ -216,14 +216,23 @@ def _bucket_brand(brand: pd.Series) -> pd.Series:
 def _row_metrics(rows: pd.DataFrame) -> dict[str, Any]:
     """Compute the §8.5 metric set for one (segment, model) slice.
 
-    Returns a dict with separate A and B columns plus the B - A delta
-    on the headline metrics, ready to drop into a Markdown table row.
+    Returns a dict with separate A, B, and (optional) B' columns plus
+    the B−A and B'−B deltas on the headline metrics, ready to drop into
+    a Markdown table row. The Model B' columns/deltas are NaN when the
+    fold doesn't carry a ``y_pred_b_prime`` column (older training run).
     """
     out: dict[str, Any] = {"n": len(rows)}
+    keys_nan = (
+        "mae_a", "rmse_a", "mape_a", "median_a", "p90_a",
+        "mae_b", "rmse_b", "mape_b", "median_b", "p90_b",
+        "mae_b_prime", "rmse_b_prime", "mape_b_prime",
+        "median_b_prime", "p90_b_prime",
+        "delta_mae", "delta_mape",
+        "delta_mae_b_prime_vs_b", "delta_mape_b_prime_vs_b",
+        "delta_mae_b_prime_vs_a", "delta_mape_b_prime_vs_a",
+    )
     if rows.empty:
-        for k in ("mae_a", "rmse_a", "mape_a", "median_a", "p90_a",
-                 "mae_b", "rmse_b", "mape_b", "median_b", "p90_b",
-                 "delta_mae", "delta_mape"):
+        for k in keys_nan:
             out[k] = float("nan")
         return out
 
@@ -245,6 +254,31 @@ def _row_metrics(rows: pd.DataFrame) -> dict[str, Any]:
             "delta_mape": metrics_b["mape"] - metrics_a["mape"],
         }
     )
+    # Model B' (spec §13.6 Phase 1) — only present if the train run
+    # included it in the prediction parquets.
+    if "y_pred_b_prime" in rows.columns:
+        metrics_bp = all_metrics(rows["y_true"], rows["y_pred_b_prime"])
+        out.update(
+            {
+                "mae_b_prime": metrics_bp["mae"],
+                "rmse_b_prime": metrics_bp["rmse"],
+                "mape_b_prime": metrics_bp["mape"],
+                "median_b_prime": metrics_bp["median_abs_error"],
+                "p90_b_prime": metrics_bp["p90_abs_error"],
+                "delta_mae_b_prime_vs_b": metrics_bp["mae"] - metrics_b["mae"],
+                "delta_mape_b_prime_vs_b": metrics_bp["mape"] - metrics_b["mape"],
+                "delta_mae_b_prime_vs_a": metrics_bp["mae"] - metrics_a["mae"],
+                "delta_mape_b_prime_vs_a": metrics_bp["mape"] - metrics_a["mape"],
+            }
+        )
+    else:
+        for k in (
+            "mae_b_prime", "rmse_b_prime", "mape_b_prime",
+            "median_b_prime", "p90_b_prime",
+            "delta_mae_b_prime_vs_b", "delta_mape_b_prime_vs_b",
+            "delta_mae_b_prime_vs_a", "delta_mape_b_prime_vs_a",
+        ):
+            out[k] = float("nan")
     return out
 
 
@@ -253,37 +287,63 @@ def _row_metrics(rows: pd.DataFrame) -> dict[str, Any]:
 
 def _render_header(features_path: Path, models_dir: Path) -> str:
     ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    b_prime_pkl = models_dir / "model_b_prime.pkl"
+    b_prime_line = (
+        f"Models:   `{models_dir}/model_a.pkl`, `{models_dir}/model_b.pkl`, "
+        f"`{models_dir}/model_b_prime.pkl`\n"
+        if b_prime_pkl.exists()
+        else f"Models:   `{models_dir}/model_a.pkl`, `{models_dir}/model_b.pkl`\n"
+    )
+    b_prime_note = (
+        "Model B' (spec §13.6 Phase 1) extends Model B with the VENUE block "
+        "(nearest-venue distance / capacity / type, venues-within-5km count, "
+        "and `cal_is_pre_long_weekend`). It's the additive sanity check "
+        "asking: do venue-distance features add lift over Model B, or do "
+        "they just re-encode `stn_is_metro` and other existing features? "
+        "Identical hyperparameters and identical training rows.\n\n"
+        if b_prime_pkl.exists()
+        else ""
+    )
     return textwrap.dedent(
         f"""
-        # Model A vs Model B — comparison report
+        # Model A vs Model B{" vs Model B'" if b_prime_pkl.exists() else ""} — comparison report
 
         Generated: {ts}
         Features: `{features_path}`
-        Models:   `{models_dir}/model_a.pkl`, `{models_dir}/model_b.pkl`
+        {b_prime_line.rstrip()}
 
         Per spec §8.5: Model A uses lag + upstream + cal + ctx + stn + wx
         feature blocks. Model B adds the SA2 demographic block. **Both
         models train on identical rows** (those where every SA2 column
         is non-null) so the comparison isolates the augmentor's lift.
 
-        - **Negative `Δ MAE` = Model B beats Model A** (augmentor adds value)
+        {b_prime_note}- **Negative `Δ MAE` = Model B beats Model A** (augmentor adds value)
+        - **Negative `Δ MAE (B' vs B)` = venue features add lift** beyond Model B
         - All metrics in cents/L except MAPE (in %)
         """
     ).strip()
 
 
 def _render_headline_table(enriched: dict[str, pd.DataFrame]) -> str:
-    """Top-of-report 'overall' table — both folds, all metrics, side by side."""
+    """Top-of-report 'overall' table — both folds, all metrics, side by side.
+
+    When the prediction parquets include ``y_pred_b_prime`` (spec §13.6
+    Phase 1 ablation), a second table is appended that compares Model
+    B' against Model B and Model A.
+    """
     rows: list[dict[str, Any]] = []
+    has_b_prime = False
     for fold_name, df in enriched.items():
         m = _row_metrics(df)
         rows.append({"Fold": fold_name, **m})
+        if "y_pred_b_prime" in df.columns:
+            has_b_prime = True
 
     if not rows:
         return ""
 
     body_lines = [
-        "## Headline (overall)",
+        "## Headline (overall) — A vs B",
         "",
         "| Fold | n | MAE A | MAE B | Δ MAE | RMSE A | RMSE B | MAPE A | MAPE B | Δ MAPE |",
         "|------|--:|------:|------:|------:|-------:|-------:|-------:|-------:|-------:|",
@@ -295,13 +355,38 @@ def _render_headline_table(enriched: dict[str, pd.DataFrame]) -> str:
             f"{r['rmse_a']:.3f} | {r['rmse_b']:.3f} | "
             f"{r['mape_a']:.3f} | {r['mape_b']:.3f} | {_signed(r['delta_mape'])} |"
         )
+
+    if has_b_prime:
+        body_lines.extend(
+            [
+                "",
+                "## Headline (overall) — B vs B' (venue-block additive sanity check)",
+                "",
+                "| Fold | n | MAE B | MAE B' | Δ MAE (B'−B) | RMSE B' | MAPE B' | "
+                "Δ MAE (B'−A) |",
+                "|------|--:|------:|-------:|-------------:|--------:|--------:|"
+                "-------------:|",
+            ]
+        )
+        for r in rows:
+            body_lines.append(
+                f"| {r['Fold']} | {r['n']:,} | "
+                f"{r['mae_b']:.3f} | {r['mae_b_prime']:.3f} | "
+                f"{_signed(r['delta_mae_b_prime_vs_b'])} | "
+                f"{r['rmse_b_prime']:.3f} | {r['mape_b_prime']:.3f} | "
+                f"{_signed(r['delta_mae_b_prime_vs_a'])} |"
+            )
     return "\n".join(body_lines)
 
 
 def _render_segment_section(
     title: str, enriched: dict[str, pd.DataFrame], segment_col: str
 ) -> str:
-    """Per-fold segmented table for one segmentation column."""
+    """Per-fold segmented table for one segmentation column.
+
+    Includes a Model B' column / Δ MAE (B'−B) when the prediction
+    parquets carry ``y_pred_b_prime``.
+    """
     chunks: list[str] = [f"## Segmented by {title}"]
     for fold_name, df in enriched.items():
         if segment_col not in df.columns:
@@ -310,6 +395,7 @@ def _render_segment_section(
                 f"_(`{segment_col}` not in fold; skipped)_"
             )
             continue
+        has_b_prime = "y_pred_b_prime" in df.columns
         rows: list[dict[str, Any]] = []
         for value, group in df.groupby(segment_col, dropna=False, observed=True):
             label = str(value) if pd.notna(value) else "Unknown"
@@ -321,18 +407,38 @@ def _render_segment_section(
             chunks.append(f"### {fold_name}\n\n_(no rows)_")
             continue
 
-        lines = [
-            f"### {fold_name}",
-            "",
-            "| Segment | n | MAE A | MAE B | Δ MAE | MAPE A | MAPE B | Δ MAPE |",
-            "|---------|--:|------:|------:|------:|-------:|-------:|-------:|",
-        ]
-        for r in rows:
-            lines.append(
-                f"| {r['Segment']} | {r['n']:,} | "
-                f"{r['mae_a']:.3f} | {r['mae_b']:.3f} | {_signed(r['delta_mae'])} | "
-                f"{r['mape_a']:.3f} | {r['mape_b']:.3f} | {_signed(r['delta_mape'])} |"
-            )
+        if has_b_prime:
+            lines = [
+                f"### {fold_name}",
+                "",
+                "| Segment | n | MAE A | MAE B | MAE B' | Δ MAE (B−A) | "
+                "Δ MAE (B'−B) | MAPE B' |",
+                "|---------|--:|------:|------:|-------:|------------:|"
+                "------------:|--------:|",
+            ]
+            for r in rows:
+                lines.append(
+                    f"| {r['Segment']} | {r['n']:,} | "
+                    f"{r['mae_a']:.3f} | {r['mae_b']:.3f} | "
+                    f"{r['mae_b_prime']:.3f} | {_signed(r['delta_mae'])} | "
+                    f"{_signed(r['delta_mae_b_prime_vs_b'])} | "
+                    f"{r['mape_b_prime']:.3f} |"
+                )
+        else:
+            lines = [
+                f"### {fold_name}",
+                "",
+                "| Segment | n | MAE A | MAE B | Δ MAE | MAPE A | MAPE B | Δ MAPE |",
+                "|---------|--:|------:|------:|------:|-------:|-------:|-------:|",
+            ]
+            for r in rows:
+                lines.append(
+                    f"| {r['Segment']} | {r['n']:,} | "
+                    f"{r['mae_a']:.3f} | {r['mae_b']:.3f} | "
+                    f"{_signed(r['delta_mae'])} | "
+                    f"{r['mape_a']:.3f} | {r['mape_b']:.3f} | "
+                    f"{_signed(r['delta_mape'])} |"
+                )
         chunks.append("\n".join(lines))
     return "\n\n".join(chunks)
 
@@ -363,16 +469,22 @@ def _load_feature_lists(models_dir: Path) -> dict[str, Any] | None:
 
 
 def _render_importance_section(importances: dict[str, Any]) -> str:
-    """Top-N features by gain for both models + where SA2 features rank.
+    """Top-N features by gain for each model + where SA2 / venue features rank.
 
     The "where SA2 features rank in Model B" sub-table is the
     project-specific quantitative answer to "did the augmentor's
     columns actually get used by the model?" — separate from whether
-    they improved test-fold MAE.
+    they improved test-fold MAE. A symmetric sub-table for VENUE-block
+    features in Model B' is added when Model B' is present.
     """
     chunks: list[str] = ["## Feature importance"]
 
-    for model_key in ("A", "B"):
+    # Model B' is optional — only include if it's in the JSON.
+    model_keys: list[str] = ["A", "B"]
+    if importances.get("B_PRIME", {}).get("importance_gain"):
+        model_keys.append("B_PRIME")
+
+    for model_key in model_keys:
         m = importances.get(model_key, {})
         gain = m.get("importance_gain") or {}
         split = m.get("importance_split") or {}
@@ -386,8 +498,9 @@ def _render_importance_section(importances: dict[str, Any]) -> str:
         ranked = sorted(gain.items(), key=lambda kv: kv[1], reverse=True)
         top = ranked[:TOP_N_FEATURES_BY_IMPORTANCE]
         total_gain = sum(gain.values()) or 1.0  # avoid /0
+        label = "B'" if model_key == "B_PRIME" else model_key
         lines = [
-            f"### Model {model_key} — top {len(top)} by gain importance",
+            f"### Model {label} — top {len(top)} by gain importance",
             "",
             "| Rank | Feature | Block | Gain | Gain % | Splits |",
             "|-----:|---------|-------|-----:|-------:|-------:|",
@@ -428,6 +541,40 @@ def _render_importance_section(importances: dict[str, Any]) -> str:
                 )
             chunks.append("\n".join(lines))
 
+    # Where do VENUE-block features rank in Model B'? — spec §13.6 Phase 1.
+    bp = importances.get("B_PRIME", {})
+    bp_gain = bp.get("importance_gain") or {}
+    if bp_gain:
+        bp_ranked = sorted(bp_gain.items(), key=lambda kv: kv[1], reverse=True)
+        bp_rank_lookup = {feat: i + 1 for i, (feat, _g) in enumerate(bp_ranked)}
+        venue_feats = {
+            "stn_nearest_venue_km",
+            "stn_nearest_venue_capacity",
+            "stn_nearest_venue_type",
+            "stn_n_venues_within_5km",
+            "cal_is_pre_long_weekend",
+        }
+        venue_rows = [
+            (feat, gain_val, bp_rank_lookup.get(feat, -1))
+            for feat, gain_val in bp_gain.items()
+            if feat in venue_feats
+        ]
+        venue_rows.sort(key=lambda r: r[1], reverse=True)
+        if venue_rows:
+            total_bp_gain = sum(bp_gain.values()) or 1.0
+            lines = [
+                "### Where VENUE-block features rank in Model B' (spec §13.6 Phase 1)",
+                "",
+                "| Venue feature | Rank in B' | Gain | Gain % |",
+                "|---------------|-----------:|-----:|-------:|",
+            ]
+            for feat, g, rank in venue_rows:
+                lines.append(
+                    f"| `{feat}` | {rank} | {g:,.0f} | "
+                    f"{100 * g / total_bp_gain:.2f} |"
+                )
+            chunks.append("\n".join(lines))
+
     return "\n\n".join(chunks)
 
 
@@ -436,7 +583,20 @@ def _block_of(feature_name: str) -> str:
 
     Lifted from train.feature_blocks but kept inline to avoid an
     extra import — the prefix mapping is stable spec convention.
+
+    Venue / pre-long-weekend features (spec §13.6 Phase 1) live in
+    their own ``venue`` block even though they share the ``stn_`` /
+    ``cal_`` prefixes — checked first so they don't get swept into
+    the stn / cal buckets.
     """
+    if feature_name in {
+        "stn_nearest_venue_km",
+        "stn_nearest_venue_capacity",
+        "stn_nearest_venue_type",
+        "stn_n_venues_within_5km",
+        "cal_is_pre_long_weekend",
+    }:
+        return "venue"
     if feature_name.startswith("lag_") or feature_name.startswith("roll_") or \
        feature_name.startswith("xfuel_") or feature_name in {
            "days_since_last_price_change", "price_minus_28d_min",

@@ -27,6 +27,12 @@ SHAP_DIR: Path = RESULTS_DIR / "shap"
 # Owned by maintainer + agent (append-only, same policy as brand_aliases.csv).
 STATIC_MAJOR_VENUES: Path = DATA_STATIC / "major_venues.csv"
 
+# Per-station nearest-venue features (spec §13.6 Phase 1). Produced by
+# `python -m fuel_pred.spatial.venues`. Optional input to make_features —
+# when absent, the venue feature columns ship as nulls (consistent with
+# the pattern used for aip_tgp / cash_rate / asx200 in §7.4).
+INTERIM_STATIONS_VENUES: Path = DATA_INTERIM / "stations_venues.parquet"
+
 # ----------------------------- Span -----------------------------
 
 # v1 historical span. FuelCheck monthly archives start 2016-09 and the

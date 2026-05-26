@@ -10,8 +10,8 @@ from fuel_pred.train import feature_blocks as fb
 
 
 def test_block_columns_match_spec_set_completely() -> None:
-    """All seven §7 blocks are present in BLOCK_COLUMNS."""
-    expected = {"lag", "upstream", "cal", "ctx", "stn", "wx", "sa2"}
+    """All seven §7 blocks + the §13.6 Phase 1 venue block are present."""
+    expected = {"lag", "upstream", "cal", "ctx", "stn", "wx", "sa2", "venue"}
     assert set(fb.BLOCK_COLUMNS) == expected
 
 
@@ -142,7 +142,9 @@ def test_categorical_columns_picks_subset() -> None:
     df = _synthetic_df()
     cols_b = fb.feature_columns(df, fb.MODEL_B_BLOCKS)
     cats = fb.categorical_columns(cols_b)
-    # Defined categoricals: stn_brand_raw, stn_brand_canonical, wx_weather_code.
+    # Model B doesn't include the venue block, so stn_nearest_venue_type
+    # isn't expected here. Defined categoricals for Model B:
+    # stn_brand_raw, stn_brand_canonical, wx_weather_code.
     assert set(cats) == {"stn_brand_raw", "stn_brand_canonical", "wx_weather_code"}
     # Every categorical is in the input list.
     for c in cats:
@@ -156,3 +158,27 @@ def test_categorical_columns_returns_empty_when_none_present() -> None:
     )
     cols = fb.feature_columns(df, fb.MODEL_B_BLOCKS, strict=False)
     assert fb.categorical_columns(cols) == []
+
+
+def test_model_b_prime_blocks_is_b_plus_venue() -> None:
+    """Spec §13.6 Phase 1: Model B' = Model B + venue block."""
+    assert set(fb.MODEL_B_PRIME_BLOCKS) == set(fb.MODEL_B_BLOCKS) | {"venue"}
+
+
+def test_venue_block_contains_expected_columns() -> None:
+    """VENUE_COLUMNS includes the 4 station-side + the long-weekend cal flag."""
+    assert set(fb.VENUE_COLUMNS) == {
+        "stn_nearest_venue_km",
+        "stn_nearest_venue_capacity",
+        "stn_nearest_venue_type",
+        "stn_n_venues_within_5km",
+        "cal_is_pre_long_weekend",
+    }
+
+
+def test_categorical_columns_picks_venue_type_in_model_b_prime() -> None:
+    """When Model B' is the requested set, stn_nearest_venue_type is categorical."""
+    df = _synthetic_df()
+    cols_bp = fb.feature_columns(df, fb.MODEL_B_PRIME_BLOCKS)
+    cats = fb.categorical_columns(cols_bp)
+    assert "stn_nearest_venue_type" in cats

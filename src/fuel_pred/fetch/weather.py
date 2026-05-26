@@ -54,11 +54,30 @@ from typing import Any
 
 import pandas as pd
 import requests
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from fuel_pred import config
 
 logger = logging.getLogger(__name__)
+
+
+class OpenMeteoRateLimitError(RuntimeError):
+    """Raised on HTTP 429 from Open-Meteo. NOT retried — see _is_retryable.
+
+    Each 429 still counts against the per-minute / per-hour / per-day
+    quotas, so retrying multiplies the burn. Surface this fast and let
+    the caller decide whether to back off across many stations
+    (circuit breaker in tools/parallel_weather_fetch.py).
+    """
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Tenacity predicate: retry on transient errors, NOT on 429."""
+    # 429s are quota-burning — surface immediately.
+    if isinstance(exc, OpenMeteoRateLimitError):
+        return False
+    # Other RequestException / HTTPError / ConnectionError / Timeout: retry.
+    return isinstance(exc, requests.RequestException | requests.HTTPError | OSError)
 
 ARCHIVE_URL: str = "https://archive-api.open-meteo.com/v1/archive"
 FORECAST_URL: str = "https://historical-forecast-api.open-meteo.com/v1/forecast"
@@ -88,16 +107,23 @@ DEFAULT_INTER_CALL_SECONDS: float = 0.1
 @retry(
     stop=stop_after_attempt(config.RETRY_MAX_ATTEMPTS),
     wait=wait_exponential(multiplier=config.RETRY_BACKOFF_SECONDS, max=30),
+    retry=retry_if_exception(_is_retryable),
     reraise=True,
 )
 def _request_daily(lat: float, lon: float, start: str, end: str) -> dict[str, Any]:
-    """One Open-Meteo *archive* (ERA5) call. Retries on transient errors."""
+    """One Open-Meteo *archive* (ERA5) call. Retries on transient errors.
+
+    HTTP 429 (rate limit) is NOT retried — surfaced as
+    OpenMeteoRateLimitError so the caller can apply a circuit breaker
+    instead of multiplying the quota burn via tenacity retries.
+    """
     return _open_meteo_get(ARCHIVE_URL, lat, lon, start, end)
 
 
 @retry(
     stop=stop_after_attempt(config.RETRY_MAX_ATTEMPTS),
     wait=wait_exponential(multiplier=config.RETRY_BACKOFF_SECONDS, max=30),
+    retry=retry_if_exception(_is_retryable),
     reraise=True,
 )
 def _request_daily_forecast(
@@ -108,6 +134,8 @@ def _request_daily_forecast(
     Identical call shape to :func:`_request_daily` but hits the forecast
     endpoint (`historical-forecast-api.open-meteo.com`) instead of the
     ERA5 archive. The returned payload schema is the same.
+
+    HTTP 429 surfaces immediately as OpenMeteoRateLimitError (no retry).
     """
     return _open_meteo_get(FORECAST_URL, lat, lon, start, end)
 
@@ -134,6 +162,16 @@ def _open_meteo_get(
         headers={"User-Agent": config.USER_AGENT, "Accept": "application/json"},
         timeout=config.REQUEST_TIMEOUT,
     )
+    # 429 → quota-burning. Surface immediately, do NOT retry.
+    if response.status_code == 429:
+        reason = ""
+        try:
+            reason = response.json().get("reason", "")
+        except Exception:
+            reason = response.text[:200]
+        raise OpenMeteoRateLimitError(
+            f"HTTP 429 from Open-Meteo ({url}): {reason}"
+        )
     response.raise_for_status()
     body: dict[str, Any] = response.json()
     if "error" in body and body.get("error"):

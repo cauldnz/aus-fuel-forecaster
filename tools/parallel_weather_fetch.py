@@ -34,7 +34,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from fuel_pred.fetch.weather import _cache_covers, _clamp_end_to_yesterday, fetch_one
+from fuel_pred.fetch.weather import (
+    OpenMeteoRateLimitError,
+    _cache_covers,
+    _clamp_end_to_yesterday,
+    fetch_one,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,8 +51,12 @@ logger = logging.getLogger("parallel_weather_fetch")
 
 def _fetch_worker(
     args: tuple[str, float, float, str, str, str, bool],
-) -> tuple[str, bool, str]:
-    """Fetch one station; return (station_id, success, message)."""
+) -> tuple[str, bool, str, bool]:
+    """Fetch one station; return (station_id, success, message, is_rate_limited).
+
+    The 4th return flag tells the orchestrator whether this was a quota
+    failure (HTTP 429) — used to drive the circuit breaker.
+    """
     station_id, lat, lon, start, end, out_dir, forecast_only = args
     try:
         fetch_one(
@@ -60,9 +69,11 @@ def _fetch_worker(
             force=False,
             forecast_only=forecast_only,
         )
-        return (station_id, True, "ok")
+        return (station_id, True, "ok", False)
+    except OpenMeteoRateLimitError as exc:
+        return (station_id, False, str(exc), True)
     except Exception as exc:
-        return (station_id, False, str(exc))
+        return (station_id, False, str(exc), False)
 
 
 def main() -> None:
@@ -79,6 +90,11 @@ def main() -> None:
         "--forecast-only", action="store_true",
         help="Skip 2016 ERA5 fallback — forecast API only. Output parquets "
              "start at WEATHER_FORECAST_COVERAGE_START (no pre-2017 rows).",
+    )
+    parser.add_argument(
+        "--rate-limit-circuit", type=int, default=3,
+        help="Stop the whole run after N consecutive HTTP 429s — preserves "
+             "remaining daily quota. Set 0 to disable. Default 3.",
     )
     args = parser.parse_args()
 
@@ -116,31 +132,71 @@ def main() -> None:
 
     fetched = 0
     failed = 0
+    rate_limited = 0
+    consecutive_429s = 0
+    aborted_by_circuit = False
     started = time.monotonic()
 
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         futures = [pool.submit(_fetch_worker, item) for item in pending]
         for i, fut in enumerate(as_completed(futures), start=1):
-            sid, ok, msg = fut.result()
+            sid, ok, msg, is_429 = fut.result()
             if ok:
                 fetched += 1
+                consecutive_429s = 0  # any success resets the counter
             else:
                 failed += 1
-                logger.warning("FAIL %s: %s", sid, msg)
+                if is_429:
+                    rate_limited += 1
+                    consecutive_429s += 1
+                    logger.warning("RATE_LIMIT %s: %s", sid, msg)
+                else:
+                    consecutive_429s = 0
+                    logger.warning("FAIL %s: %s", sid, msg)
+
+            # Circuit breaker: too many consecutive 429s → daily quota likely
+            # exhausted. Cancel remaining work to preserve any leftover budget.
+            if args.rate_limit_circuit > 0 and consecutive_429s >= args.rate_limit_circuit:
+                logger.error(
+                    "CIRCUIT BREAKER tripped: %d consecutive 429s — daily quota "
+                    "likely exhausted. Cancelling remaining %d stations.",
+                    consecutive_429s, len(pending) - i,
+                )
+                for f in futures:
+                    f.cancel()
+                aborted_by_circuit = True
+                break
+
             if i % args.progress_every == 0 or i == len(pending):
                 elapsed = time.monotonic() - started
                 rate = i / elapsed if elapsed > 0 else 0
                 eta_min = (len(pending) - i) / rate / 60 if rate > 0 else 0
                 logger.info(
-                    "progress %d/%d  fetched=%d failed=%d  rate=%.2f stn/s  ETA=%.1f min",
-                    i, len(pending), fetched, failed, rate, eta_min,
+                    "progress %d/%d  fetched=%d failed=%d rate_limited=%d  "
+                    "rate=%.2f stn/s  ETA=%.1f min",
+                    i, len(pending), fetched, failed, rate_limited, rate, eta_min,
                 )
 
+        if aborted_by_circuit:
+            pool.shutdown(wait=False, cancel_futures=True)
+
     total_elapsed = time.monotonic() - started
-    logger.info(
-        "weather fetch complete: fetched=%d failed=%d cached=%d skipped_no_latlon=%d  total=%.1f min",
-        fetched, failed, cached, n_skipped_no_latlon, total_elapsed / 60,
-    )
+    if aborted_by_circuit:
+        logger.info(
+            "weather fetch ABORTED by circuit breaker: fetched=%d failed=%d "
+            "rate_limited=%d cached=%d skipped_no_latlon=%d  total=%.1f min. "
+            "Wait for daily quota reset (UTC midnight) and re-run; cached "
+            "stations are skipped automatically.",
+            fetched, failed, rate_limited, cached, n_skipped_no_latlon,
+            total_elapsed / 60,
+        )
+    else:
+        logger.info(
+            "weather fetch complete: fetched=%d failed=%d rate_limited=%d "
+            "cached=%d skipped_no_latlon=%d  total=%.1f min",
+            fetched, failed, rate_limited, cached, n_skipped_no_latlon,
+            total_elapsed / 60,
+        )
 
 
 if __name__ == "__main__":

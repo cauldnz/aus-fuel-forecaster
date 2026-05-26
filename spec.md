@@ -787,19 +787,34 @@ To be resolved during implementation, not blocking spec sign-off:
    - **Regional NSW show days:** not gazetted as public holidays; not in `python-holidays`. Sydney Royal Easter Show handled via `data/static/major_events.csv` instead.
    - **`data/static/major_venues.csv`:** hand-curated 10-venue pilot list (Accor, Allianz, SCG, etc.) — enables the EDA gate with zero API dependency.
 
-   Phase 0 EDA gate: residual-by-venue-distance-quintile chart in `01_eda.ipynb` §10 (new). Decision rule: Q1 vs Q5 residual gap ≥ 1 c/L on holiday/pre-holiday rows → proceed; < 0.5 c/L → stop and record null result (mirror of how the Centrelink × SEIFA test resolved).
+   Phase 0 EDA gate: residual-by-venue-distance-quintile chart in `01_eda.ipynb` §10 (new). Decision rule: Q1 vs Q5 residual gap ≥ 1 c/L on holiday/pre-holiday rows → proceed; < 0.5 c/L → stop and record null result.
 
-7. **Weather leakage fix** — v1's `wx_*` columns join Open-Meteo ERA5 *reanalysis actuals* on the same date as the prediction row, which means the model sees retrospective truth rather than the forecast a real-time predictor would have. `results/README.md` caveat #4 acknowledges this; absolute MAE is optimistic, though the A-vs-B comparison is unbiased (both models leak equally).
+   **Status: tested, STOP.** Phase 0 EDA gate passed (Q1 vs Q5 gaps of +1.53 / +2.71 / +4.11 c/L) but with a flagged caveat: a non-monotonic Q4 dip suggested metro/regional cycle-amplitude confounding rather than pure venue proximity. Phase 1 sanity-check additive test confirmed it — Model B' (Model B + 5 venue/long-weekend features) lost by **+0.681 c/L MAE** on test_normal (33× the decision threshold in the wrong direction). `stn_nearest_venue_km` ranked #20 by gain but bled splits from better-generalizing features; `cal_is_pre_long_weekend` got zero gain because LightGBM was already extracting that signal from `cal_day_of_week × cal_days_to_next_public_holiday` interactions in the existing CAL block. Phases 2-4 (AFL/NRL fixture integration, Easter Show, etc.) are not justified. See [`docs/research/2026-05_major_events_phase1_outcome.md`](docs/research/2026-05_major_events_phase1_outcome.md) for full details. Code (`spatial/venues.py`, VENUE block in `feature_blocks.py`, Model B' training) and the 10-venue static CSV remain in place for cheap re-experimentation with different feature designs.
 
-   **Status: research complete, ready to scope as v2 work.**
+7. **Weather leakage fix (v2.0)** — v1's `wx_*` columns join Open-Meteo ERA5 *reanalysis actuals* on the same date as the prediction row, which means the model sees retrospective truth rather than the forecast a real-time predictor would have. `results/README.md` caveat #4 acknowledges this; absolute MAE is optimistic, though the A-vs-B comparison is unbiased (both models leak equally).
 
-   Full implementation plan in [`docs/research/2026-05_weather_leakage_fix.md`](docs/research/2026-05_weather_leakage_fix.md). Headlines:
+   **Status: research + pre-flight complete, ready to build.**
+
+   Full implementation plan in [`docs/research/2026-05_weather_leakage_fix.md`](docs/research/2026-05_weather_leakage_fix.md). Pre-flight verification at [`docs/research/2026-05_weather_leakage_preflight.md`](docs/research/2026-05_weather_leakage_preflight.md) (all 3 tests PASS: coverage boundary global, free-tier handles 100/100 requests at 0.1s spacing, no API key required). Headlines:
 
    - **Fix:** swap the Open-Meteo Archive API for the **Historical Forecast API** (`historical-forecast-api.open-meteo.com/v1/forecast`) — same call signature, same variables, free-tier accessible, no auth required.
-   - **Coverage boundary:** empirically confirmed 2017-01-01 for Australian coordinates. Use ERA5 fallback for 2016-09-01 → 2016-12-31 (~2.2% of training rows, in the train fold only — no test-metric contamination).
+   - **Coverage boundary:** empirically confirmed 2017-01-01 globally for Australian coordinates (probed Sydney, Broken Hill, Tweed Heads, Eden). Use ERA5 fallback for 2016-09-01 → 2016-12-31 (~2.2% of training rows, in the train fold only — no test-metric contamination).
    - **Join change:** shift weather `date` by −1 day before merging. Panel row at `t` then receives the day-ahead NWP forecast for `t+1` (issued on `t`), matching deployment.
    - **Expected absolute MAE rise:** 0.05–0.15 c/L. A-vs-B Δ MAE unchanged.
    - **Effort:** ~2.5 sessions, mostly wall-clock for full retrain after invalidating `models/*.pkl`.
+
+8. **7-day forecast horizon (v2.1)** — extend v1's 1-day prediction (`y_t1`) to per-day predictions for t+1 through t+7. Substantial architectural change: target schema, multi-horizon feature engineering, per-horizon model training, evaluation.
+
+   **Status: research complete, SHELVED pending historical multi-day NWP forecast data.**
+
+   Full planning doc in [`docs/research/2026-05_7day_forecast_horizon.md`](docs/research/2026-05_7day_forecast_horizon.md) (Architecture A recommended — one LightGBM per horizon; 5-8 sessions estimated). **The pre-flight for §13.7 discovered a substantive blocker**: the Open-Meteo Historical Forecast API only exposes 0–24h lead time. The sibling Previous Runs API exposes multi-day lead times but only covers January 2024 onwards — so 7+ years of training data (2016-09 → 2023-12) would have no real multi-day forecast values. Follow-up research at [`docs/research/2026-05_weather_leakage_fix.md`](docs/research/2026-05_weather_leakage_fix.md) addendum surveyed alternatives:
+
+   - **NOAA GFS archive (AWS S3):** earliest surface forecast files only from 2021-04-01, GRIB2-only (~544 MB each) — categorical complexity jump; doesn't fully solve the gap.
+   - **ECMWF Open Data, Planetary Computer ECMWF, NCEI historical GFS:** none retain a usable historical multi-day forecast archive on the free tier.
+   - **Commercial sources (Visual Crossing, etc.):** would cost ~$5–15k for full pre-2024 backfill, disproportionate for a ~3% SHAP feature block.
+   - **Recommended fallback if revisited:** day-1 forecast values used as a proxy for multi-day horizons in pre-2024 data + real Previous Runs API for 2024+. Re-introduces controlled leakage (proxy doesn't represent what a real multi-day forecast would have said), but strictly better than ERA5 actuals and trivial to implement.
+
+   **Why shelved:** the v1 model is performant at the 1-day horizon, the data constraint for honest multi-horizon is real, and the proxy fallback is not strictly leakage-free. Revisit if (a) Open-Meteo Previous Runs API gains historical coverage, (b) a usable free multi-day NWP archive emerges for Australia 2016-2023, or (c) the proxy approach is judged acceptable given the bounded leakage. §13.7 should land independently first — it has standalone value as a methodological correction at the 1-day horizon.
 
 ## 14. References
 

@@ -213,10 +213,72 @@ Adding a categorical column (`era5_persistence` / `historical_forecast`) would l
 ### R6. Retraining invalidates v1 model artefacts
 This is unavoidable. The PR landing the fix must either regenerate artefacts or include a clear "run `make all`" note. The 2026 crisis test fold uses 2026 data — full pipeline re-run is required to get fresh comparison numbers.
 
+## Addendum (2026-05): historical multi-day forecast investigation (for v2.1 7-day horizon)
+
+**Why this addendum exists.** The pre-flight (`2026-05_weather_leakage_preflight.md` Test 3) discovered that the Open-Meteo Historical Forecast API only exposes ~0–24h lead time, and the sibling Previous Runs API — which does expose `_previous_dayN` lead-time suffixes — only has Australian coverage from January 2024. For the v2.1 7-day horizon work (`2026-05_7day_forecast_horizon.md` §"Fetcher impact"), that leaves ~7 of the 9.5-year training span without real multi-day-ahead forecast values. This addendum investigates alternative sources and recommends a path forward.
+
+### Sources investigated
+
+All probes empirical except where flagged "doc-only".
+
+| # | Source | Endpoint / access | AU coverage start | Max lead | Resolution | Auth / rate | Format | Complexity | Verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | **Open-Meteo Previous Runs** (incumbent option for 2024+) | `https://previous-runs-api.open-meteo.com/v1/forecast` | **2024-01-01** (GFS 2m temp to 2021-03, JMA to 2018) | 7 days (hourly only; daily endpoint rejects `_previous_dayN`) | Picks best model; ~9–25 km native | Free tier sufficient | JSON | low | USE for ≥2024 |
+| 2 | **Open-Meteo Ensemble API** | `https://ensemble-api.open-meteo.com/v1/ensemble` | none (≈3 months `past_days` only) | 35 d forward | as model | Free | JSON | low | SKIP — not historical |
+| 3 | **NOAA GFS on AWS Open Data** (`s3://noaa-gfs-bdp-pds/`) | Anonymous S3, `pgrb2.0p25.fNNN` GRIB2 files, 4 cycles/day | **2021-04-01** for full 0.25° to f168 (earlier dates only have WAFS aviation files) | 16 d (384 h); 0.25° to f120, 0.5° to f384 | 0.25° (~28 km) | None; AWS egress free in us-east-1 | GRIB2 (~540 MB per f168 file) | **high** (GRIB parsing, ~50 GB/year for AU subset) | DEFER — only 2021-04+ and heavy lift |
+| 4 | **NOAA NCEI GFS archive** (older history) | NCEI THREDDS / HAS request | 1° from 2004-02; 0.5° from 2007-01; 0.25° from 2021-02 | as model | 0.5° / 1° (~50–100 km) for the long history | Free, but "approx. six months online"; older data requires a HAS request order | GRIB2 | high (order-then-wait pipeline) | DEFER — too coarse + offline retrieval |
+| 5 | **ECMWF Open Data** (`data.ecmwf.int/forecasts/`) | HTTP listing of recent runs | **~3 days rolling only** (12 most recent runs) | 10–15 d forward | 0.25° / 0.4° | Free | GRIB2 | n/a | SKIP — no historical retention |
+| 6 | **Microsoft Planetary Computer `ecmwf-forecast`** | STAC + Azure Blob | **previous 30 days only** | 10–15 d forward | as ECMWF | Free, anon | GRIB2 | medium | SKIP — no historical retention |
+| 7 | **BOM ACCESS-G archive** | doc-only (`bom.gov.au/nwp` request timed out from probe) | No public archive identified; available via NCI to institutional users only | n/a | 12 km regional / 25 km global | Institutional credentials | NetCDF | very high (auth + infra) | SKIP for v2.1 |
+| 8 | **Visual Crossing Historical Forecast API** (commercial) | REST JSON | "50+ years" claimed; not regionally verified | model-dependent | as model | API key; free tier 1,000 records/day; $0.0001/record metered | JSON | low | DEFER — fall-back only |
+| 9 | **Day-1-proxy (controlled-leakage workaround)** | Use Open-Meteo HFA day-1 forecast as a proxy for `wx_*_tk` (k=2..7) on rows where Previous Runs API has no coverage | 2017-01-01 (HFA coverage) | n/a (proxy) | as HFA | as HFA | JSON | trivial | USE as the pre-2024 backfill — see below |
+
+Notes on the GFS S3 probe: I confirmed empirically that `gfs.20210101/12/atmos/` is empty and that `gfs.t12z.pgrb2.0p25.f168` returns 404 for dates before 2021-04-01 but succeeds from 2021-04-01 onwards (single representative file size = 543,799,141 bytes for 2024-06-01 12Z f168). Bracketed at month boundaries 2021-03-01 (no), 2021-03-15 (no), 2021-04-01 (yes) — strict bound, no earlier surface 0.25° data on this bucket.
+
+### The "day-1 proxy" worst case
+
+**Concretely.** For a panel row at date `t` with target `y_tk` (k ∈ {2..7}) and no Previous Runs API coverage, populate `wx_*_tk` from the **same** Historical Forecast API value the t+1 model is using for that day — i.e. the day-ahead forecast for date `t+1` valid on day `t`, re-used as the "best-effort proxy" for what the k-day-ahead forecast on day `t` would have said. The same value populates `wx_*_t2` through `wx_*_t7`. (Variant: use the HFA value for valid-date `t+k`, which is the day-ahead-of-`t+k` forecast — i.e. issued on day `t+k-1`. That's better for the model's signal but is leakage from the row's prediction time — pick one and document it.)
+
+**Leakage implications.** The day-1 forecast is roughly RMSE 1–2 °C for daily max temp in mid-latitudes; the day-7 forecast is ~3–5 °C (WeatherBench-class scorecards, IFS HRES is the gold standard, GFS slightly worse). Re-using day-1 as day-7 therefore feeds the model a *too-confident* weather signal — about half the noise it would see in deployment. The model will weight `wx_*_t7` more heavily than it should, mildly inflating headline metrics for the longer horizons. This is bounded — weather is a low-rank feature block (SHAP fraction ~3% per the main plan's "Expected impact" section) — so the headline drift is likely <0.1 c/L MAE at t+7, well below the noise floor of the A-vs-B Δ.
+
+**Why it's strictly better than ERA5 actuals.** ERA5 day-`t+7` actuals are zero-noise truth; the leakage is unbounded. The day-1 forecast proxy has the noise structure of an operational forecast at the *short* end of the curve, just optimistic on the long end. ERA5 actuals would teach the model "tomorrow's price moves with future actual rainfall"; the proxy teaches it "tomorrow's price moves with what the bureau thinks will happen tomorrow". The second is much closer to deployment reality.
+
+**When to use it.** As a stopgap to cover 2017-01-01 → 2024-01-01 (~7 years, ~74% of training rows for the 2017+ window after the existing ERA5-2016 carve-out). Not as a permanent design — the moment Previous Runs API coverage extends backwards, the pre-2024 rows should be re-fetched. Tagging the proxy rows with a `wx_lead_proxy` boolean (in `EXCLUDE_FROM_FEATURES`) preserves traceability for the eventual replacement.
+
+### Recommendation for v2.1 (7-day horizon work)
+
+**Use the day-1 proxy for pre-2024 training rows; use the Previous Runs API for ≥2024 rows.** Hybrid in the same shape as the v2.0 ERA5/HFA hybrid this doc already designs.
+
+Why not the alternatives:
+- **NOAA GFS on AWS Open Data** is the only free multi-day source with multi-year history, but (a) it starts 2021-04-01 — three years short of the 2017 goal anyway, (b) the GRIB2 pipeline is a category jump from JSON in operational complexity (cfgrib + xarray + per-cycle iteration + lat/lon subsetting across ~5,000 files/year), and (c) for the 2021-04 → 2024-01 window it would cover (~33% of pre-Previous-Runs training rows), the engineering cost dominates the marginal value. Defer to a v2.2 if the proxy's weather skill turns out to matter.
+- **Visual Crossing** ($0.0001/record) would cost ~$5–15k for the full historical multi-day load (5 vars × 7 horizons × ~1,500 stations × ~2,500 pre-2024 days). Out of proportion to a hobby/research project budget for a feature block worth ~3% SHAP.
+- **BOM ACCESS-G** has no public free archive identified. Not worth the institutional-access fight for a v2.1.
+
+**Pipeline integration shape.** `fetch.weather` gains a third URL constant (`PREVIOUS_RUNS_URL`) and a fourth code path in `fetch_one()`:
+
+1. `[2016-09-01, 2016-12-31]`: ERA5 (existing v2.0 fallback). All 7 lead-day columns get ERA5 value at `t+k` (same logic as the existing 2016 fallback, extended to 7 horizons).
+2. `[2017-01-01, 2023-12-31]`: HFA for valid date `t+1` only. `wx_*_t2..t7` populated from that same value (day-1 proxy). `wx_lead_proxy = True` for these rows.
+3. `[2024-01-01, end]`: Previous Runs API with `hourly=<var>_previous_day{1..7}`, client-side daily aggregation. `wx_lead_proxy = False`. `weather_code_previous_day7` is documented as nulls — accept.
+
+That preserves the v2.0 1-day fetcher path unchanged and slots the multi-day work in as additive complexity. The proxy code path is ~10 lines of column duplication on top of the existing HFA call — no extra network round-trips for the 2017–2023 window.
+
+### Impact on v2.0 weather leakage fix (this doc's main plan)
+
+**None.** v2.0 targets the 1-day horizon only. The Historical Forecast API serves day-1 valid-date forecasts cleanly back to 2017-01-01 (preflight Test 1) — that's the variable v2.0 needs and the column it materialises. This addendum's findings only constrain v2.1 (multi-horizon), which is gated behind v2.0 in the recommended sequencing (see `2026-05_7day_forecast_horizon.md` §"Recommendation: sequencing vs §13.7").
+
+The one cross-doc edit recommended: `2026-05_7day_forecast_horizon.md` R1 should be updated to reference this addendum's finding that the pre-2024 weather block is a *proxy*, not a real multi-day forecast, and that the per-horizon weather feature importance per horizon should be interpreted with that proxy contamination in mind for any pre-2024 SHAP analysis.
+
 ## See also
 
 - `spec.md` §7.6 — current weather block spec (to be updated)
 - `results/README.md` caveat #4 — the v1 acknowledged compromise
 - `src/fuel_pred/fetch/weather.py` — current fetcher (archive only)
 - `src/fuel_pred/build/make_features.py` — current `add_weather_features()` (unshifted join)
+- `docs/research/2026-05_weather_leakage_preflight.md` — Test 3 finding that motivates this addendum
+- `docs/research/2026-05_7day_forecast_horizon.md` — v2.1 plan affected by this addendum
 - Open-Meteo Historical Forecast API: https://open-meteo.com/en/docs/historical-forecast-api
+- Open-Meteo Previous Runs API: https://open-meteo.com/en/docs/previous-runs-api
+- NOAA GFS on AWS Open Data: https://registry.opendata.aws/noaa-gfs-bdp-pds/
+- NCEI GFS product page (coverage tiers): https://www.ncei.noaa.gov/products/weather-climate-models/global-forecast
+- ECMWF Open Data retention: https://www.ecmwf.int/en/forecasts/datasets/open-data
+- Microsoft Planetary Computer `ecmwf-forecast` (30-day rolling, not historical): https://planetarycomputer.microsoft.com/api/stac/v1/collections/ecmwf-forecast

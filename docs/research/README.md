@@ -13,12 +13,23 @@ The convention exists because research artefacts often have lasting value beyond
 
 ## Index
 
-### Forward-looking (waiting to be built)
+### Ready to build
 
 | File | Topic | Spec ref |
 |---|---|---|
-| [`2026-05_major_events_features.md`](2026-05_major_events_features.md) | Spatial event features (AFL/NRL fixtures, major venues, long weekends). Gated on a Phase 0 EDA check. **EDA gate run — see [`2026-05_major_events_eda_outcome.md`](2026-05_major_events_eda_outcome.md) (verdict: PROCEED with caveats). Phase 1 sanity check run — see [`2026-05_major_events_phase1_outcome.md`](2026-05_major_events_phase1_outcome.md) (verdict: STOP, venue features regress test MAE).** | spec §13.6 |
-| [`2026-05_weather_leakage_fix.md`](2026-05_weather_leakage_fix.md) | Switch Open-Meteo Archive → Historical Forecast API + 1-day join shift. ~2.5 sessions of work. | spec §13.7 |
+| [`2026-05_weather_leakage_fix.md`](2026-05_weather_leakage_fix.md) | Switch Open-Meteo Archive → Historical Forecast API + 1-day join shift. Pre-flight passed; ~2.5 sessions of work. See also [`2026-05_weather_leakage_preflight.md`](2026-05_weather_leakage_preflight.md). | spec §13.7 |
+
+### Shelved (research complete, deferred)
+
+| File | Topic | Spec ref |
+|---|---|---|
+| [`2026-05_7day_forecast_horizon.md`](2026-05_7day_forecast_horizon.md) | Multi-output 7-day forecast (Architecture A: one LightGBM per horizon). Shelved pending historical multi-day NWP forecast data — Open-Meteo Previous Runs only goes back to Jan 2024; no good free alternative for pre-2024 Australia. | spec §13.8 |
+
+### Tested and stopped (null / negative results)
+
+| File | Topic | Spec ref |
+|---|---|---|
+| [`2026-05_major_events_features.md`](2026-05_major_events_features.md) → [`2026-05_major_events_eda_outcome.md`](2026-05_major_events_eda_outcome.md) → [`2026-05_major_events_phase1_outcome.md`](2026-05_major_events_phase1_outcome.md) | Spatial event features (AFL/NRL fixtures, major venues, long weekends). Phase 0 EDA gate passed with caveats; Phase 1 additive sanity check failed (+0.681 c/L MAE). Static venue signal was metro/regional confounding; long-weekend signal already extracted by existing CAL interactions. | spec §13.6 |
 
 ### Retrospectives (work already done)
 
@@ -32,4 +43,4 @@ The convention exists because research artefacts often have lasting value beyond
 
 - `docs/troubleshooting/` — operational tips (Podman networking, Python environment gotchas) that don't belong here
 - `results/README.md` — the experimental write-up for the v1 headline result
-- `spec.md` §13 — the open-questions / backlog section that links to forward-looking spikes
+- `spec.md` §13 — the open-questions / backlog section that links to research entries here

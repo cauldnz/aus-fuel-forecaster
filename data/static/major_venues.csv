@@ -1,0 +1,11 @@
+venue_id,name,lat,lon,capacity,type
+accor_stadium,Accor Stadium,-33.8473,151.0631,83500,stadium
+allianz_stadium,Allianz Stadium,-33.8912,151.2233,45500,stadium
+scg,Sydney Cricket Ground,-33.8918,151.2246,48000,stadium
+sydney_showground,Sydney Showground,-33.8475,151.0631,70000,showground
+commbank_stadium,CommBank Stadium,-33.8158,150.9942,30000,stadium
+mcdonalds_jones_stadium,McDonald Jones Stadium,-32.9265,151.7817,33000,stadium
+qudos_bank_arena,Qudos Bank Arena,-33.8467,151.0644,21000,entertainment_centre
+engie_stadium,ENGIE Stadium,-33.8473,151.0631,20000,stadium
+bluebet_stadium,BlueBet Stadium (Penrith),-33.7510,150.6943,22000,stadium
+netstrata_jubilee,Netstrata Jubilee Stadium,-33.9661,151.1285,24000,stadium

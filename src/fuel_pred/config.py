@@ -21,6 +21,12 @@ MODELS_DIR: Path = REPO_ROOT / "models"
 RESULTS_DIR: Path = REPO_ROOT / "results"
 SHAP_DIR: Path = RESULTS_DIR / "shap"
 
+# Hand-curated static CSV of NSW major event venues. Seeded with the
+# 10-venue pilot list from docs/research/2026-05_major_events_features.md
+# to enable the spec §13.6 Phase 0 EDA gate without an API dependency.
+# Owned by maintainer + agent (append-only, same policy as brand_aliases.csv).
+STATIC_MAJOR_VENUES: Path = DATA_STATIC / "major_venues.csv"
+
 # ----------------------------- Span -----------------------------
 
 # v1 historical span. FuelCheck monthly archives start 2016-09 and the

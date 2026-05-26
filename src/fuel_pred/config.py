@@ -2,10 +2,22 @@
 
 CLAUDE.md forbids hard-coded paths in pipeline modules — they must come from
 this file (or be passed in via CLI arguments).
+
+Secrets (API keys, OAuth tokens) live in a gitignored `.env` file at the
+repo root. They're loaded on import via `python-dotenv`. See `.env.example`
+for the template and the keys the project understands.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env from the repo root if present. find_dotenv would also search
+# parent dirs but we want the project-local file specifically.
+_REPO_ROOT_FOR_ENV = Path(__file__).resolve().parents[2]
+load_dotenv(_REPO_ROOT_FOR_ENV / ".env", override=False)
 
 # ----------------------------- Paths -----------------------------
 
@@ -70,6 +82,12 @@ RETRY_BACKOFF_SECONDS: float = 2.0
 # preflight 2026-05). Below this date, ERA5 archive is used as a fallback in
 # fetch.weather. See docs/research/2026-05_weather_leakage_preflight.md.
 WEATHER_FORECAST_COVERAGE_START: str = "2017-01-01"
+
+# Open-Meteo API key — loaded from .env (or environment). When set, the key
+# is appended to every Open-Meteo request and raises the free-tier rate
+# limits ~10x. None (no key) is fine but limits the parallel fetch
+# throughput. Free registration at https://open-meteo.com/en/pricing.
+OPENMETEO_API_KEY: str | None = os.environ.get("OPENMETEO_API_KEY") or None
 
 # ----------------------------- Modeling -----------------------------
 

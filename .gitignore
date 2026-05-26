@@ -75,3 +75,9 @@ Desktop.ini
 # Logs
 *.log
 logs/
+
+# Local environment / secrets — API keys, OAuth tokens, etc.
+# .env contains real secrets and must never be committed.
+# .env.example is the template (committed, no real values).
+.env
+!.env.example

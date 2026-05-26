@@ -124,6 +124,10 @@ def _open_meteo_get(
         "daily": ",".join(DAILY_VARIABLES.keys()),
         "timezone": TIMEZONE,
     }
+    # If a key is configured in .env, send it (raises Open-Meteo rate limits
+    # ~10x). Free tier is keyless and works fine for forecast-only mode.
+    if config.OPENMETEO_API_KEY:
+        params["apikey"] = config.OPENMETEO_API_KEY
     response = requests.get(
         url,
         params=params,
@@ -250,7 +254,7 @@ def _all_wx_null_dates(df: pd.DataFrame) -> list[dt.date]:
 
 
 def _fetch_hybrid(
-    lat: float, lon: float, start: str, end: str
+    lat: float, lon: float, start: str, end: str, *, forecast_only: bool = False
 ) -> pd.DataFrame:
     """Build a per-station weather frame for `[start, end]` using the hybrid
     archive/forecast strategy.
@@ -265,10 +269,20 @@ def _fetch_hybrid(
        backfilled by a follow-up archive call for those specific dates.
        Handles the known precip-null on 2017-01-01 and any analogous
        single-day gaps elsewhere in the forecast API.
+
+    Args:
+        forecast_only: if True, the archive (ERA5) portion is skipped
+            entirely — only the forecast API is hit. Dates before
+            ``WEATHER_FORECAST_COVERAGE_START`` are dropped from the
+            output frame (the panel join in ``make_features`` will see
+            null wx values for those dates). Useful when the archive API
+            is rate-limited or unavailable.
     """
     archive_range, forecast_range = _split_at_boundary(
         start, end, config.WEATHER_FORECAST_COVERAGE_START
     )
+    if forecast_only:
+        archive_range = None  # explicitly drop pre-2017 fallback
 
     pieces: list[pd.DataFrame] = []
     if archive_range is not None:
@@ -300,8 +314,9 @@ def _fetch_hybrid(
     )
 
     # Safety-net backfill from archive for any all-null rows in the forecast window.
+    # Skipped in forecast_only mode (would defeat the point of avoiding archive).
     null_dates = _all_wx_null_dates(df)
-    if null_dates and forecast_range is not None:
+    if null_dates and forecast_range is not None and not forecast_only:
         # Backfill is only meaningful on the forecast side (the archive call
         # produced concrete values where it covered). Reduce to forecast-window
         # dates and call the archive endpoint for each contiguous run.
@@ -360,18 +375,24 @@ def fetch_one(
     out_dir: Path,
     *,
     force: bool = False,
+    forecast_only: bool = False,
 ) -> Path | None:
     """Fetch and cache weather for a single station. Returns the cached path.
 
     Uses the hybrid archive+forecast strategy (spec §13.7) — see
     :func:`_fetch_hybrid` for the per-range routing logic.
+
+    Args:
+        forecast_only: passed through to :func:`_fetch_hybrid`. When True,
+            the 2016 ERA5 fallback is skipped — output has no rows before
+            ``WEATHER_FORECAST_COVERAGE_START``.
     """
     out_path = out_dir / f"{station_id}.parquet"
     if not force and _cache_covers(out_path, start, end):
         logger.debug("cache hit %s — covers %s..%s", out_path, start, end)
         return out_path
 
-    df = _fetch_hybrid(lat, lon, start, end)
+    df = _fetch_hybrid(lat, lon, start, end, forecast_only=forecast_only)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     df.to_parquet(out_path, engine="pyarrow", compression="zstd", index=False)
@@ -387,6 +408,7 @@ def fetch(
     *,
     force: bool = False,
     inter_call_seconds: float = DEFAULT_INTER_CALL_SECONDS,
+    forecast_only: bool = False,
 ) -> None:
     """Fetch daily weather for every (lat, lon) in `stations_path`.
 
@@ -399,6 +421,8 @@ def fetch(
         force: re-fetch ignoring cache.
         inter_call_seconds: delay between station calls. Default 0.1s
             keeps us well under Open-Meteo's free-tier rate limit.
+        forecast_only: skip the 2016 ERA5 fallback; only hit the forecast
+            API. Output parquets start at WEATHER_FORECAST_COVERAGE_START.
     """
     end = _clamp_end_to_yesterday(end)
 
@@ -436,6 +460,7 @@ def fetch(
                 end=end,
                 out_dir=out_dir,
                 force=force,
+                forecast_only=forecast_only,
             )
             fetched += 1
         except Exception:
@@ -466,6 +491,11 @@ def main() -> None:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--inter-call-seconds", type=float, default=DEFAULT_INTER_CALL_SECONDS)
+    parser.add_argument(
+        "--forecast-only", action="store_true",
+        help="Skip the 2016 ERA5 fallback — use the forecast API only. "
+             "Output parquets start at WEATHER_FORECAST_COVERAGE_START.",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     fetch(
@@ -475,6 +505,7 @@ def main() -> None:
         args.out,
         force=args.force,
         inter_call_seconds=args.inter_call_seconds,
+        forecast_only=args.forecast_only,
     )
 
 

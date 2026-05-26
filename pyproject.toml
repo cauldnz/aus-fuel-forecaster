@@ -43,6 +43,7 @@ dependencies = [
     #     `data/raw/mb/` once on next `make enrich` so the augmentor
     #     repopulates the new layout).
     "abs-census-augmentor @ git+https://github.com/cauldnz/abs-census-augmentor.git@8fe6fa55247def1e5bc1be81a2cd33775680ac3e",
+    "python-dotenv>=1.2.2",
 ]
 
 [project.optional-dependencies]

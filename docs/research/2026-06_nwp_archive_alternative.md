@@ -1,9 +1,9 @@
 # NWP archive alternative — strict-free weather source for v2
 
-**Date:** 2026-06 (research in late May 2026)
+**Date:** 2026-06 (research in late May 2026; multi-horizon + grid-cell-caching extensions added late May 2026)
 **Status:** research complete, ready to plan implementation
-**Spec section:** `spec.md` §13.7 (revised approach)
-**Related:** [`docs/research/2026-05_weather_leakage_fix.md`](2026-05_weather_leakage_fix.md) (the original plan; this supersedes its source-selection on the free path), [`docs/research/2026-05_weather_leakage_preflight.md`](2026-05_weather_leakage_preflight.md)
+**Spec section:** `spec.md` §13.7 (revised approach) and §13.8 (un-shelved — see "Multi-horizon extension" below)
+**Related:** [`docs/research/2026-05_weather_leakage_fix.md`](2026-05_weather_leakage_fix.md) (the original plan; this supersedes its source-selection on the free path), [`docs/research/2026-05_weather_leakage_preflight.md`](2026-05_weather_leakage_preflight.md), [`docs/research/2026-05_7day_forecast_horizon.md`](2026-05_7day_forecast_horizon.md) (the modelling plan; data path now unblocked by this doc)
 
 ## TL;DR
 
@@ -252,6 +252,149 @@ NOAA's AWS Open Data Sponsorship doesn't guarantee indefinite retention. The GFS
 ### R7. ECMWF Open Data evolution
 
 Re-confirmed in this research: still only 4 days rolling retention. If ECMWF expands to multi-year retention (no announcement at time of writing), it would be a strong replacement for GFS — IFS HRES has better skill scores than GFS at all lead times. **Action**: schedule a re-check in 12 months.
+
+## Multi-horizon extension (un-shelves spec §13.8)
+
+The original v2 weather leakage fix targets only the 1-day horizon (`y_t1`). Spec §13.8 (the shelved 7-day forecast horizon plan) was blocked precisely because Open-Meteo's free Historical Forecast API doesn't expose multi-day lead times pre-2024. **NOAA GFS/GEFS unblocks this entirely** — operational runs publish lead times out to 384h (16 days). For each prediction date `t`, the 00Z run produces:
+
+| File | Forecasts for | Serves horizon |
+|---|---|---|
+| `gfs.t00z.pgrb2.0p25.f024` | t+1 | day-1 (the v2.0 case) |
+| `gfs.t00z.pgrb2.0p25.f048` | t+2 | day-2 |
+| `gfs.t00z.pgrb2.0p25.f072` | t+3 | day-3 |
+| `gfs.t00z.pgrb2.0p25.f096` | t+4 | day-4 |
+| `gfs.t00z.pgrb2.0p25.f120` | t+5 | day-5 |
+| `gfs.t00z.pgrb2.0p25.f144` | t+6 | day-6 |
+| `gfs.t00z.pgrb2.0p25.f168` | t+7 | day-7 |
+
+For *daily aggregates* at each lead, we need a 6h window of records — e.g., for the day-7 24h aggregate use `f150..f174`. Same pattern as the day-1 case (`f006..f030` from prior 00Z run), just shifted forward by 24h per horizon.
+
+### What this changes for the implementation plan
+
+The 3-session estimate above covers the **1-day horizon only**. Extending to 7 horizons adds **~1 session** of work — the fetcher logic is the same, just looped over a configurable list of horizons:
+
+- `_build_url(date, cycle, lead_h)` already takes `lead_h` as a parameter; just expand the call set from `{6,12,18,24}` to `{6,12,...,174}` (28 files per day instead of 4).
+- `_aggregate_day` becomes `_aggregate_day_at_horizon(per_lead_arrays, horizon_days, reducer)` — same reducer, different lead-time slice.
+- Output schema grows: instead of 5 `wx_*` columns per row, **5 × 7 = 35 columns** named `wx_temp_max_c_t1`, `wx_temp_max_c_t2`, …, `wx_weather_code_t7`. Or — better — keep the parquet long-format with a `horizon` column (`(station_id, date, horizon, wx_*)`), and let the feature builder pivot to wide.
+
+### Cost implications
+
+| | Day-1 only (v2.0) | 7-day (v2.1 unblocked) |
+|---|---|---|
+| Files per day per run | 4 (f006, f012, f018, f024) | 28 (f006 → f174) |
+| Network per day (GFS 0.25°, byte-range subset, NSW box) | ~10 MB | ~70 MB |
+| One-time backfill (1,860 days × 7 horizons) | ~18 GB | ~130 GB |
+| Wall-clock for one-time backfill | 5-6 hours | ~10-14 hours |
+| Disk for parsed parquet | ~140 MB (4,587 stations × 1 horizon × 30 KB) | **~140 MB total** with grid-cell caching (see next section) |
+| Incremental daily refresh | ~30s + 2 min interp | ~3 min + 5 min interp |
+
+The disk savings on the parsed side come from grid-cell caching (next section), not horizon-aware tricks. **The 1-day pipeline is a strict subset of the 7-day pipeline**; building it 7-day-ready from day one costs ~1 extra session but eliminates a refactor when v2.1 lands. **Strong recommendation: bundle Phase 2 with Phase 1** (the user has now agreed to this — see "Implementation sequencing below").
+
+### v2.1 modelling work (still queued)
+
+The 7-day horizon also requires the modelling-side work documented in [`docs/research/2026-05_7day_forecast_horizon.md`](2026-05_7day_forecast_horizon.md) — Architecture A (one LightGBM per horizon), per-horizon evaluation, notebook updates. That's the 5-8 session estimate from that doc, **unchanged** by which data source provides the values. Sequencing recommendation: ship v2.0 (this doc) first with 7-day data path baked in; revisit v2.1 modelling separately.
+
+## Grid-cell caching architecture (spatial granularity smartness)
+
+**The naive port of the Open-Meteo pattern is wrong for grid-based data.** Open-Meteo's fetcher writes one parquet per station_id because each station has a unique lat/lon and the API call carries that into the result. GFS/GEFS is fundamentally different: forecasts are on a regular grid, and **many stations resolve to the same grid cell**. Caching at the station level would duplicate data and waste both bandwidth and disk.
+
+### The duplication problem
+
+GFS 0.25° = 0.25° × 0.25° cells = **~27.8 km × ~23.3 km** at NSW latitudes (cos(33°) × 27.8). A 0.25° cell covers ~650 km². Implications for the 4,587-station NSW roster:
+
+- **Sydney metro** (~5,000 km²) has hundreds of stations clustered into roughly 10-15 grid cells
+- **Newcastle / Wollongong / Central Coast** add ~5-10 cells with 50+ stations each
+- **Regional NSW** has many cells with 1-2 stations
+- **Empirical estimate: ~400-600 unique grid cells cover the entire NSW roster**, vs 4,587 stations
+
+So the actual *unique GFS data* the model uses is ~10-15× smaller than the station count.
+
+GEFS 1° = ~111 km × ~93 km cells = even coarser. Probably ~50-100 unique cells cover all NSW.
+
+### Three-layer caching design
+
+**Layer 1: Grid-cell mapping (computed once)**
+
+`data/interim/station_grid_mapping.parquet` — schema:
+
+```
+station_id : str
+lat        : float    # original
+lon        : float    # original
+gfs_lat_idx, gfs_lon_idx : int    # nearest grid point in GFS 0.25°
+gefs_lat_idx, gefs_lon_idx : int  # nearest grid point in GEFS 1°
+gefs05_lat_idx, gefs05_lon_idx : int  # nearest grid point in GEFS 0.5°
+# Optionally for bilinear interp: the 4 surrounding grid points + weights
+```
+
+Computed once at pipeline init by `src/fuel_pred/spatial/gfs_grid.py` (new module). Reads `data/interim/stations.parquet`, computes nearest-neighbour (or bilinear surround) for each grid resolution, writes the mapping. Re-runs only if `stations.parquet` changes.
+
+**Layer 2: Per-(date, horizon) grid parquet** — the actual fetch output
+
+`data/raw/weather_gfs/<YYYY-MM-DD>/<HH>z_f<lead>.parquet` — schema:
+
+```
+gfs_lat_idx, gfs_lon_idx : int       # grid point identifier
+wx_temp_max_c, wx_temp_min_c, ...    # the 5 (or 4, if weather_code dropped) values
+```
+
+One file per `(date, cycle, lead_h)` triple. Each file contains ~600 unique grid points covering the NSW bounding box (lat ∈ [-37.5, -28], lon ∈ [140.5, 154]). File size: ~20-50 KB per parquet (much smaller than per-station). Total files: 3,529 days × 7 horizons × 1 cycle = 24,703 files. Total disk: ~700 MB-1.2 GB. Way under the naïve 140 MB-per-horizon-per-station-set × 7 horizons ≈ 1 GB anyway, but with much better deduplication properties.
+
+**Layer 3: Feature-build join** — at make_features time
+
+`add_weather_features()` is rewritten to:
+
+1. Load `station_grid_mapping.parquet`
+2. For each (panel date, horizon) requested:
+   - Load the corresponding grid parquet
+   - Join panel rows (station_id, date) → grid cells via the mapping
+   - Produce per-station-date-horizon rows
+3. Pivot horizon dimension into wide `wx_*_tN` columns
+4. Apply the 1-day shift (still — semantics unchanged)
+
+No per-station parquet at all. The Open-Meteo pattern's `data/raw/weather/<station_id>.parquet` becomes legacy-only (for the optional paid-tier path).
+
+### Bandwidth and disk savings
+
+| | Naïve per-station | Grid-cell |
+|---|---|---|
+| Unique fetches per (date, horizon) | 4,587 | ~600 |
+| Network per day (7 horizons, GFS 0.25° byte-range) | ~70 MB × deduplication-noop = ~70 MB | ~70 MB (same — file granularity is `(date, lead)`, not per-station) |
+| Parsed parquet count | 4,587 × 7 horizons = 32,109 | ~24,703 (date × horizon, all stations packed inside) |
+| Parsed parquet disk | ~140 MB × 7 = ~1 GB | ~700 MB-1.2 GB |
+| Feature-build read pattern | 32,109 small files | 24,703 small files joined to a mapping |
+| Re-doing for a new station | Refetch from API (~7s/station) | Just add a row to mapping; existing parquets work |
+
+The **biggest win is operational**: adding new stations doesn't require any API calls — just regenerate the mapping. That's a permanent improvement over the Open-Meteo pattern. Bandwidth is mostly the same because the unit of network call is the GRIB byte-range subset (per-date-per-lead), independent of how many stations resolve to that grid.
+
+### Interpolation: nearest-neighbour or bilinear?
+
+GFS 0.25° cells are ~25 km. Within a single Sydney cell, two stations could be ~25 km apart — meaningful weather difference (Bondi vs Penrith). **Bilinear interpolation** between the 4 surrounding grid points fixes this: each station gets a value computed from its location within the cell, not the cell centre.
+
+The mapping table grows to include 4 grid points and 4 weights per station. The feature-build join becomes: `value(s,d,h) = Σ_i weight_i × grid_value(d, h, lat_idx_i, lon_idx_i)`. Slightly more code but no measurable cost at runtime — the weights are pre-computed.
+
+**Recommendation: bilinear**, pre-computed in the mapping table. Nearest-neighbour stays as an option (flag) for verification / debugging.
+
+### What about GEFS resolution boundaries?
+
+When a date falls in the GEFS 1° window (2017-2020), the mapping uses `gefs_lat_idx, gefs_lon_idx`. Different stations may collide more aggressively at 1°. That's fine — the lower resolution genuinely is less informative, and we accept that for the early-history window.
+
+The router (which source for which date) selects the appropriate mapping columns automatically. No source-mixing within a single (date, station) row.
+
+## Implementation sequencing (post-decision)
+
+User has agreed (2026-05-27) to **bundle Phase 1 + Phase 2** (1-day + multi-horizon) for the data pipeline. The 4-session plan:
+
+| Session | Scope |
+|---|---|
+| **1** | `gfs.py` skeleton + URL routing (3 path schemes) + `.idx` parser + byte-range fetch + cfgrib parse for one variable, one date, one station. Verify against an Open-Meteo Archive call for the same date/coord. |
+| **2** | Full 5-variable / multi-horizon (f006..f174) aggregation. Grid-cell caching: `spatial/gfs_grid.py` computes the station→grid mapping; `gfs.py` writes per-(date, lead) grid parquets. Hermetic tests with small synthetic GRIB fixtures. |
+| **3** | `make_features.py` `add_weather_features()` rewritten to join via the mapping. Pivot horizon to wide. Wire the 1-day shift on the horizon=1 column (the others are already lead-time-shifted by construction — see "Day boundary alignment" above). Update tests. |
+| **4** | Router config switch (`WEATHER_SOURCE=gfs/openmeteo/auto`) + Makefile target + spec §13.7 + §13.8 revision + 2016-09 one-shot Open-Meteo Archive backfill driver + one-shot end-to-end run + write `weather_code` decision. |
+
+Total: **4 sessions of code + ~10-14 hours wall-clock for the one-time backfill** (unattended).
+
+After this lands, v2.1 (the 7-day modelling work in [`2026-05_7day_forecast_horizon.md`](2026-05_7day_forecast_horizon.md)) becomes a clean 5-8 session follow-up with no data-pipeline blocker.
 
 ## See also
 

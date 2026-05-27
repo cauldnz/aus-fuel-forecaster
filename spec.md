@@ -793,28 +793,32 @@ To be resolved during implementation, not blocking spec sign-off:
 
 7. **Weather leakage fix (v2.0)** — v1's `wx_*` columns join Open-Meteo ERA5 *reanalysis actuals* on the same date as the prediction row, which means the model sees retrospective truth rather than the forecast a real-time predictor would have. `results/README.md` caveat #4 acknowledges this; absolute MAE is optimistic, though the A-vs-B comparison is unbiased (both models leak equally).
 
-   **Status: research + pre-flight complete, ready to build.**
+   **Status: pivoted to NOAA GFS/GEFS — Open-Meteo free tier proved unworkable at scale; research complete, ready to build with new source.**
 
-   Full implementation plan in [`docs/research/2026-05_weather_leakage_fix.md`](docs/research/2026-05_weather_leakage_fix.md). Pre-flight verification at [`docs/research/2026-05_weather_leakage_preflight.md`](docs/research/2026-05_weather_leakage_preflight.md) (all 3 tests PASS: coverage boundary global, free-tier handles 100/100 requests at 0.1s spacing, no API key required). Headlines:
+   Original plan: [`docs/research/2026-05_weather_leakage_fix.md`](docs/research/2026-05_weather_leakage_fix.md) (Open-Meteo Historical Forecast API). Pre-flight at [`docs/research/2026-05_weather_leakage_preflight.md`](docs/research/2026-05_weather_leakage_preflight.md). **Empirical reality**: 2026-05-26/27 attempts to refetch all 4,587 NSW stations hit Open-Meteo's per-minute/per-hour/per-day rate limits within minutes, with each 429 itself counting against the daily quota — three attempts burned through the daily 10,000-call cap before completing ~3% of the fetch. The free tier is unworkable at this volume.
 
-   - **Fix:** swap the Open-Meteo Archive API for the **Historical Forecast API** (`historical-forecast-api.open-meteo.com/v1/forecast`) — same call signature, same variables, free-tier accessible, no auth required.
-   - **Coverage boundary:** empirically confirmed 2017-01-01 globally for Australian coordinates (probed Sydney, Broken Hill, Tweed Heads, Eden). Use ERA5 fallback for 2016-09-01 → 2016-12-31 (~2.2% of training rows, in the train fold only — no test-metric contamination).
-   - **Join change:** shift weather `date` by −1 day before merging. Panel row at `t` then receives the day-ahead NWP forecast for `t+1` (issued on `t`), matching deployment.
-   - **Expected absolute MAE rise:** 0.05–0.15 c/L. A-vs-B Δ MAE unchanged.
-   - **Effort:** ~2.5 sessions, mostly wall-clock for full retrain after invalidating `models/*.pkl`.
+   **Revised plan**: [`docs/research/2026-06_nwp_archive_alternative.md`](docs/research/2026-06_nwp_archive_alternative.md). Strict-free path via **NOAA GFS 0.25°** (2021-04+) + **NOAA GEFS 1°/0.5°** (2017-01 → 2021-03) on anonymous AWS S3 buckets — no key, no quota, no 429s. Trade-off: ~5-6 hour one-time backfill via GRIB byte-range subsetting (vs Open-Meteo's theoretical 150s burst that gets throttled anyway). Open-Meteo path retained as optional paid-tier upgrade via `WEATHER_SOURCE=openmeteo` config switch + `OPENMETEO_API_KEY` env var (both already wired up on the v2 branch).
+
+   Headlines:
+
+   - **Sources:** NOAA GFS 0.25° + GEFS 1° + GEFS 0.5° hybrid; 2016-09 → 2016-12 tail via one-time Open-Meteo Archive (4,587 calls, run overnight at 1s spacing — fits free-tier ceiling).
+   - **Spatial smartness:** grid-cell caching, not per-station. ~600 unique GFS cells cover the 4,587-station NSW roster (many stations resolve to the same cell, especially in Sydney metro). Per-(date, lead) grid parquet + pre-computed `station_grid_mapping.parquet` with bilinear interpolation weights. Adding new stations later requires no API calls.
+   - **Join change:** shift weather `date` by −1 day before merging. Panel row at `t` then receives the day-ahead NWP forecast for `t+1` (issued on `t`), matching deployment. Mechanics unchanged from the original Open-Meteo plan.
+   - **Expected absolute MAE rise:** 0.05-0.15 c/L. A-vs-B Δ MAE unchanged.
+   - **Methodological compromises:** `wx_weather_code` becomes null-stub (GFS/GEFS doesn't emit WMO codes; low SHAP rank); UTC vs Sydney day-boundary aggregation shifts daily aggregates by ~10h (low-rank feature, acceptable).
+   - **Effort:** 4 sessions total — bundled with §13.8 multi-horizon support from day one (see below). Wall-clock 10-14 hours for one-time backfill (unattended).
 
 8. **7-day forecast horizon (v2.1)** — extend v1's 1-day prediction (`y_t1`) to per-day predictions for t+1 through t+7. Substantial architectural change: target schema, multi-horizon feature engineering, per-horizon model training, evaluation.
 
-   **Status: research complete, SHELVED pending historical multi-day NWP forecast data.**
+   **Status: data path unblocked by NOAA GFS pivot (§13.7); modelling work still queued.**
 
-   Full planning doc in [`docs/research/2026-05_7day_forecast_horizon.md`](docs/research/2026-05_7day_forecast_horizon.md) (Architecture A recommended — one LightGBM per horizon; 5-8 sessions estimated). **The pre-flight for §13.7 discovered a substantive blocker**: the Open-Meteo Historical Forecast API only exposes 0–24h lead time. The sibling Previous Runs API exposes multi-day lead times but only covers January 2024 onwards — so 7+ years of training data (2016-09 → 2023-12) would have no real multi-day forecast values. Follow-up research at [`docs/research/2026-05_weather_leakage_fix.md`](docs/research/2026-05_weather_leakage_fix.md) addendum surveyed alternatives:
+   The data blocker that originally shelved this is now solved. NOAA GFS/GEFS publishes forecast lead times out to 384 hours (16 days), so for each prediction date `t` the same files used for the 1-day case also serve t+2, t+3, …, t+7 (via `f048`, `f072`, …, `f168` lead-time slices of the same 00Z run on day `t`). User decision (2026-05-27): bundle multi-horizon data path with §13.7 v2.0 implementation (~1 extra session of fetcher work, ~10-14 hours wall-clock total backfill) so the data layer is 7-day-ready from day one and v2.1 modelling can land as a clean follow-up.
 
-   - **NOAA GFS archive (AWS S3):** earliest surface forecast files only from 2021-04-01, GRIB2-only (~544 MB each) — categorical complexity jump; doesn't fully solve the gap.
-   - **ECMWF Open Data, Planetary Computer ECMWF, NCEI historical GFS:** none retain a usable historical multi-day forecast archive on the free tier.
-   - **Commercial sources (Visual Crossing, etc.):** would cost ~$5–15k for full pre-2024 backfill, disproportionate for a ~3% SHAP feature block.
-   - **Recommended fallback if revisited:** day-1 forecast values used as a proxy for multi-day horizons in pre-2024 data + real Previous Runs API for 2024+. Re-introduces controlled leakage (proxy doesn't represent what a real multi-day forecast would have said), but strictly better than ERA5 actuals and trivial to implement.
+   Full modelling plan still in [`docs/research/2026-05_7day_forecast_horizon.md`](docs/research/2026-05_7day_forecast_horizon.md) — Architecture A (one LightGBM per horizon), 5-8 sessions estimated for the modelling work itself (target schema, per-horizon weather joins, 14-model training loop, per-horizon evaluation, notebook updates). This is **unchanged** by the data-source pivot; only the upstream weather pipeline changed.
 
-   **Why shelved:** the v1 model is performant at the 1-day horizon, the data constraint for honest multi-horizon is real, and the proxy fallback is not strictly leakage-free. Revisit if (a) Open-Meteo Previous Runs API gains historical coverage, (b) a usable free multi-day NWP archive emerges for Australia 2016-2023, or (c) the proxy approach is judged acceptable given the bounded leakage. §13.7 should land independently first — it has standalone value as a methodological correction at the 1-day horizon.
+   Total path to v2.1 from current state: **~9-12 sessions** in 3 logical phases: (Phase 1+2) NOAA GFS/GEFS data pipeline with 7-horizon support [4 sessions, this is §13.7 v2.0 plus the multi-horizon bundle]; (Phase 3) v2.1 modelling work [5-8 sessions, future].
+
+   Multi-horizon data path design + grid-cell caching architecture documented in [`docs/research/2026-06_nwp_archive_alternative.md`](docs/research/2026-06_nwp_archive_alternative.md) ("Multi-horizon extension" and "Grid-cell caching architecture" sections).
 
 ## 14. References
 

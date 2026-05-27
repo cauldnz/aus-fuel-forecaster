@@ -113,7 +113,10 @@ def main() -> None:
     cached = 0
     for row in usable.itertuples(index=False):
         sid = str(row.station_id)
-        if _cache_covers(args.out / f"{sid}.parquet", args.start, end):
+        if _cache_covers(
+            args.out / f"{sid}.parquet", args.start, end,
+            forecast_only=args.forecast_only,
+        ):
             cached += 1
             continue
         pending.append(

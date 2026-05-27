@@ -110,23 +110,132 @@ def test_clamp_end_to_yesterday_passes_through_old_dates() -> None:
 # ----------------------------- _cache_covers -----------------------------
 
 
+def _valid_cache_frame(start: str, end: str) -> pd.DataFrame:
+    """Build a synthetic cache parquet with date + at least one wx_* column.
+
+    The stricter _cache_covers (spec §13.7 v2 resume hardening) requires
+    both `date` AND at least one `wx_*` column to be present — defends
+    against partial writes that landed the date column but lost the wx
+    values mid-write.
+    """
+    dates = pd.date_range(start, end).date
+    return pd.DataFrame({
+        "date": dates,
+        "wx_temp_max_c": [22.5] * len(dates),
+    })
+
+
 def test_cache_covers_true_when_range_fully_covered(tmp_path: Path) -> None:
-    df = pd.DataFrame({"date": pd.date_range("2024-01-01", "2024-01-31").date})
     cache = tmp_path / "x.parquet"
-    df.to_parquet(cache, engine="pyarrow", compression="zstd", index=False)
+    _valid_cache_frame("2024-01-01", "2024-01-31").to_parquet(
+        cache, engine="pyarrow", compression="zstd", index=False,
+    )
     assert weather._cache_covers(cache, "2024-01-05", "2024-01-25") is True
 
 
 def test_cache_covers_false_when_range_partial(tmp_path: Path) -> None:
-    df = pd.DataFrame({"date": pd.date_range("2024-01-10", "2024-01-20").date})
     cache = tmp_path / "x.parquet"
-    df.to_parquet(cache, engine="pyarrow", compression="zstd", index=False)
+    _valid_cache_frame("2024-01-10", "2024-01-20").to_parquet(
+        cache, engine="pyarrow", compression="zstd", index=False,
+    )
     # Asks for a range that extends past the cache.
     assert weather._cache_covers(cache, "2024-01-05", "2024-01-25") is False
 
 
 def test_cache_covers_false_when_file_missing(tmp_path: Path) -> None:
     assert weather._cache_covers(tmp_path / "nope.parquet", "2024-01-01", "2024-01-31") is False
+
+
+def test_cache_covers_false_when_no_wx_columns(tmp_path: Path) -> None:
+    """Defends against partial writes — date column only, wx columns missing."""
+    cache = tmp_path / "bad.parquet"
+    # Date column only, no wx_* — simulates a write that crashed mid-schema.
+    pd.DataFrame({"date": pd.date_range("2024-01-01", "2024-01-31").date}).to_parquet(
+        cache, engine="pyarrow", compression="zstd", index=False,
+    )
+    assert weather._cache_covers(cache, "2024-01-05", "2024-01-25") is False
+
+
+def test_cache_covers_false_when_corrupt(tmp_path: Path) -> None:
+    """Defends against truncated / non-parquet files (partial atomic writes)."""
+    cache = tmp_path / "corrupt.parquet"
+    cache.write_bytes(b"not a parquet file")
+    assert weather._cache_covers(cache, "2024-01-05", "2024-01-25") is False
+
+
+def test_cache_covers_forecast_only_accepts_post_2017_floor(tmp_path: Path) -> None:
+    """forecast_only=True: a cache that starts at 2017-01-01 is valid even
+    when the caller requested data back to 2016-09-01 — the pre-boundary
+    range is legitimately absent in forecast-only mode."""
+    cache = tmp_path / "fo.parquet"
+    _valid_cache_frame("2017-01-01", "2026-04-30").to_parquet(
+        cache, engine="pyarrow", compression="zstd", index=False,
+    )
+    # Hybrid-mode check: insufficient (would want 2016 data)
+    assert weather._cache_covers(cache, "2016-09-01", "2026-04-30") is False
+    # Forecast-only-mode check: sufficient (boundary is 2017-01-01)
+    assert weather._cache_covers(
+        cache, "2016-09-01", "2026-04-30", forecast_only=True
+    ) is True
+
+
+# ----------------------------- atomic write -----------------------------
+
+
+@responses.activate
+def test_fetch_one_atomic_write_no_tmp_remains(tmp_path: Path) -> None:
+    """fetch_one writes to a .tmp then renames — no .tmp should survive."""
+    responses.add(
+        responses.GET, weather.FORECAST_URL,
+        json=_open_meteo_response(["2024-01-01", "2024-01-02"]), status=200,
+    )
+    out_dir = tmp_path / "wx"
+    weather.fetch_one(
+        station_id="s1", lat=-33.93, lon=151.20,
+        start="2024-01-01", end="2024-01-02",
+        out_dir=out_dir, forecast_only=True,
+    )
+    parquets = list(out_dir.glob("*.parquet"))
+    tmps = list(out_dir.glob("*.tmp"))
+    assert len(parquets) == 1, f"expected one parquet, got {parquets}"
+    assert tmps == [], f"unexpected .tmp leftover: {tmps}"
+
+
+# ----------------------------- resume from partial cache -----------------------------
+
+
+@responses.activate
+def test_fetch_skips_cached_stations(tmp_path: Path) -> None:
+    """A station with a valid cache covering the requested range is NOT re-fetched.
+
+    Simulates the recovery-from-interruption pattern: a previous run
+    completed N of M stations; the next run picks up where it stopped.
+    """
+    out_dir = tmp_path / "wx"
+    out_dir.mkdir()
+    # Pre-populate s1's cache (covers the requested range).
+    _valid_cache_frame("2024-01-01", "2024-01-31").to_parquet(
+        out_dir / "s1.parquet", engine="pyarrow", compression="zstd", index=False,
+    )
+    # Only s2's forecast URL needs to mock — s1 should never hit the API.
+    responses.add(
+        responses.GET, weather.FORECAST_URL,
+        json=_open_meteo_response(["2024-01-01", "2024-01-31"]), status=200,
+    )
+
+    stations = _stations_parquet(tmp_path, [
+        {"station_id": "s1", "lat": -33.93, "lon": 151.20},
+        {"station_id": "s2", "lat": -32.93, "lon": 151.78},
+    ])
+    weather.fetch(
+        stations, "2024-01-01", "2024-01-31", out_dir,
+        inter_call_seconds=0.0, forecast_only=True,
+    )
+    # Exactly one API call (s2 only); s1 was a cache hit.
+    assert len(responses.calls) == 1
+    # Both stations have parquets in the output.
+    parquets = sorted(p.name for p in out_dir.glob("*.parquet"))
+    assert parquets == ["s1.parquet", "s2.parquet"]
 
 
 # ----------------------------- fetch (full path) -----------------------------

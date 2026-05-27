@@ -207,22 +207,51 @@ def _frame_from_payload(payload: dict[str, Any]) -> pd.DataFrame:
     return df.loc[:, list(OUTPUT_COLUMNS)]
 
 
-def _cache_covers(path: Path, start: str, end: str) -> bool:
-    """Return True if the cached parquet covers the full requested range."""
+def _cache_covers(
+    path: Path, start: str, end: str, *, forecast_only: bool = False
+) -> bool:
+    """Return True if the cached parquet covers the full requested range.
+
+    Validates that:
+      1. the file exists and is readable (not a half-written .tmp leftover
+         or a corrupt parquet from a previous crash);
+      2. the schema includes `date` and at least one `wx_*` value column —
+         defends against the rare case of a parquet that wrote its date
+         column but failed mid-write on the wx values;
+      3. the cached date range covers the requested [start, end] window.
+         In forecast-only mode the effective start is the later of the
+         requested start and the forecast coverage boundary, since the
+         pre-boundary range is legitimately absent.
+
+    A False return triggers a re-fetch — the cost is one API call, so we
+    err toward False whenever there's any ambiguity.
+    """
     if not path.exists():
         return False
     try:
-        cached = pd.read_parquet(path, columns=["date"])
-    except Exception as exc:  # pragma: no cover — corrupt cache, force re-fetch
+        # Read the whole thing once (small per-station files, ~35KB) so we
+        # can verify both date AND wx columns are present and readable.
+        cached = pd.read_parquet(path)
+    except Exception as exc:
         logger.warning("could not read cache %s (%s) — re-fetching", path, exc)
         return False
-    if cached.empty:
+    if cached.empty or "date" not in cached.columns:
+        return False
+    if not any(c in cached.columns for c in WX_VALUE_COLUMNS):
+        logger.warning(
+            "cache %s has date column but no wx_* values — re-fetching", path,
+        )
         return False
     cached_min = pd.to_datetime(cached["date"].min()).date()
     cached_max = pd.to_datetime(cached["date"].max()).date()
     requested_start = dt.date.fromisoformat(start)
     requested_end = dt.date.fromisoformat(end)
-    return bool(cached_min <= requested_start and cached_max >= requested_end)
+    if forecast_only:
+        boundary = dt.date.fromisoformat(config.WEATHER_FORECAST_COVERAGE_START)
+        effective_start = max(requested_start, boundary)
+    else:
+        effective_start = requested_start
+    return bool(cached_min <= effective_start and cached_max >= requested_end)
 
 
 def _clamp_end_to_yesterday(end: str) -> str:
@@ -426,14 +455,20 @@ def fetch_one(
             ``WEATHER_FORECAST_COVERAGE_START``.
     """
     out_path = out_dir / f"{station_id}.parquet"
-    if not force and _cache_covers(out_path, start, end):
+    if not force and _cache_covers(out_path, start, end, forecast_only=forecast_only):
         logger.debug("cache hit %s — covers %s..%s", out_path, start, end)
         return out_path
 
     df = _fetch_hybrid(lat, lon, start, end, forecast_only=forecast_only)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(out_path, engine="pyarrow", compression="zstd", index=False)
+    # Atomic write: write to .tmp then rename. Protects against mid-process
+    # kill leaving a half-written parquet that _cache_covers might mistake
+    # for a valid cache entry. The os-level rename is atomic on the same
+    # filesystem (which is the case here — both paths in out_dir).
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    df.to_parquet(tmp_path, engine="pyarrow", compression="zstd", index=False)
+    tmp_path.replace(out_path)  # atomic on same FS; works on Windows too
     logger.info("wrote %d days for %s to %s", len(df), station_id, out_path)
     return out_path
 
@@ -480,7 +515,7 @@ def fetch(
     for i, row in enumerate(usable.itertuples(index=False), start=1):
         station_id = str(row.station_id)
         out_path = out_dir / f"{station_id}.parquet"
-        if not force and _cache_covers(out_path, start, end):
+        if not force and _cache_covers(out_path, start, end, forecast_only=forecast_only):
             cached += 1
             continue
 

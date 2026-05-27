@@ -130,6 +130,32 @@ WX_COLUMNS: tuple[str, ...] = (
     "wx_weather_code",
 )
 
+# §7.6 Weather block — multi-horizon GFS variant (spec §13.7 v2.0 + §13.8 v2.1)
+# For v2.0 (1-day-ahead model), only the _t1 columns are consumed by the model.
+# All horizons present in features.parquet so v2.1 can land without re-fetch.
+WX_COLUMNS_GFS_T1: tuple[str, ...] = (
+    "wx_temp_max_c_t1",
+    "wx_temp_min_c_t1",
+    "wx_precipitation_mm_t1",
+    "wx_wind_speed_max_kmh_t1",
+    "wx_weather_code_t1",
+)
+
+# v2.1 readiness — all 7 horizons. Not yet consumed by Model A/B; recorded in
+# features.parquet so Session 4 (config switch) + v2.1 (7-day model) can pick
+# them up without a re-fetch.
+WX_COLUMNS_GFS_ALL_HORIZONS: tuple[str, ...] = tuple(
+    f"wx_{var}_t{h}"
+    for h in range(1, 8)
+    for var in (
+        "temp_max_c",
+        "temp_min_c",
+        "precipitation_mm",
+        "wind_speed_max_kmh",
+        "weather_code",
+    )
+)
+
 # §7.7 SA2 demographic block — the augmentor block; the ONLY difference
 # between Models A and B.
 #
@@ -290,6 +316,24 @@ EXCLUDE_FROM_FEATURES: frozenset[str] = frozenset(
         "sa2_name",
         # Counter join key, kept for traceability.
         "counter_id",
+        # GFS multi-horizon wx_*_tN columns for horizons 2..7 — written to
+        # features.parquet (spec §13.8 v2.1 forward-readiness) but NOT used
+        # by the v2.0 1-day-ahead model. Only `_t1` columns reach Model A/B
+        # via WX_COLUMNS_GFS_T1 (which Session 4 will route through
+        # MODEL_*_GFS_BLOCKS). Excluding them here prevents an accidental
+        # `feature_columns(df, blocks)` call from leaking forward-horizon
+        # features into the v2.0 model.
+        *(
+            f"wx_{var}_t{h}"
+            for h in range(2, 8)
+            for var in (
+                "temp_max_c",
+                "temp_min_c",
+                "precipitation_mm",
+                "wind_speed_max_kmh",
+                "weather_code",
+            )
+        ),
     }
 )
 

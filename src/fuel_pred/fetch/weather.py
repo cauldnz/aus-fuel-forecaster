@@ -62,20 +62,51 @@ logger = logging.getLogger(__name__)
 
 
 class OpenMeteoRateLimitError(RuntimeError):
-    """Raised on HTTP 429 from Open-Meteo. NOT retried — see _is_retryable.
+    """Raised on HTTP 429 from Open-Meteo.
 
     Each 429 still counts against the per-minute / per-hour / per-day
-    quotas, so retrying multiplies the burn. Surface this fast and let
-    the caller decide whether to back off across many stations
-    (circuit breaker in tools/parallel_weather_fetch.py).
+    quotas, so retrying multiplies the burn. The subclasses below carry
+    the severity so tenacity / the orchestrator can react appropriately:
+
+    - Minutely (600/min) — short-lived; safe to retry after ~65s.
+    - Hourly  (5000/hr) — long-lived; not retried in-process; abort.
+    - Daily   (10000/day) — abort, resume tomorrow.
+    - Unknown — treat as Hourly (conservative: abort).
     """
 
 
+class OpenMeteoMinutelyRateLimitError(OpenMeteoRateLimitError):
+    """600 calls/min burst limit. Retryable after ~65s wait."""
+
+
+class OpenMeteoDailyRateLimitError(OpenMeteoRateLimitError):
+    """10000 calls/day cap. NOT retryable — wait for UTC midnight reset."""
+
+
+def _classify_rate_limit(reason: str) -> OpenMeteoRateLimitError:
+    """Pick the right subclass based on the API's `reason` string."""
+    low = reason.lower()
+    if "minute" in low:
+        return OpenMeteoMinutelyRateLimitError(reason)
+    if "daily" in low or "day" in low:
+        return OpenMeteoDailyRateLimitError(reason)
+    # Unknown subtype (hourly, or new wording) — be conservative, surface
+    # as the base class which the orchestrator treats as abort-worthy.
+    return OpenMeteoRateLimitError(reason)
+
+
 def _is_retryable(exc: BaseException) -> bool:
-    """Tenacity predicate: retry on transient errors, NOT on 429."""
-    # 429s are quota-burning — surface immediately.
+    """Tenacity predicate: retry transient errors + minutely 429s only.
+
+    Daily 429s (and unclassified 429s) abort immediately — retrying
+    burns more quota for nothing. Minutely 429s wait ~65s via the
+    tenacity exponential backoff and try again — the per-minute window
+    is short enough that retry pays off.
+    """
+    if isinstance(exc, OpenMeteoMinutelyRateLimitError):
+        return True  # short-lived throttle, retry pays off
     if isinstance(exc, OpenMeteoRateLimitError):
-        return False
+        return False  # daily / unknown — abort, don't burn quota
     # Other RequestException / HTTPError / ConnectionError / Timeout: retry.
     return isinstance(exc, requests.RequestException | requests.HTTPError | OSError)
 
@@ -105,8 +136,11 @@ DEFAULT_INTER_CALL_SECONDS: float = 0.1
 
 
 @retry(
-    stop=stop_after_attempt(config.RETRY_MAX_ATTEMPTS),
-    wait=wait_exponential(multiplier=config.RETRY_BACKOFF_SECONDS, max=30),
+    # Weather is the only fetcher hit by Open-Meteo's per-minute throttle;
+    # 7 attempts × exp backoff (max 90s) gives ~2+4+8+16+32+64 = 126s of
+    # total wait — covers a full 60s window plus headroom for retry-on-retry.
+    stop=stop_after_attempt(7),
+    wait=wait_exponential(multiplier=config.RETRY_BACKOFF_SECONDS, max=90),
     retry=retry_if_exception(_is_retryable),
     reraise=True,
 )
@@ -121,8 +155,11 @@ def _request_daily(lat: float, lon: float, start: str, end: str) -> dict[str, An
 
 
 @retry(
-    stop=stop_after_attempt(config.RETRY_MAX_ATTEMPTS),
-    wait=wait_exponential(multiplier=config.RETRY_BACKOFF_SECONDS, max=30),
+    # Weather is the only fetcher hit by Open-Meteo's per-minute throttle;
+    # 7 attempts × exp backoff (max 90s) gives ~2+4+8+16+32+64 = 126s of
+    # total wait — covers a full 60s window plus headroom for retry-on-retry.
+    stop=stop_after_attempt(7),
+    wait=wait_exponential(multiplier=config.RETRY_BACKOFF_SECONDS, max=90),
     retry=retry_if_exception(_is_retryable),
     reraise=True,
 )
@@ -162,14 +199,15 @@ def _open_meteo_get(
         headers={"User-Agent": config.USER_AGENT, "Accept": "application/json"},
         timeout=config.REQUEST_TIMEOUT,
     )
-    # 429 → quota-burning. Surface immediately, do NOT retry.
+    # 429 → classified by reason. Minutely → tenacity retries with wait.
+    # Daily → abort. See _classify_rate_limit and _is_retryable.
     if response.status_code == 429:
         reason = ""
         try:
             reason = response.json().get("reason", "")
         except Exception:
             reason = response.text[:200]
-        raise OpenMeteoRateLimitError(
+        raise _classify_rate_limit(
             f"HTTP 429 from Open-Meteo ({url}): {reason}"
         )
     response.raise_for_status()

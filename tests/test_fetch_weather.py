@@ -93,6 +93,34 @@ def test_frame_from_payload_raises_on_missing_daily_block() -> None:
         weather._frame_from_payload({"latitude": -33.0})
 
 
+# ----------------------------- rate-limit classification -----------------------------
+
+
+def test_classify_rate_limit_minutely() -> None:
+    """A 'Minutely API request limit' reason → OpenMeteoMinutelyRateLimitError."""
+    reason = "Minutely API request limit exceeded. Please try again in one minute."
+    err = weather._classify_rate_limit(reason)
+    assert isinstance(err, weather.OpenMeteoMinutelyRateLimitError)
+    assert isinstance(err, weather.OpenMeteoRateLimitError)
+    assert weather._is_retryable(err) is True  # short window, worth retrying
+
+
+def test_classify_rate_limit_daily() -> None:
+    """A 'Daily API request limit' reason → OpenMeteoDailyRateLimitError, NOT retryable."""
+    reason = "Daily API request limit exceeded. Please try again tomorrow."
+    err = weather._classify_rate_limit(reason)
+    assert isinstance(err, weather.OpenMeteoDailyRateLimitError)
+    assert weather._is_retryable(err) is False  # full day to wait — don't burn quota
+
+
+def test_classify_rate_limit_unknown_is_conservative() -> None:
+    """Unknown subtype (e.g. hourly) → base class, NOT retryable (safer)."""
+    err = weather._classify_rate_limit("Some new throttle wording from a future API update")
+    assert isinstance(err, weather.OpenMeteoRateLimitError)
+    assert not isinstance(err, weather.OpenMeteoMinutelyRateLimitError)
+    assert weather._is_retryable(err) is False
+
+
 # ----------------------------- end-date clamping -----------------------------
 
 
@@ -334,12 +362,18 @@ def test_fetch_handles_missing_lat_lon(tmp_path: Path) -> None:
 
 @responses.activate
 def test_fetch_continues_on_per_station_failure(tmp_path: Path, stations_two: Path) -> None:
-    """One station failing shouldn't kill the whole run."""
+    """One station failing shouldn't kill the whole run.
+
+    Weather has a custom 7-attempt retry (vs the project-wide
+    RETRY_MAX_ATTEMPTS=5) to span Open-Meteo's per-minute throttle
+    window. Mock 7 sequential 500s for s1 (exhausts the retry budget),
+    then a success for s2.
+    """
     out_dir = tmp_path / "weather"
-    # First station call: HTTP 500 (after 5 retries → permanent failure).
-    # Second station call: success. Post-2017 routes to forecast (spec §13.7).
-    for _ in range(weather.config.RETRY_MAX_ATTEMPTS):
+    # First station call: HTTP 500 (exhausts the 7-attempt retry budget).
+    for _ in range(7):
         responses.add(responses.GET, weather.FORECAST_URL, status=500)
+    # Second station call: success. Post-2017 routes to forecast (spec §13.7).
     responses.add(
         responses.GET,
         weather.FORECAST_URL,

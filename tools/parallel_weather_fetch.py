@@ -35,6 +35,7 @@ from pathlib import Path
 import pandas as pd
 
 from fuel_pred.fetch.weather import (
+    OpenMeteoDailyRateLimitError,
     OpenMeteoRateLimitError,
     _cache_covers,
     _clamp_end_to_yesterday,
@@ -51,11 +52,14 @@ logger = logging.getLogger("parallel_weather_fetch")
 
 def _fetch_worker(
     args: tuple[str, float, float, str, str, str, bool],
-) -> tuple[str, bool, str, bool]:
-    """Fetch one station; return (station_id, success, message, is_rate_limited).
+) -> tuple[str, bool, str, str]:
+    """Fetch one station; return (station_id, success, message, fail_kind).
 
-    The 4th return flag tells the orchestrator whether this was a quota
-    failure (HTTP 429) — used to drive the circuit breaker.
+    `fail_kind` is one of: "ok", "daily_rate_limit", "rate_limit", "other".
+    The orchestrator's circuit breaker only trips on consecutive
+    "daily_rate_limit" — minutely 429s are recoverable (tenacity retries
+    them internally with a long wait, but if all 7 attempts fail, that
+    surfaces here too).
     """
     station_id, lat, lon, start, end, out_dir, forecast_only = args
     try:
@@ -69,11 +73,13 @@ def _fetch_worker(
             force=False,
             forecast_only=forecast_only,
         )
-        return (station_id, True, "ok", False)
+        return (station_id, True, "ok", "ok")
+    except OpenMeteoDailyRateLimitError as exc:
+        return (station_id, False, str(exc), "daily_rate_limit")
     except OpenMeteoRateLimitError as exc:
-        return (station_id, False, str(exc), True)
+        return (station_id, False, str(exc), "rate_limit")
     except Exception as exc:
-        return (station_id, False, str(exc), False)
+        return (station_id, False, str(exc), "other")
 
 
 def main() -> None:
@@ -136,34 +142,44 @@ def main() -> None:
     fetched = 0
     failed = 0
     rate_limited = 0
-    consecutive_429s = 0
+    daily_rate_limited = 0
+    consecutive_daily_429s = 0
     aborted_by_circuit = False
     started = time.monotonic()
 
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         futures = [pool.submit(_fetch_worker, item) for item in pending]
         for i, fut in enumerate(as_completed(futures), start=1):
-            sid, ok, msg, is_429 = fut.result()
+            sid, ok, msg, fail_kind = fut.result()
             if ok:
                 fetched += 1
-                consecutive_429s = 0  # any success resets the counter
+                consecutive_daily_429s = 0
             else:
                 failed += 1
-                if is_429:
+                if fail_kind == "daily_rate_limit":
+                    daily_rate_limited += 1
+                    consecutive_daily_429s += 1
+                    logger.warning("DAILY_RATE_LIMIT %s: %s", sid, msg)
+                elif fail_kind == "rate_limit":
+                    # Minutely/unknown 429s after tenacity exhausted its retries.
+                    # Not a daily quota hit, so don't trip the breaker.
                     rate_limited += 1
-                    consecutive_429s += 1
+                    consecutive_daily_429s = 0
                     logger.warning("RATE_LIMIT %s: %s", sid, msg)
                 else:
-                    consecutive_429s = 0
+                    consecutive_daily_429s = 0
                     logger.warning("FAIL %s: %s", sid, msg)
 
-            # Circuit breaker: too many consecutive 429s → daily quota likely
-            # exhausted. Cancel remaining work to preserve any leftover budget.
-            if args.rate_limit_circuit > 0 and consecutive_429s >= args.rate_limit_circuit:
+            # Circuit breaker: ONLY trips on consecutive DAILY 429s — the
+            # daily quota is exhausted and there's nothing more we can do
+            # until UTC midnight. Minutely 429s are handled by tenacity's
+            # in-process retry loop and don't count toward this.
+            if args.rate_limit_circuit > 0 and consecutive_daily_429s >= args.rate_limit_circuit:
                 logger.error(
-                    "CIRCUIT BREAKER tripped: %d consecutive 429s — daily quota "
-                    "likely exhausted. Cancelling remaining %d stations.",
-                    consecutive_429s, len(pending) - i,
+                    "CIRCUIT BREAKER tripped: %d consecutive DAILY 429s — "
+                    "daily quota exhausted. Cancelling remaining %d stations. "
+                    "Resume tomorrow (UTC midnight reset).",
+                    consecutive_daily_429s, len(pending) - i,
                 )
                 for f in futures:
                     f.cancel()
@@ -175,9 +191,10 @@ def main() -> None:
                 rate = i / elapsed if elapsed > 0 else 0
                 eta_min = (len(pending) - i) / rate / 60 if rate > 0 else 0
                 logger.info(
-                    "progress %d/%d  fetched=%d failed=%d rate_limited=%d  "
-                    "rate=%.2f stn/s  ETA=%.1f min",
-                    i, len(pending), fetched, failed, rate_limited, rate, eta_min,
+                    "progress %d/%d  fetched=%d failed=%d rate_limited=%d "
+                    "daily_429=%d  rate=%.2f stn/s  ETA=%.1f min",
+                    i, len(pending), fetched, failed, rate_limited,
+                    daily_rate_limited, rate, eta_min,
                 )
 
         if aborted_by_circuit:
@@ -187,18 +204,18 @@ def main() -> None:
     if aborted_by_circuit:
         logger.info(
             "weather fetch ABORTED by circuit breaker: fetched=%d failed=%d "
-            "rate_limited=%d cached=%d skipped_no_latlon=%d  total=%.1f min. "
-            "Wait for daily quota reset (UTC midnight) and re-run; cached "
-            "stations are skipped automatically.",
-            fetched, failed, rate_limited, cached, n_skipped_no_latlon,
-            total_elapsed / 60,
+            "rate_limited=%d daily_429=%d cached=%d skipped_no_latlon=%d  "
+            "total=%.1f min. Wait for daily quota reset (UTC midnight) and "
+            "re-run; cached stations are skipped automatically.",
+            fetched, failed, rate_limited, daily_rate_limited, cached,
+            n_skipped_no_latlon, total_elapsed / 60,
         )
     else:
         logger.info(
             "weather fetch complete: fetched=%d failed=%d rate_limited=%d "
-            "cached=%d skipped_no_latlon=%d  total=%.1f min",
-            fetched, failed, rate_limited, cached, n_skipped_no_latlon,
-            total_elapsed / 60,
+            "daily_429=%d cached=%d skipped_no_latlon=%d  total=%.1f min",
+            fetched, failed, rate_limited, daily_rate_limited, cached,
+            n_skipped_no_latlon, total_elapsed / 60,
         )
 
 

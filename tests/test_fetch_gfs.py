@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
+from unittest.mock import patch
 
+import numpy as np
+import pandas as pd
 import pytest
 import responses
+import xarray as xr
 
 from fuel_pred.fetch import gfs
 
@@ -226,3 +230,274 @@ def test_parse_grib_real_fixture_tmax() -> None:
 def test_parse_grib_rejects_non_grib_buffer() -> None:
     with pytest.raises(RuntimeError, match="GRIB"):
         gfs._parse_grib_to_xarray(b"not a grib", "TMAX:2 m above ground")
+
+
+# ============================ Session 2: multi-horizon + grid parquet ============================
+
+
+# ----------------------------- _leads_for_horizon -----------------------------
+
+
+def test_leads_for_horizon_day_1() -> None:
+    """Horizon 1 spans the 4 6-hour leads of the first forecast day."""
+    assert gfs._leads_for_horizon(1) == [6, 12, 18, 24]
+
+
+def test_leads_for_horizon_day_7() -> None:
+    """Horizon 7 spans leads 150..168 (4 records, 6h apart)."""
+    assert gfs._leads_for_horizon(7) == [150, 156, 162, 168]
+
+
+def test_leads_for_horizon_rejects_zero() -> None:
+    with pytest.raises(ValueError, match="horizon"):
+        gfs._leads_for_horizon(0)
+
+
+# ----------------------------- _grid_parquet_path -----------------------------
+
+
+def test_grid_parquet_path_format() -> None:
+    """Per-(date, horizon) output filenames follow `<YYYY-MM-DD>_h<N>.parquet`."""
+    p = gfs._grid_parquet_path(Path("/tmp/out"), dt.date(2024, 3, 15), 3)
+    assert p.name == "2024-03-15_h3.parquet"
+
+
+# ----------------------------- _open_grib_dataset (multi-record) -----------------------------
+
+
+FIXTURE_VARS = ("tmax", "tmin", "apcp", "ugrd10m", "vgrd10m")
+
+
+def _load_concat_fixture() -> bytes:
+    """Concatenate the 5 single-variable GEFS fixtures into one buffer.
+
+    This mimics what `_fetch_records` produces when called with the 5
+    needed byte ranges from a live `.idx` — a buffer of 5 mini-GRIBs.
+    """
+    out = b""
+    for v in FIXTURE_VARS:
+        fp = FIXTURE_DIR / f"gefs_2018-06-01_t00z_f024_{v}.grib2"
+        out += fp.read_bytes()
+    return out
+
+
+@pytest.mark.skipif(
+    not all(
+        (FIXTURE_DIR / f"gefs_2018-06-01_t00z_f024_{v}.grib2").exists()
+        for v in FIXTURE_VARS
+    ),
+    reason="GRIB fixtures not present; see tests/fixtures/gfs/ docstring",
+)
+def test_open_grib_dataset_merges_five_variables() -> None:
+    """Multi-record buffer (TMAX+TMIN+APCP+U10+V10) parses to one merged Dataset."""
+    ds = gfs._open_grib_dataset(_load_concat_fixture())
+
+    # All 5 variables present after cfgrib's rename.
+    for name in ("tmax", "tmin", "tp", "u10", "v10"):
+        assert name in ds.data_vars, f"missing {name} in {list(ds.data_vars)}"
+    # Lat/lon are the merge axes — GEFS 1° global = 181 × 360.
+    assert ds.sizes["latitude"] == 181
+    assert ds.sizes["longitude"] == 360
+
+
+# ----------------------------- _select_nsw_box -----------------------------
+
+
+@pytest.mark.skipif(
+    not (FIXTURE_DIR / "gefs_2018-06-01_t00z_f024_tmax.grib2").exists(),
+    reason="GRIB fixture not present",
+)
+def test_select_nsw_box_subsets_to_bbox() -> None:
+    """NSW slice yields 10 lats × 14-15 lons at GEFS 1° resolution."""
+    ds = gfs._open_grib_dataset(_load_concat_fixture())
+    nsw = gfs._select_nsw_box(ds["tmax"])
+    assert nsw.sizes["latitude"] == 10
+    # 140.5..154.0 step 1° → 14 cells starting at 141.
+    assert nsw.sizes["longitude"] == 14
+    # First lat at the northern edge (closest to -28); last at southern.
+    assert float(nsw.latitude[0]) == -28.0
+    assert float(nsw.latitude[-1]) == -37.0
+
+
+# ----------------------------- Aggregation helpers -----------------------------
+
+
+def test_aggregate_per_variable_max_min_sum() -> None:
+    """Reducer applies correctly across the lead dimension."""
+    arr_a = xr.DataArray(np.array([[1.0, 2.0], [3.0, 4.0]]), dims=("latitude", "longitude"))
+    arr_b = xr.DataArray(np.array([[5.0, 1.0], [2.0, 7.0]]), dims=("latitude", "longitude"))
+    per_lead = {6: arr_a, 12: arr_b}
+    assert gfs._aggregate_per_variable(per_lead, "max").values.tolist() == [[5.0, 2.0], [3.0, 7.0]]
+    assert gfs._aggregate_per_variable(per_lead, "min").values.tolist() == [[1.0, 1.0], [2.0, 4.0]]
+    assert gfs._aggregate_per_variable(per_lead, "sum").values.tolist() == [[6.0, 3.0], [5.0, 11.0]]
+
+
+def test_aggregate_per_variable_rejects_unknown_reducer() -> None:
+    arr = xr.DataArray(np.array([1.0]), dims=("x",))
+    with pytest.raises(ValueError, match="reducer"):
+        gfs._aggregate_per_variable({0: arr}, "median")
+
+
+def test_aggregate_wind_speed_max_combines_u_and_v() -> None:
+    """U/V → speed = sqrt(U²+V²) per lead, then max across leads."""
+    # Lead 6: U=3, V=4 → speed=5.  Lead 12: U=6, V=8 → speed=10.
+    u = {
+        6: xr.DataArray(np.array([[3.0]]), dims=("latitude", "longitude")),
+        12: xr.DataArray(np.array([[6.0]]), dims=("latitude", "longitude")),
+    }
+    v = {
+        6: xr.DataArray(np.array([[4.0]]), dims=("latitude", "longitude")),
+        12: xr.DataArray(np.array([[8.0]]), dims=("latitude", "longitude")),
+    }
+    out = gfs._aggregate_wind_speed_max(u, v)
+    assert float(out.values[0, 0]) == pytest.approx(10.0)
+
+
+def test_aggregate_wind_speed_max_rejects_lead_mismatch() -> None:
+    arr = xr.DataArray(np.array([[1.0]]), dims=("latitude", "longitude"))
+    with pytest.raises(ValueError, match="mismatch"):
+        gfs._aggregate_wind_speed_max({6: arr}, {12: arr})
+
+
+# ----------------------------- End-to-end: fetch_and_write_one_day -----------------------------
+
+
+@pytest.fixture()
+def fixture_dataset():
+    """Load the 5-variable GEFS 2018-06-01 f024 fixture as a merged Dataset."""
+    if not all(
+        (FIXTURE_DIR / f"gefs_2018-06-01_t00z_f024_{v}.grib2").exists()
+        for v in FIXTURE_VARS
+    ):
+        pytest.skip("GRIB fixtures not present")
+    return gfs._open_grib_dataset(_load_concat_fixture())
+
+
+def test_fetch_and_write_one_day_single_horizon_e2e(tmp_path: Path, fixture_dataset) -> None:
+    """Full pipeline: mock the network layer with the fixture, drive
+    fetch_and_write_one_day for horizon 1, then read back the parquet and
+    sanity-check schema + value ranges."""
+
+    def _mock_fetch_lead(date: dt.date, cycle: str, lead_h: int, resolution: str):
+        # Same fixture for all 4 leads — exercises the multi-lead aggregation
+        # path even though the fixture only covers f024.
+        return fixture_dataset
+
+    with patch.object(gfs, "_fetch_lead", side_effect=_mock_fetch_lead):
+        paths = gfs.fetch_and_write_one_day(
+            dt.date(2018, 6, 1), tmp_path, horizons=(1,), cycle="00",
+        )
+
+    assert len(paths) == 1
+    assert paths[0].exists()
+    assert paths[0].name == "2018-06-01_h1.parquet"
+
+    df = pd.read_parquet(paths[0])
+    # 10 lats × 14 lons = 140 cells.
+    assert len(df) == 140
+    assert list(df.columns) == [
+        "lat_idx", "lon_idx", "lat", "lon",
+        "wx_temp_max_c", "wx_temp_min_c",
+        "wx_precipitation_mm", "wx_wind_speed_max_kmh",
+    ]
+    # June Sydney TMAX (K→C): broad sanity band.
+    assert -10.0 < df.wx_temp_max_c.min() < df.wx_temp_max_c.max() < 35.0
+    # Wind km/h: positive, bounded — fixture had max ~67 km/h over NSW.
+    assert df.wx_wind_speed_max_kmh.min() >= 0
+    assert df.wx_wind_speed_max_kmh.max() < 200.0
+    # Latitudes are negative (southern hemisphere).
+    assert (df["lat"] < 0).all()
+
+
+def test_fetch_and_write_one_day_multi_horizon_writes_one_per_horizon(
+    tmp_path: Path, fixture_dataset,
+) -> None:
+    """Multi-horizon: 3 horizons → 3 output parquets, each properly named."""
+    with patch.object(gfs, "_fetch_lead", side_effect=lambda *a, **kw: fixture_dataset):
+        paths = gfs.fetch_and_write_one_day(
+            dt.date(2018, 6, 1), tmp_path, horizons=(1, 2, 3), cycle="00",
+        )
+
+    assert len(paths) == 3
+    expected_names = {"2018-06-01_h1.parquet", "2018-06-01_h2.parquet", "2018-06-01_h3.parquet"}
+    assert {p.name for p in paths} == expected_names
+    # Each parquet has the same shape (same fixture → same cells).
+    for p in paths:
+        df = pd.read_parquet(p)
+        assert len(df) == 140
+
+
+def test_fetch_and_write_one_day_no_tmp_leftover(tmp_path: Path, fixture_dataset) -> None:
+    """Atomic write: after success, no `.tmp` files remain in the output dir."""
+    with patch.object(gfs, "_fetch_lead", side_effect=lambda *a, **kw: fixture_dataset):
+        gfs.fetch_and_write_one_day(
+            dt.date(2018, 6, 1), tmp_path, horizons=(1, 2), cycle="00",
+        )
+    leftovers = list(tmp_path.glob("*.tmp"))
+    assert leftovers == [], f"unexpected .tmp leftovers: {leftovers}"
+
+
+def test_fetch_and_write_one_day_cache_hit_skips_network(
+    tmp_path: Path, fixture_dataset,
+) -> None:
+    """If all per-(date, horizon) parquets exist and `force` is False, no fetch."""
+    # First call populates the cache.
+    with patch.object(gfs, "_fetch_lead", side_effect=lambda *a, **kw: fixture_dataset):
+        gfs.fetch_and_write_one_day(
+            dt.date(2018, 6, 1), tmp_path, horizons=(1,), cycle="00",
+        )
+    # Second call should NOT call _fetch_lead — assert via call count.
+    with patch.object(gfs, "_fetch_lead") as m:
+        paths = gfs.fetch_and_write_one_day(
+            dt.date(2018, 6, 1), tmp_path, horizons=(1,), cycle="00", force=False,
+        )
+        m.assert_not_called()
+    assert len(paths) == 1
+
+
+def test_fetch_and_write_one_day_force_refetches(
+    tmp_path: Path, fixture_dataset,
+) -> None:
+    """`force=True` overrides the cache and re-fetches every horizon."""
+    with patch.object(gfs, "_fetch_lead", side_effect=lambda *a, **kw: fixture_dataset):
+        gfs.fetch_and_write_one_day(
+            dt.date(2018, 6, 1), tmp_path, horizons=(1,), cycle="00",
+        )
+    with patch.object(
+        gfs, "_fetch_lead", side_effect=lambda *a, **kw: fixture_dataset,
+    ) as m:
+        gfs.fetch_and_write_one_day(
+            dt.date(2018, 6, 1), tmp_path, horizons=(1,), cycle="00", force=True,
+        )
+        # 4 leads for horizon 1 → 4 fetch calls when force=True.
+        assert m.call_count == 4
+
+
+# ----------------------------- fetch (date range) -----------------------------
+
+
+def test_fetch_range_iterates_dates_and_skips_cached(
+    tmp_path: Path, fixture_dataset,
+) -> None:
+    """`fetch()` walks the date range; pre-cached dates short-circuit the per-day path."""
+    # Seed the cache for 2018-06-01 only.
+    (tmp_path / "2018-06-01_h1.parquet").touch()
+
+    with patch.object(
+        gfs, "fetch_and_write_one_day",
+        side_effect=lambda date, out_dir, **kw: [
+            out_dir / f"{date.isoformat()}_h1.parquet",
+        ],
+    ) as m:
+        gfs.fetch(
+            start="2018-06-01", end="2018-06-03",
+            out_dir=tmp_path, horizons=(1,), cycle="00",
+        )
+        # 2 of the 3 days need a fetch (2018-06-02 and 2018-06-03).
+        # 2018-06-01 is cached at the outer loop and skipped.
+        assert m.call_count == 2
+
+
+def test_fetch_range_rejects_inverted_dates(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="must be <="):
+        gfs.fetch(start="2024-12-31", end="2024-01-01", out_dir=tmp_path)

@@ -96,17 +96,19 @@ def _classify_rate_limit(reason: str) -> OpenMeteoRateLimitError:
 
 
 def _is_retryable(exc: BaseException) -> bool:
-    """Tenacity predicate: retry transient errors + minutely 429s only.
+    """Tenacity predicate: retry transient errors, NEVER retry 429s of any kind.
 
-    Daily 429s (and unclassified 429s) abort immediately — retrying
-    burns more quota for nothing. Minutely 429s wait ~65s via the
-    tenacity exponential backoff and try again — the per-minute window
-    is short enough that retry pays off.
+    Lesson from 2026-05-27 attempts: each retry counts against Open-Meteo's
+    daily quota. A "smart minutely retry" loop sounds clever but consumed
+    ~2,300 quota units in 42 minutes when 2 workers triggered concurrent
+    "Too many concurrent requests" 429s repeatedly. The right strategy is:
+    don't retry the 429 in-process — let the station fail this run, and
+    the next run's cache check picks it up cleanly.
+
+    See docs/research/2026-05_weather_leakage_fix_resume_plan.md.
     """
-    if isinstance(exc, OpenMeteoMinutelyRateLimitError):
-        return True  # short-lived throttle, retry pays off
     if isinstance(exc, OpenMeteoRateLimitError):
-        return False  # daily / unknown — abort, don't burn quota
+        return False  # never retry any 429 — burns quota for nothing
     # Other RequestException / HTTPError / ConnectionError / Timeout: retry.
     return isinstance(exc, requests.RequestException | requests.HTTPError | OSError)
 
@@ -136,11 +138,8 @@ DEFAULT_INTER_CALL_SECONDS: float = 0.1
 
 
 @retry(
-    # Weather is the only fetcher hit by Open-Meteo's per-minute throttle;
-    # 7 attempts × exp backoff (max 90s) gives ~2+4+8+16+32+64 = 126s of
-    # total wait — covers a full 60s window plus headroom for retry-on-retry.
-    stop=stop_after_attempt(7),
-    wait=wait_exponential(multiplier=config.RETRY_BACKOFF_SECONDS, max=90),
+    stop=stop_after_attempt(config.RETRY_MAX_ATTEMPTS),
+    wait=wait_exponential(multiplier=config.RETRY_BACKOFF_SECONDS, max=30),
     retry=retry_if_exception(_is_retryable),
     reraise=True,
 )
@@ -155,11 +154,8 @@ def _request_daily(lat: float, lon: float, start: str, end: str) -> dict[str, An
 
 
 @retry(
-    # Weather is the only fetcher hit by Open-Meteo's per-minute throttle;
-    # 7 attempts × exp backoff (max 90s) gives ~2+4+8+16+32+64 = 126s of
-    # total wait — covers a full 60s window plus headroom for retry-on-retry.
-    stop=stop_after_attempt(7),
-    wait=wait_exponential(multiplier=config.RETRY_BACKOFF_SECONDS, max=90),
+    stop=stop_after_attempt(config.RETRY_MAX_ATTEMPTS),
+    wait=wait_exponential(multiplier=config.RETRY_BACKOFF_SECONDS, max=30),
     retry=retry_if_exception(_is_retryable),
     reraise=True,
 )

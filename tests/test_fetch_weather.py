@@ -97,12 +97,18 @@ def test_frame_from_payload_raises_on_missing_daily_block() -> None:
 
 
 def test_classify_rate_limit_minutely() -> None:
-    """A 'Minutely API request limit' reason → OpenMeteoMinutelyRateLimitError."""
+    """A 'Minutely API request limit' reason → OpenMeteoMinutelyRateLimitError.
+
+    Note: the subclass is preserved (carries the diagnostic message) but
+    we do NOT retry it — each in-process retry counts against the daily
+    quota, which 2026-05-27 experience proved is way more expensive than
+    just letting the station fail and re-running. See _is_retryable.
+    """
     reason = "Minutely API request limit exceeded. Please try again in one minute."
     err = weather._classify_rate_limit(reason)
     assert isinstance(err, weather.OpenMeteoMinutelyRateLimitError)
     assert isinstance(err, weather.OpenMeteoRateLimitError)
-    assert weather._is_retryable(err) is True  # short window, worth retrying
+    assert weather._is_retryable(err) is False  # no retries — burns daily quota
 
 
 def test_classify_rate_limit_daily() -> None:
@@ -362,16 +368,10 @@ def test_fetch_handles_missing_lat_lon(tmp_path: Path) -> None:
 
 @responses.activate
 def test_fetch_continues_on_per_station_failure(tmp_path: Path, stations_two: Path) -> None:
-    """One station failing shouldn't kill the whole run.
-
-    Weather has a custom 7-attempt retry (vs the project-wide
-    RETRY_MAX_ATTEMPTS=5) to span Open-Meteo's per-minute throttle
-    window. Mock 7 sequential 500s for s1 (exhausts the retry budget),
-    then a success for s2.
-    """
+    """One station failing shouldn't kill the whole run."""
     out_dir = tmp_path / "weather"
-    # First station call: HTTP 500 (exhausts the 7-attempt retry budget).
-    for _ in range(7):
+    # First station call: HTTP 500 (exhausts the RETRY_MAX_ATTEMPTS budget).
+    for _ in range(weather.config.RETRY_MAX_ATTEMPTS):
         responses.add(responses.GET, weather.FORECAST_URL, status=500)
     # Second station call: success. Post-2017 routes to forecast (spec §13.7).
     responses.add(

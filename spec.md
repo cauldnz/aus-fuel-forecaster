@@ -832,6 +832,17 @@ To be resolved during implementation, not blocking spec sign-off:
 
    Multi-horizon data path design + grid-cell caching architecture documented in [`docs/research/2026-06_nwp_archive_alternative.md`](docs/research/2026-06_nwp_archive_alternative.md) ("Multi-horizon extension" and "Grid-cell caching architecture" sections).
 
+9. **Self-hosted Open-Meteo (long-term weather-pipeline alternative)** — Open-Meteo publishes the server software open-source ([getting-started docs](https://github.com/open-meteo/open-meteo/blob/main/docs/getting-started.md)) and the underlying NWP data on a public S3 mirror. Running the Open-Meteo stack ourselves would give us:
+
+   - **No rate limits** (our own instance, our own resources)
+   - **Multi-day lead times** out of the box via their Previous Runs API — directly unblocks v2.1 §13.8 with the same Python client we already wrote (`src/fuel_pred/fetch/weather.py`), instead of the GFS GRIB pipeline (§13.7).
+   - **Pre-built variable derivations** including `weather_code` (the WMO code we null-stubbed in §13.7), wind gusts, cloud cover, etc. — recovers the small SHAP signal we discarded.
+   - **Same call signature** as the existing Open-Meteo fetcher, so the pivot is a config swap of `WEATHER_SOURCE=openmeteo` + a base-URL override pointing at our instance.
+
+   **Trade-off:** infra ownership. The Open-Meteo server has non-trivial system requirements (containerised, ~30 GB disk per model per global run, regular sync from S3). Worth it if v2.1+ weather work intensifies; not worth it for v2.0 alone (the §13.7 GFS pipeline already solves the rate-limit problem).
+
+   **Status: backlog, no current action.** Revisit when (a) v2.1 multi-horizon modelling work begins and the §13.7 GFS pipeline's parse-time cost becomes painful, OR (b) we want the richer Open-Meteo derived variables. Either trigger justifies the infra investment; v2.0 alone does not.
+
 ## 14. References
 
 - `abs-census-augmentor`: https://github.com/cauldnz/abs-census-augmentor

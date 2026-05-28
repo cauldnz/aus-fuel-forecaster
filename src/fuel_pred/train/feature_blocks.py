@@ -239,6 +239,11 @@ BLOCK_COLUMNS: dict[str, tuple[str, ...]] = {
     "ctx": CTX_COLUMNS,
     "stn": STN_COLUMNS,
     "wx": WX_COLUMNS,
+    # GFS variant of the weather block (spec §13.7 v2.0). The day-1-horizon
+    # columns only — the wider _t2..t7 horizons are in features.parquet
+    # (for v2.1 readiness) but excluded from the v2.0 model via
+    # EXCLUDE_FROM_FEATURES.
+    "wx_gfs": WX_COLUMNS_GFS_T1,
     "sa2": SA2_COLUMNS,
     "venue": VENUE_COLUMNS,
 }
@@ -257,6 +262,15 @@ MODEL_B_BLOCKS: tuple[str, ...] = (*MODEL_A_BLOCKS, "sa2")
 # they re-encode stn_is_metro / other existing features and Phase 2-3
 # AFL/NRL fixture work isn't justified.
 MODEL_B_PRIME_BLOCKS: tuple[str, ...] = (*MODEL_B_BLOCKS, "venue")
+
+# v2.0 GFS variants (spec §13.7). Same shape as MODEL_A_BLOCKS / MODEL_B_BLOCKS
+# but swap the Open-Meteo "wx" block for the GFS-day-1 "wx_gfs" block.
+# train_models picks between these and the Open-Meteo variants at fit-time
+# based on config.resolve_weather_source().
+MODEL_A_GFS_BLOCKS: tuple[str, ...] = (
+    "lag", "upstream", "cal", "ctx", "stn", "wx_gfs",
+)
+MODEL_B_GFS_BLOCKS: tuple[str, ...] = (*MODEL_A_GFS_BLOCKS, "sa2")
 
 
 # ---- Categoricals ----------------------------------------------------------

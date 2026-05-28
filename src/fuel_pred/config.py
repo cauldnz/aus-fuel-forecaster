@@ -102,6 +102,45 @@ WEATHER_FORECAST_COVERAGE_START: str = "2017-01-01"
 # throughput. Free registration at https://open-meteo.com/en/pricing.
 OPENMETEO_API_KEY: str | None = os.environ.get("OPENMETEO_API_KEY") or None
 
+# Weather data source selection (spec §13.7 v2.0).
+#   "gfs"      — strict-free path: NOAA GFS/GEFS via anonymous AWS S3
+#                byte-range subsetting. No API key, no quota, no 429s.
+#                Default for users without an Open-Meteo paid plan.
+#                Uses src/fuel_pred/fetch/gfs.py and the multi-horizon
+#                grid-cell parquets under RAW_WEATHER_GFS_DIR.
+#   "openmeteo"— optional paid-tier path: Open-Meteo Historical Forecast API.
+#                Strongly recommended with OPENMETEO_API_KEY set, otherwise
+#                free-tier rate limits make full-roster fetches infeasible
+#                (empirically: 4,587 NSW stations cannot complete in one day
+#                without a key; see docs/research/2026-05_weather_leakage_fix_resume_plan.md).
+#                Uses src/fuel_pred/fetch/weather.py and per-station parquets.
+#   "auto"     — pick "openmeteo" if OPENMETEO_API_KEY is set, else "gfs".
+#                Maintains backward-compat for users on the paid plan while
+#                defaulting new contributors to the strict-free path.
+WEATHER_SOURCE: Literal["gfs", "openmeteo", "auto"] = os.environ.get(  # type: ignore[assignment]
+    "WEATHER_SOURCE", "auto"
+)
+
+
+def resolve_weather_source() -> Literal["gfs", "openmeteo"]:
+    """Resolve "auto" to the actual source based on key availability.
+
+    Wrapped in a function (not just a module-level expression) so tests
+    can monkeypatch WEATHER_SOURCE / OPENMETEO_API_KEY without import-time
+    side-effects, and so the resolution is re-evaluated if env vars change
+    at runtime (e.g., when the user adds a key without restarting).
+    """
+    src = os.environ.get("WEATHER_SOURCE", WEATHER_SOURCE)
+    if src == "auto":
+        key = os.environ.get("OPENMETEO_API_KEY") or OPENMETEO_API_KEY
+        return "openmeteo" if key else "gfs"
+    if src not in {"gfs", "openmeteo"}:
+        raise ValueError(
+            f"Invalid WEATHER_SOURCE={src!r}. Must be 'gfs', 'openmeteo', or 'auto'."
+        )
+    return src  # type: ignore[return-value]
+
+
 # ----------------------------- Modeling -----------------------------
 
 LGBM_PARAMS: dict[str, object] = {

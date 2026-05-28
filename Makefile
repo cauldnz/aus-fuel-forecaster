@@ -69,11 +69,21 @@ fetch-weather:
 	$(PYTHON) -m $(PKG).fetch.weather --stations $(DATA_INTERIM)/stations.parquet --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/weather
 
 # Strict-free NOAA GFS/GEFS fetch via anonymous AWS S3 byte-range subsetting.
-# No API key, no rate limits. One-time backfill is ~10-14h wall-clock for the
-# full 2017-2026 × 7-horizon roster (unattended). Incremental daily refresh is
-# ~30s download + ~2 min parse. See spec §13.7 / docs/research/2026-06_nwp_archive_alternative.md.
+# No API key, no rate limits. Defaults to horizon=1 only (what the v2.0 model
+# actually consumes via WX_COLUMNS_GFS_T1); the wider _t2..t7 horizons are
+# v2.1 readiness and can be fetched later as a separate pass — empirical
+# per-lead cost is ~12s dominated by cfgrib parsing, so multi-horizon over
+# the full 9.5y is ~3-4 days at 4 workers (not worth bundling with v2.0).
+#
+# Tonight's run: 3529 dates × 4 leads × ~12s / 8 workers ≈ 1.5h. Resume-safe:
+# atomic writes (.tmp + rename) + cache-aware skip (per-(date, horizon)
+# parquet existence). Override knobs:
+#   make fetch-weather-gfs HORIZONS=1,2,3,4,5,6,7  → full multi-horizon
+#   make fetch-weather-gfs WORKERS=16              → push parallelism harder
+HORIZONS ?= 1
+WORKERS ?= 8
 fetch-weather-gfs:
-	$(PYTHON) tools/parallel_gfs_fetch.py --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/weather_gfs --horizons 1,2,3,4,5,6,7 --workers 4
+	$(PYTHON) tools/parallel_gfs_fetch.py --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/weather_gfs --horizons $(HORIZONS) --workers $(WORKERS)
 
 # One-shot station → GFS grid mapping. Re-run only if stations.parquet changes.
 # Output is bilinear-weight indices into the GFS 0.25°, GEFS 0.5°, GEFS 1° grids.

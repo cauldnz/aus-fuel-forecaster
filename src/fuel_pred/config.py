@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 
@@ -44,6 +45,18 @@ STATIC_MAJOR_VENUES: Path = DATA_STATIC / "major_venues.csv"
 # when absent, the venue feature columns ship as nulls (consistent with
 # the pattern used for aip_tgp / cash_rate / asx200 in §7.4).
 INTERIM_STATIONS_VENUES: Path = DATA_INTERIM / "stations_venues.parquet"
+
+# NOAA GFS/GEFS weather pipeline (spec §13.7 v2.0). Both paths are
+# populated by Session 1/2/3 code:
+#   - INTERIM_STATION_GRID_MAPPING: per-station 4-neighbour bilinear
+#     weights against each of the three GFS/GEFS grid resolutions
+#     (gfs 0.25°, gefs05 0.5°, gefs1 1°). One-shot computation via
+#     ``python -m fuel_pred.spatial.gfs_grid``.
+#   - RAW_WEATHER_GFS_DIR: per-(date, horizon) NSW-box grid parquets
+#     named ``<YYYY-MM-DD>_h<N>.parquet``. Populated by
+#     ``tools/parallel_gfs_fetch.py`` (Session 2).
+INTERIM_STATION_GRID_MAPPING: Path = DATA_INTERIM / "station_grid_mapping.parquet"
+RAW_WEATHER_GFS_DIR: Path = DATA_RAW / "weather_gfs"
 
 # ----------------------------- Span -----------------------------
 

@@ -286,6 +286,15 @@ CATEGORICAL_COLUMNS: frozenset[str] = frozenset(
         "wx_weather_code",
         # Venue type — small categorical (~3 levels in the pilot list).
         "stn_nearest_venue_type",
+        # Day-1 GFS weather code (spec §13.7 v2.0). GFS/GEFS doesn't emit
+        # WMO codes so this is null-stubbed today, but listing it as
+        # categorical means LightGBM treats the column type correctly if
+        # a derivation lands later. Session 3 flagged the missing suffixed
+        # entry as a future-pitfall. The wider _t2..t7 horizons are not
+        # added here — they're not in any BLOCK_COLUMNS entry yet (v2.0
+        # model uses only _t1); add them in v2.1 alongside the new
+        # multi-horizon block.
+        "wx_weather_code_t1",
     }
 )
 

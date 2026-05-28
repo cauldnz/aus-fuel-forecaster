@@ -203,6 +203,20 @@ def test_wx_gfs_block_in_block_columns() -> None:
     assert len(fb.BLOCK_COLUMNS["wx_gfs"]) == 5  # 5 wx_* vars, day-1 only
 
 
+def test_wx_weather_code_t1_is_categorical() -> None:
+    """The day-1 GFS weather code is categorical (spec §13.7 v2.0).
+
+    GFS/GEFS doesn't emit WMO codes — this is null today — but listing
+    it as categorical means LightGBM treats the column type correctly
+    if a derivation lands later. Session 3 flagged the missing suffixed
+    entry as a future-pitfall; Session 4a fixes it.
+    Wider _t2..t7 horizons are added in v2.1 alongside the multi-horizon
+    block; they're deliberately NOT in CATEGORICAL_COLUMNS yet because
+    they're not in any BLOCK_COLUMNS entry (subset invariant).
+    """
+    assert "wx_weather_code_t1" in fb.CATEGORICAL_COLUMNS
+
+
 def test_wx_gfs_block_excludes_multi_horizon_columns() -> None:
     """wx_gfs is t1-only; _t2..t7 cols must NOT be in MODEL_*_GFS_BLOCKS expansion."""
     # All cols implied by MODEL_B_GFS_BLOCKS

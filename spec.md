@@ -793,20 +793,32 @@ To be resolved during implementation, not blocking spec sign-off:
 
 7. **Weather leakage fix (v2.0)** — v1's `wx_*` columns join Open-Meteo ERA5 *reanalysis actuals* on the same date as the prediction row, which means the model sees retrospective truth rather than the forecast a real-time predictor would have. `results/README.md` caveat #4 acknowledges this; absolute MAE is optimistic, though the A-vs-B comparison is unbiased (both models leak equally).
 
-   **Status: pivoted to NOAA GFS/GEFS — Open-Meteo free tier proved unworkable at scale; research complete, ready to build with new source.**
+   **Status: code complete (Sessions 1-4a landed); production fetch + retrain pending (Session 4b — ~10-14h unattended overnight job).**
 
    Original plan: [`docs/research/2026-05_weather_leakage_fix.md`](docs/research/2026-05_weather_leakage_fix.md) (Open-Meteo Historical Forecast API). Pre-flight at [`docs/research/2026-05_weather_leakage_preflight.md`](docs/research/2026-05_weather_leakage_preflight.md). **Empirical reality**: 2026-05-26/27 attempts to refetch all 4,587 NSW stations hit Open-Meteo's per-minute/per-hour/per-day rate limits within minutes, with each 429 itself counting against the daily quota — three attempts burned through the daily 10,000-call cap before completing ~3% of the fetch. The free tier is unworkable at this volume.
 
-   **Revised plan**: [`docs/research/2026-06_nwp_archive_alternative.md`](docs/research/2026-06_nwp_archive_alternative.md). Strict-free path via **NOAA GFS 0.25°** (2021-04+) + **NOAA GEFS 1°/0.5°** (2017-01 → 2021-03) on anonymous AWS S3 buckets — no key, no quota, no 429s. Trade-off: ~5-6 hour one-time backfill via GRIB byte-range subsetting (vs Open-Meteo's theoretical 150s burst that gets throttled anyway). Open-Meteo path retained as optional paid-tier upgrade via `WEATHER_SOURCE=openmeteo` config switch + `OPENMETEO_API_KEY` env var (both already wired up on the v2 branch).
+   **Revised plan**: [`docs/research/2026-06_nwp_archive_alternative.md`](docs/research/2026-06_nwp_archive_alternative.md). Strict-free path via **NOAA GFS 0.25°** (2021-04+) + **NOAA GEFS 1°/0.5°** (2017-01 → 2021-03) on anonymous AWS S3 buckets — no key, no quota, no 429s. Trade-off: ~10-14 hour one-time backfill via GRIB byte-range subsetting (7 horizons × 9 years of data). Open-Meteo path retained as optional paid-tier upgrade via `WEATHER_SOURCE=openmeteo` config switch + `OPENMETEO_API_KEY` env var.
+
+   **Code landed (4 implementation commits + Session 4a wiring):**
+   - Session 1 (`17f491c`): GFS scaffolding + `spatial/gfs_grid.py` station-grid mapping
+   - Session 2 (`14c9e2e`): `fetch/gfs.py` multi-horizon fetcher + `tools/parallel_gfs_fetch.py` orchestrator
+   - Session 3 (`86f2071`): `build/make_features.py` `add_weather_features_gfs()` with bilinear interp + 35-column wide schema
+   - Session 4a (`8ae01b7`, `4a7f9bc`, `3d3c4e8`, `25c651e`, `cb91719`, `36df15d`): `WEATHER_SOURCE` config router, `MODEL_*_GFS_BLOCKS`, `train_models` dispatch, categorical fix, `make_features` orchestrator dispatch, Makefile targets
+
+   **`WEATHER_SOURCE` env var contract:**
+   - `auto` (default): picks `openmeteo` if `OPENMETEO_API_KEY` is set, else `gfs`
+   - `gfs`: strict-free NOAA GFS/GEFS path
+   - `openmeteo`: optional paid-tier Open-Meteo path
+
+   **2016-09 → 2016-12 gap decision: null-stub for v2.0.** Recommended in the research doc was a one-time Open-Meteo Archive backfill, but today's evidence (Open-Meteo free-tier rate limits make even small fetches finicky) makes the deferred approach cleaner. 2016 Sept-Dec is 2.2% of training rows, train fold only — val (2023) and test_normal (2024-25) and test_crisis (2026) all use post-2017 dates with 100% wx coverage. LightGBM handles nulls natively. If post-retrain SHAP shows the 2016 nulls cost more than expected, the backfill is a clean v2.0.1 follow-up.
 
    Headlines:
 
-   - **Sources:** NOAA GFS 0.25° + GEFS 1° + GEFS 0.5° hybrid; 2016-09 → 2016-12 tail via one-time Open-Meteo Archive (4,587 calls, run overnight at 1s spacing — fits free-tier ceiling).
+   - **Sources:** NOAA GFS 0.25° + GEFS 1° + GEFS 0.5° hybrid for 2017-01 → present.
    - **Spatial smartness:** grid-cell caching, not per-station. ~600 unique GFS cells cover the 4,587-station NSW roster (many stations resolve to the same cell, especially in Sydney metro). Per-(date, lead) grid parquet + pre-computed `station_grid_mapping.parquet` with bilinear interpolation weights. Adding new stations later requires no API calls.
-   - **Join change:** shift weather `date` by −1 day before merging. Panel row at `t` then receives the day-ahead NWP forecast for `t+1` (issued on `t`), matching deployment. Mechanics unchanged from the original Open-Meteo plan.
+   - **Join semantics:** GFS parquet `<date>_h<N>.parquet` carries the forecast *issued on `date`, valid on `date + N` days*. Panel row at `t` reads `<t>_h<N>.parquet` directly — **no date shift needed** (unlike the Open-Meteo path which stored valid-date and required a -1d shift).
    - **Expected absolute MAE rise:** 0.05-0.15 c/L. A-vs-B Δ MAE unchanged.
-   - **Methodological compromises:** `wx_weather_code` becomes null-stub (GFS/GEFS doesn't emit WMO codes; low SHAP rank); UTC vs Sydney day-boundary aggregation shifts daily aggregates by ~10h (low-rank feature, acceptable).
-   - **Effort:** 4 sessions total — bundled with §13.8 multi-horizon support from day one (see below). Wall-clock 10-14 hours for one-time backfill (unattended).
+   - **Methodological compromises:** `wx_weather_code` becomes null-stub (GFS/GEFS doesn't emit WMO codes; low SHAP rank); UTC vs Sydney day-boundary aggregation shifts daily aggregates by ~10h (low-rank feature, acceptable). 2016-09 → 2016-12 wx columns are null (~2.2% of training rows, train fold only).
 
 8. **7-day forecast horizon (v2.1)** — extend v1's 1-day prediction (`y_t1`) to per-day predictions for t+1 through t+7. Substantial architectural change: target schema, multi-horizon feature engineering, per-horizon model training, evaluation.
 

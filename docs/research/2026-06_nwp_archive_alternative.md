@@ -396,6 +396,21 @@ Total: **4 sessions of code + ~10-14 hours wall-clock for the one-time backfill*
 
 After this lands, v2.1 (the 7-day modelling work in [`2026-05_7day_forecast_horizon.md`](2026-05_7day_forecast_horizon.md)) becomes a clean 5-8 session follow-up with no data-pipeline blocker.
 
+## 2016 gap decision (v2.0) — recorded 2026-05-28
+
+The pre-2021 gap strategy section above recommends a one-time Open-Meteo Archive (ERA5) backfill for 2016-09-01 → 2016-12-31 (~4,587 calls at slow pace, overnight). **For v2.0 we chose to defer this** and ship null-stub for that window.
+
+**Why deferred:**
+- Today's empirical evidence (2026-05-26/27/28) showed that even small Open-Meteo Archive backfills are sensitive to the daily 10,000-call quota — burned by retries and concurrent attempts. A 4,587-call backfill is doable in principle but adds operational complexity (separate fetch step, separate cache location, separate format conversion to merge into the GFS grid parquets).
+- 2016-09 → 2016-12 is ~2.2% of training rows, and lives entirely within the train fold (val starts 2023, test_normal 2024, test_crisis 2026). Val and test metrics are unaffected.
+- LightGBM null-handling is robust; the 2.2% of train rows with null `wx_*_t1` will simply not contribute to wx-feature-based splits during boosting on those rows.
+
+**Re-enable when:**
+- Post-v2.0 retrain SHAP shows that the 2016 nulls materially hurt training (e.g. `wx_temp_max_c_t1` SHAP rank degrades vs the v1 ERA5-leaky baseline by more than 0.05 c/L), OR
+- An Open-Meteo paid plan is available (the backfill is trivial with `OPENMETEO_API_KEY` set) — `WEATHER_SOURCE=openmeteo` for the 2016 window only would also work.
+
+The deferral is purely operational — the architecture supports the backfill cleanly, and a future `tools/backfill_weather_2016.py` driver writing per-(date, horizon=1) grid parquets in the GFS schema for the 2016 window can drop in without any other code change. Recorded as a v2.0.1 follow-up if SHAP justifies.
+
 ## See also
 
 - [`docs/research/2026-05_weather_leakage_fix.md`](2026-05_weather_leakage_fix.md) — the original v2 plan; this doc replaces the source choice from "Open-Meteo HFA" to "GFS+GEFS hybrid" but keeps the 1-day shift mechanics intact

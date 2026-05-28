@@ -123,9 +123,15 @@ Top 5 SA2 features by mean |SHAP| on the test_normal sample:
    SA2 features (the 31-col experiment) overfit. The augmentor's effective new dimensionality for
    short-horizon fuel-price prediction is modest.
 
-4. **Weather is a known leakage compromise (spec §7.6).** v1 uses ERA5 reanalysis across the full span
-   rather than forecast-at-lead-time-1. This affects both models identically, so it doesn't bias the
-   A-vs-B comparison, but absolute MAE figures are optimistic. v2 should switch to the Previous-Runs API.
+4. **Weather is a known leakage compromise in v1 (spec §7.6).** v1 uses ERA5 reanalysis across the full
+   span rather than forecast-at-lead-time-1. This affects both models identically, so it doesn't bias the
+   A-vs-B comparison, but absolute MAE figures are optimistic.
+
+   **v2.0 corrects this** via NOAA GFS/GEFS forecast data (spec §13.7). All code landed on
+   the `claude/weather-leakage-fix-v2` branch; production fetch + retrain (~10-14h unattended) pending.
+   See [`docs/research/2026-06_nwp_archive_alternative.md`](../docs/research/2026-06_nwp_archive_alternative.md).
+   The numbers in this README are the v1 leaky baseline — v2 will land alongside an "outcome" doc
+   showing the v1 → v2 absolute MAE delta. The A-vs-B Δ MAE is expected to be unchanged.
 
 ---
 

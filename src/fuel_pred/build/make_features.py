@@ -1168,13 +1168,15 @@ def make_features(
     §13.6 Phase 1) is likewise optional: when None or missing, the
     venue columns ship as null.
 
-    GFS weather source (spec §13.7 v2.0 + §13.8 v2.1): if BOTH
-    ``weather_gfs_dir`` and ``station_grid_mapping_path`` are provided
-    AND exist, the multi-horizon wide-schema GFS path
-    (``add_weather_features_gfs``) is used instead of the per-station
-    Open-Meteo path. Otherwise falls back to ``add_weather_features``
-    (Open-Meteo). Session 4 will add the formal ``WEATHER_SOURCE``
-    config switch; for now the routing is purely None-tolerant.
+    GFS weather source (spec §13.7 v2.0 + §13.8 v2.1): when
+    ``config.resolve_weather_source() == "gfs"`` the multi-horizon
+    wide-schema GFS path (``add_weather_features_gfs``) is used instead
+    of the per-station Open-Meteo path. With WEATHER_SOURCE=auto and no
+    OPENMETEO_API_KEY this is the default. When the resolved source is
+    "openmeteo", the existing ``add_weather_features`` runs — same as v1.
+
+    Both paths are None-tolerant on their respective inputs: missing
+    dirs / mappings → null wx columns, no crash.
     """
     logger.info("starting feature build: %d panel rows", len(panel))
 
@@ -1203,23 +1205,24 @@ def make_features(
     )
     logger.info("after stn block: %d cols", len(df.columns))
 
-    # Weather: GFS multi-horizon takes precedence if both inputs supplied
-    # AND exist; else Open-Meteo. Session 4 will add the formal config
-    # switch. (Existence checks live in the called functions so callers
-    # can pass paths that don't exist yet — graceful-null fallback.)
-    use_gfs = (
-        weather_gfs_dir is not None
-        and weather_gfs_dir.exists()
-        and station_grid_mapping_path is not None
-        and station_grid_mapping_path.exists()
-    )
-    if use_gfs:
+    # Weather: dispatch on the WEATHER_SOURCE config router (spec §13.7).
+    #   "gfs":       multi-horizon wide-schema GFS path via
+    #                add_weather_features_gfs (None-tolerant on
+    #                weather_gfs_dir / station_grid_mapping_path).
+    #   "openmeteo": legacy per-station path via add_weather_features
+    #                (None-tolerant on weather_dir).
+    # Both paths' None-tolerance is intentional — callers can pass paths
+    # that don't exist yet and the wx columns simply ship as null.
+    weather_source = config.resolve_weather_source()
+    if weather_source == "gfs":
+        logger.info("weather source: gfs (spec §13.7 v2.0)")
         df = add_weather_features_gfs(
             df,
             weather_gfs_dir=weather_gfs_dir,
             station_grid_mapping_path=station_grid_mapping_path,
         )
     else:
+        logger.info("weather source: openmeteo (legacy / paid-tier path)")
         df = add_weather_features(df, weather_dir=weather_dir)
     logger.info("after weather block: %d cols", len(df.columns))
 
@@ -1276,6 +1279,10 @@ def make_features_from_paths(
         inflation_expectations_path or raw / "inflation_expectations.parquet"
     )
     stations_venues_path = stations_venues_path or config.INTERIM_STATIONS_VENUES
+    # GFS-path defaults — config.resolve_weather_source() decides whether
+    # they're actually used; None-tolerant on the receiving side.
+    weather_gfs_dir = weather_gfs_dir or config.RAW_WEATHER_GFS_DIR
+    station_grid_mapping_path = station_grid_mapping_path or config.INTERIM_STATION_GRID_MAPPING
 
     panel = pd.read_parquet(panel_path)
     brent = pd.read_parquet(brent_path)

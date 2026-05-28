@@ -56,9 +56,29 @@ fetch-tier1:
 
 # Weather fetch needs the post-clean stations roster for lat/lons — runs as
 # a separate target and requires `make clean-data` (or `make enrich`) first.
-.PHONY: fetch-weather
+#
+# Two weather paths land in different targets per spec §13.7:
+#   fetch-weather      → Open-Meteo (paid-tier path; needs OPENMETEO_API_KEY)
+#   fetch-weather-gfs  → NOAA GFS/GEFS via anonymous AWS S3 (strict-free)
+#
+# Which one feeds `make features` is decided by the WEATHER_SOURCE env
+# var (or its "auto" default — picks openmeteo if OPENMETEO_API_KEY is
+# set, else gfs).
+.PHONY: fetch-weather fetch-weather-gfs station-grid-mapping
 fetch-weather:
 	$(PYTHON) -m $(PKG).fetch.weather --stations $(DATA_INTERIM)/stations.parquet --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/weather
+
+# Strict-free NOAA GFS/GEFS fetch via anonymous AWS S3 byte-range subsetting.
+# No API key, no rate limits. One-time backfill is ~10-14h wall-clock for the
+# full 2017-2026 × 7-horizon roster (unattended). Incremental daily refresh is
+# ~30s download + ~2 min parse. See spec §13.7 / docs/research/2026-06_nwp_archive_alternative.md.
+fetch-weather-gfs:
+	$(PYTHON) tools/parallel_gfs_fetch.py --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/weather_gfs --horizons 1,2,3,4,5,6,7 --workers 4
+
+# One-shot station → GFS grid mapping. Re-run only if stations.parquet changes.
+# Output is bilinear-weight indices into the GFS 0.25°, GEFS 0.5°, GEFS 1° grids.
+station-grid-mapping:
+	$(PYTHON) -m $(PKG).spatial.gfs_grid --stations $(DATA_INTERIM)/stations.parquet --out $(DATA_INTERIM)/station_grid_mapping.parquet
 
 fetch-tier2:
 	$(PYTHON) -m $(PKG).fetch.cash_rate --start $(START_DATE) --end $(END_DATE) --out $(DATA_RAW)/cash_rate.parquet
@@ -78,10 +98,10 @@ enrich: clean-data
 	$(PYTHON) -m $(PKG).spatial.resolve_addrs --in $(DATA_INTERIM)/stations.parquet --out $(DATA_INTERIM)/stations.parquet
 	$(PYTHON) -m $(PKG).build.enrich_census --in $(DATA_INTERIM)/stations.parquet --out $(DATA_INTERIM)/stations.parquet --data-dir $(DATA_RAW)
 
-features: enrich
+features: enrich station-grid-mapping
 	$(PYTHON) -m $(PKG).spatial.nearest --stations $(DATA_INTERIM)/stations.parquet --counters $(DATA_INTERIM)/traffic_stations.parquet --out $(DATA_INTERIM)/station_to_counter.parquet
 	$(PYTHON) -m $(PKG).build.panel_grid --stations $(DATA_INTERIM)/stations.parquet --fuel $(DATA_INTERIM)/fuel_daily.parquet --out $(DATA_INTERIM)/panel.parquet
-	$(PYTHON) -m $(PKG).build.make_features --panel $(DATA_INTERIM)/panel.parquet --out $(DATA_PROCESSED)/features.parquet
+	$(PYTHON) -m $(PKG).build.make_features --panel $(DATA_INTERIM)/panel.parquet --out $(DATA_PROCESSED)/features.parquet --weather-gfs-dir $(DATA_RAW)/weather_gfs --station-grid-mapping $(DATA_INTERIM)/station_grid_mapping.parquet
 
 # ----------------------------- Train + evaluate -----------------------------
 #
@@ -152,9 +172,18 @@ notebooks:
 	uv run jupyter nbconvert --to notebook --execute --inplace notebooks/03_explainability.ipynb
 
 # ----------------------------- All -----------------------------
+#
+# `all` runs the full pipeline end-to-end using the strict-free GFS
+# weather path (spec §13.7 v2.0 default). The GFS one-time backfill is
+# ~10-14h wall-clock — run `make all` overnight on a clean checkout.
+#
+# For the Open-Meteo paid-tier path:
+#   1. set WEATHER_SOURCE=openmeteo (and OPENMETEO_API_KEY=...)
+#   2. run: make fetch fetch-tier2 fetch-weather enrich features train evaluate notebooks
+# (i.e., substitute `fetch-weather` for `fetch-weather-gfs`).
 
 .PHONY: all
-all: fetch fetch-tier2 features train evaluate notebooks
+all: fetch fetch-tier2 fetch-weather-gfs features train evaluate notebooks
 
 # ----------------------------- Quality -----------------------------
 

@@ -130,6 +130,32 @@ WX_COLUMNS: tuple[str, ...] = (
     "wx_weather_code",
 )
 
+# §7.6 Weather block — multi-horizon GFS variant (spec §13.7 v2.0 + §13.8 v2.1)
+# For v2.0 (1-day-ahead model), only the _t1 columns are consumed by the model.
+# All horizons present in features.parquet so v2.1 can land without re-fetch.
+WX_COLUMNS_GFS_T1: tuple[str, ...] = (
+    "wx_temp_max_c_t1",
+    "wx_temp_min_c_t1",
+    "wx_precipitation_mm_t1",
+    "wx_wind_speed_max_kmh_t1",
+    "wx_weather_code_t1",
+)
+
+# v2.1 readiness — all 7 horizons. Not yet consumed by Model A/B; recorded in
+# features.parquet so Session 4 (config switch) + v2.1 (7-day model) can pick
+# them up without a re-fetch.
+WX_COLUMNS_GFS_ALL_HORIZONS: tuple[str, ...] = tuple(
+    f"wx_{var}_t{h}"
+    for h in range(1, 8)
+    for var in (
+        "temp_max_c",
+        "temp_min_c",
+        "precipitation_mm",
+        "wind_speed_max_kmh",
+        "weather_code",
+    )
+)
+
 # §7.7 SA2 demographic block — the augmentor block; the ONLY difference
 # between Models A and B.
 #
@@ -213,6 +239,11 @@ BLOCK_COLUMNS: dict[str, tuple[str, ...]] = {
     "ctx": CTX_COLUMNS,
     "stn": STN_COLUMNS,
     "wx": WX_COLUMNS,
+    # GFS variant of the weather block (spec §13.7 v2.0). The day-1-horizon
+    # columns only — the wider _t2..t7 horizons are in features.parquet
+    # (for v2.1 readiness) but excluded from the v2.0 model via
+    # EXCLUDE_FROM_FEATURES.
+    "wx_gfs": WX_COLUMNS_GFS_T1,
     "sa2": SA2_COLUMNS,
     "venue": VENUE_COLUMNS,
 }
@@ -232,6 +263,15 @@ MODEL_B_BLOCKS: tuple[str, ...] = (*MODEL_A_BLOCKS, "sa2")
 # AFL/NRL fixture work isn't justified.
 MODEL_B_PRIME_BLOCKS: tuple[str, ...] = (*MODEL_B_BLOCKS, "venue")
 
+# v2.0 GFS variants (spec §13.7). Same shape as MODEL_A_BLOCKS / MODEL_B_BLOCKS
+# but swap the Open-Meteo "wx" block for the GFS-day-1 "wx_gfs" block.
+# train_models picks between these and the Open-Meteo variants at fit-time
+# based on config.resolve_weather_source().
+MODEL_A_GFS_BLOCKS: tuple[str, ...] = (
+    "lag", "upstream", "cal", "ctx", "stn", "wx_gfs",
+)
+MODEL_B_GFS_BLOCKS: tuple[str, ...] = (*MODEL_A_GFS_BLOCKS, "sa2")
+
 
 # ---- Categoricals ----------------------------------------------------------
 
@@ -246,6 +286,15 @@ CATEGORICAL_COLUMNS: frozenset[str] = frozenset(
         "wx_weather_code",
         # Venue type — small categorical (~3 levels in the pilot list).
         "stn_nearest_venue_type",
+        # Day-1 GFS weather code (spec §13.7 v2.0). GFS/GEFS doesn't emit
+        # WMO codes so this is null-stubbed today, but listing it as
+        # categorical means LightGBM treats the column type correctly if
+        # a derivation lands later. Session 3 flagged the missing suffixed
+        # entry as a future-pitfall. The wider _t2..t7 horizons are not
+        # added here — they're not in any BLOCK_COLUMNS entry yet (v2.0
+        # model uses only _t1); add them in v2.1 alongside the new
+        # multi-horizon block.
+        "wx_weather_code_t1",
     }
 )
 
@@ -290,6 +339,24 @@ EXCLUDE_FROM_FEATURES: frozenset[str] = frozenset(
         "sa2_name",
         # Counter join key, kept for traceability.
         "counter_id",
+        # GFS multi-horizon wx_*_tN columns for horizons 2..7 — written to
+        # features.parquet (spec §13.8 v2.1 forward-readiness) but NOT used
+        # by the v2.0 1-day-ahead model. Only `_t1` columns reach Model A/B
+        # via WX_COLUMNS_GFS_T1 (which Session 4 will route through
+        # MODEL_*_GFS_BLOCKS). Excluding them here prevents an accidental
+        # `feature_columns(df, blocks)` call from leaking forward-horizon
+        # features into the v2.0 model.
+        *(
+            f"wx_{var}_t{h}"
+            for h in range(2, 8)
+            for var in (
+                "temp_max_c",
+                "temp_min_c",
+                "precipitation_mm",
+                "wind_speed_max_kmh",
+                "weather_code",
+            )
+        ),
     }
 )
 

@@ -2,10 +2,23 @@
 
 CLAUDE.md forbids hard-coded paths in pipeline modules — they must come from
 this file (or be passed in via CLI arguments).
+
+Secrets (API keys, OAuth tokens) live in a gitignored `.env` file at the
+repo root. They're loaded on import via `python-dotenv`. See `.env.example`
+for the template and the keys the project understands.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Literal
+
+from dotenv import load_dotenv
+
+# Load .env from the repo root if present. find_dotenv would also search
+# parent dirs but we want the project-local file specifically.
+_REPO_ROOT_FOR_ENV = Path(__file__).resolve().parents[2]
+load_dotenv(_REPO_ROOT_FOR_ENV / ".env", override=False)
 
 # ----------------------------- Paths -----------------------------
 
@@ -32,6 +45,18 @@ STATIC_MAJOR_VENUES: Path = DATA_STATIC / "major_venues.csv"
 # when absent, the venue feature columns ship as nulls (consistent with
 # the pattern used for aip_tgp / cash_rate / asx200 in §7.4).
 INTERIM_STATIONS_VENUES: Path = DATA_INTERIM / "stations_venues.parquet"
+
+# NOAA GFS/GEFS weather pipeline (spec §13.7 v2.0). Both paths are
+# populated by Session 1/2/3 code:
+#   - INTERIM_STATION_GRID_MAPPING: per-station 4-neighbour bilinear
+#     weights against each of the three GFS/GEFS grid resolutions
+#     (gfs 0.25°, gefs05 0.5°, gefs1 1°). One-shot computation via
+#     ``python -m fuel_pred.spatial.gfs_grid``.
+#   - RAW_WEATHER_GFS_DIR: per-(date, horizon) NSW-box grid parquets
+#     named ``<YYYY-MM-DD>_h<N>.parquet``. Populated by
+#     ``tools/parallel_gfs_fetch.py`` (Session 2).
+INTERIM_STATION_GRID_MAPPING: Path = DATA_INTERIM / "station_grid_mapping.parquet"
+RAW_WEATHER_GFS_DIR: Path = DATA_RAW / "weather_gfs"
 
 # ----------------------------- Span -----------------------------
 
@@ -65,6 +90,56 @@ USER_AGENT: str = "fuel-pred/0.1 (https://github.com/cauldnz/fuel-prediction)"
 REQUEST_TIMEOUT: int = 30
 RETRY_MAX_ATTEMPTS: int = 5
 RETRY_BACKOFF_SECONDS: float = 2.0
+
+# Historical Forecast API coverage start for Australia (empirically probed,
+# preflight 2026-05). Below this date, ERA5 archive is used as a fallback in
+# fetch.weather. See docs/research/2026-05_weather_leakage_preflight.md.
+WEATHER_FORECAST_COVERAGE_START: str = "2017-01-01"
+
+# Open-Meteo API key — loaded from .env (or environment). When set, the key
+# is appended to every Open-Meteo request and raises the free-tier rate
+# limits ~10x. None (no key) is fine but limits the parallel fetch
+# throughput. Free registration at https://open-meteo.com/en/pricing.
+OPENMETEO_API_KEY: str | None = os.environ.get("OPENMETEO_API_KEY") or None
+
+# Weather data source selection (spec §13.7 v2.0).
+#   "gfs"      — strict-free path: NOAA GFS/GEFS via anonymous AWS S3
+#                byte-range subsetting. No API key, no quota, no 429s.
+#                Default for users without an Open-Meteo paid plan.
+#                Uses src/fuel_pred/fetch/gfs.py and the multi-horizon
+#                grid-cell parquets under RAW_WEATHER_GFS_DIR.
+#   "openmeteo"— optional paid-tier path: Open-Meteo Historical Forecast API.
+#                Strongly recommended with OPENMETEO_API_KEY set, otherwise
+#                free-tier rate limits make full-roster fetches infeasible
+#                (empirically: 4,587 NSW stations cannot complete in one day
+#                without a key; see docs/research/2026-05_weather_leakage_fix_resume_plan.md).
+#                Uses src/fuel_pred/fetch/weather.py and per-station parquets.
+#   "auto"     — pick "openmeteo" if OPENMETEO_API_KEY is set, else "gfs".
+#                Maintains backward-compat for users on the paid plan while
+#                defaulting new contributors to the strict-free path.
+WEATHER_SOURCE: Literal["gfs", "openmeteo", "auto"] = os.environ.get(  # type: ignore[assignment]
+    "WEATHER_SOURCE", "auto"
+)
+
+
+def resolve_weather_source() -> Literal["gfs", "openmeteo"]:
+    """Resolve "auto" to the actual source based on key availability.
+
+    Wrapped in a function (not just a module-level expression) so tests
+    can monkeypatch WEATHER_SOURCE / OPENMETEO_API_KEY without import-time
+    side-effects, and so the resolution is re-evaluated if env vars change
+    at runtime (e.g., when the user adds a key without restarting).
+    """
+    src = os.environ.get("WEATHER_SOURCE", WEATHER_SOURCE)
+    if src == "auto":
+        key = os.environ.get("OPENMETEO_API_KEY") or OPENMETEO_API_KEY
+        return "openmeteo" if key else "gfs"
+    if src not in {"gfs", "openmeteo"}:
+        raise ValueError(
+            f"Invalid WEATHER_SOURCE={src!r}. Must be 'gfs', 'openmeteo', or 'auto'."
+        )
+    return src  # type: ignore[return-value]
+
 
 # ----------------------------- Modeling -----------------------------
 

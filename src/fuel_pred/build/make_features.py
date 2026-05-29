@@ -746,7 +746,19 @@ def _compute_competitor_counts(stations: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_weather_features(df: pd.DataFrame, weather_dir: Path | None) -> pd.DataFrame:
-    """Join per-station weather parquets on `(station_id, date)`.
+    """Join per-station weather parquets, leakage-corrected per spec §13.7.
+
+    Each cached parquet stores ``date`` as the *valid date* of the weather
+    observation/forecast. To deliver the day-ahead forecast to a panel row
+    at date ``t`` (whose target is price at ``t+1``), we shift the weather
+    ``date`` back by 1 day before merging — so the row representing
+    weather valid on ``d`` joins onto the panel row at ``d - 1``.
+
+    After the shift, ``wx_*`` columns on the panel row at ``t`` carry the
+    day-ahead NWP forecast for ``t+1`` issued on ``t`` (post-2017, via the
+    Open-Meteo Historical Forecast API), or the ERA5 persistence proxy
+    for 2016 dates (a single, documented residual). See
+    ``docs/research/2026-05_weather_leakage_fix.md`` for the full rationale.
 
     Weather is best-effort — if the directory doesn't exist or a station
     has no cached weather file, the wx_* columns are added as nulls and
@@ -780,7 +792,289 @@ def add_weather_features(df: pd.DataFrame, weather_dir: Path | None) -> pd.DataF
     weather = pd.concat(pieces, ignore_index=True)
     keep = ["station_id", "date", *wx_cols]
     weather = weather[[c for c in keep if c in weather.columns]]
+    # Spec §13.7 (v2.0 leakage fix): shift the weather valid-date back by
+    # one day so panel row `t` receives the day-ahead forecast for `t+1`.
+    # See docs/research/2026-05_weather_leakage_fix.md §"Pipeline changes".
+    # `date` is a Series of python `dt.date` (object dtype); promote to
+    # datetime for vectorised arithmetic, then drop back to dt.date so the
+    # merge dtype matches the panel's `date` column.
+    weather["date"] = (
+        pd.to_datetime(weather["date"]) - pd.Timedelta(days=1)
+    ).dt.date
     return df.merge(weather, on=["station_id", "date"], how="left")
+
+
+# ------------------------------------------------------------------
+# 7.6b Weather block — NOAA GFS grid-cell join, multi-horizon wide schema
+# (spec §13.7 v2.0 + §13.8 v2.1)
+# ------------------------------------------------------------------
+
+# Variable bases (matching the per-(date, horizon) parquet's column names
+# produced by `fetch.gfs.fetch_and_write_one_day`, minus the `wx_weather_code`
+# null-stub which is added here for schema parity with the Open-Meteo path).
+_GFS_VALUE_BASES: tuple[str, ...] = (
+    "wx_temp_max_c",
+    "wx_temp_min_c",
+    "wx_precipitation_mm",
+    "wx_wind_speed_max_kmh",
+)
+# wx_weather_code: GFS/GEFS doesn't emit WMO codes (research doc R3).
+# Materialised as a null stub for schema consistency with the Open-Meteo path.
+_GFS_NULL_BASES: tuple[str, ...] = ("wx_weather_code",)
+
+
+def _bilinear_weight_columns_for_resolution(resolution_prefix: str) -> dict[str, str]:
+    """Map the canonical bilinear column suffixes to the resolution-prefixed
+    column names in `station_grid_mapping.parquet`.
+
+    For `resolution_prefix="gfs"` returns e.g.
+        {"bl_lat_idx_0": "gfs_bl_lat_idx_0", ..., "bl_w_11": "gfs_bl_w_11"}.
+    """
+    suffixes = (
+        "bl_lat_idx_0", "bl_lat_idx_1",
+        "bl_lon_idx_0", "bl_lon_idx_1",
+        "bl_w_00", "bl_w_01", "bl_w_10", "bl_w_11",
+    )
+    return {sfx: f"{resolution_prefix}_{sfx}" for sfx in suffixes}
+
+
+def _resolution_prefix_for_date(date: dt.date) -> str:
+    """Pick the station_grid_mapping column-prefix matching the gfs.py
+    date-routing convention (`_select_resolution_for_date`).
+
+    Mirrors the date windows from `fetch.gfs` without importing it (keeps
+    `build.make_features` decoupled from the fetcher's module-level guards).
+    """
+    # Boundaries duplicated from src/fuel_pred/fetch/gfs.py — kept in
+    # lockstep there. (Pre-2017 dates: caller must filter; this routes them
+    # to gefs1 silently, but no grid parquet will exist so the join nulls.)
+    if date <= dt.date(2020, 9, 22):
+        return "gefs1"
+    if date <= dt.date(2021, 3, 31):
+        return "gefs05"
+    return "gfs"
+
+
+def _bilinear_interp_grid_to_stations(
+    grid_df: pd.DataFrame,
+    mapping_subset: pd.DataFrame,
+    resolution_prefix: str,
+    value_columns: tuple[str, ...],
+) -> pd.DataFrame:
+    """Interpolate per-grid-cell values to per-station using the 4-neighbour
+    bilinear weights from the station grid mapping.
+
+    Args:
+        grid_df: long-form NSW-box grid with columns
+            `lat_idx, lon_idx, wx_*`.
+        mapping_subset: per-station rows from `station_grid_mapping.parquet`,
+            already filtered to one (station_id) row per station relevant
+            to the panel.
+        resolution_prefix: one of "gfs", "gefs05", "gefs1".
+        value_columns: which value columns of grid_df to interpolate.
+
+    Returns DataFrame with columns `station_id, <value_columns...>`.
+    """
+    suffixes = _bilinear_weight_columns_for_resolution(resolution_prefix)
+    # grid_df lookup: (lat_idx, lon_idx) -> dict of value per column.
+    # Use a Series indexed on the (lat_idx, lon_idx) pair for fast .get().
+    idx = pd.MultiIndex.from_arrays(
+        [grid_df["lat_idx"].astype(np.int64), grid_df["lon_idx"].astype(np.int64)],
+        names=["lat_idx", "lon_idx"],
+    )
+    value_frame = grid_df[list(value_columns)].copy()
+    value_frame.index = idx
+
+    # The 4 corner index pairs per station.
+    corner_specs = (
+        ("bl_lat_idx_0", "bl_lon_idx_0", "bl_w_00"),
+        ("bl_lat_idx_0", "bl_lon_idx_1", "bl_w_01"),
+        ("bl_lat_idx_1", "bl_lon_idx_0", "bl_w_10"),
+        ("bl_lat_idx_1", "bl_lon_idx_1", "bl_w_11"),
+    )
+
+    n_stations = len(mapping_subset)
+    accum = {col: np.zeros(n_stations, dtype=np.float64) for col in value_columns}
+    any_corner_present = np.zeros(n_stations, dtype=bool)
+
+    for lat_key, lon_key, w_key in corner_specs:
+        lat_indices = mapping_subset[suffixes[lat_key]].to_numpy(dtype=np.int64)
+        lon_indices = mapping_subset[suffixes[lon_key]].to_numpy(dtype=np.int64)
+        weights = mapping_subset[suffixes[w_key]].to_numpy(dtype=np.float64)
+
+        # Build the per-row corner index, look up each value column once.
+        corner_idx = pd.MultiIndex.from_arrays(
+            [lat_indices, lon_indices], names=["lat_idx", "lon_idx"],
+        )
+        # reindex returns NaN for corners outside the NSW grid (shouldn't
+        # happen since the mapping rejects out-of-NSW stations upstream,
+        # but be defensive).
+        corner_values = value_frame.reindex(corner_idx)
+        present_mask = corner_values.notna().any(axis=1).to_numpy()
+        any_corner_present |= present_mask
+
+        for col in value_columns:
+            v = corner_values[col].to_numpy(dtype=np.float64)
+            # Where the corner is missing, contribute zero (the weight
+            # at that corner is effectively dropped, biasing the interp
+            # toward the present corners — acceptable for edge cases).
+            v = np.where(np.isnan(v), 0.0, v)
+            accum[col] += weights * v
+
+    # Stations with no present corners → all-NaN row (not zero).
+    for col in value_columns:
+        accum[col] = np.where(any_corner_present, accum[col], np.nan)
+
+    out = pd.DataFrame(
+        {"station_id": mapping_subset["station_id"].to_numpy()},
+    )
+    for col in value_columns:
+        out[col] = accum[col]
+    return out
+
+
+def add_weather_features_gfs(
+    df: pd.DataFrame,
+    weather_gfs_dir: Path | None,
+    station_grid_mapping_path: Path | None,
+    *,
+    horizons: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7),
+) -> pd.DataFrame:
+    """Join NSW GFS grid weather to panel, multi-horizon wide schema.
+
+    File-naming convention (per ``fetch.gfs._grid_parquet_path`` +
+    ``fetch_one_day_all_horizons``): the per-file ``date`` is the forecast
+    *issue date* (init date), and horizon N's grid covers leads 6..24 hours
+    out from `init_date + (N-1) days`. So `<YYYY-MM-DD>_h<N>.parquet`
+    contains the forecast issued on YYYY-MM-DD and *valid on*
+    `YYYY-MM-DD + N days`.
+
+    For panel row at date ``t`` (target = price at ``t+1``), the day-ahead
+    forecast is in `<t>_h1.parquet` — issue date equals the panel date and
+    no shift is needed. Multi-horizon: `<t>_h<N>.parquet` carries the
+    forecast for `t + N`, materialised as `wx_*_tN` columns on the panel
+    row at `t`.
+
+    For each (panel_date, horizon) pair, this function reads the grid
+    parquet at ``weather_gfs_dir/<panel_date>_h<horizon>.parquet``, then
+    bilinearly interpolates to each panel station using the 4-neighbour
+    weights pre-computed in ``station_grid_mapping_path``.
+
+    Wide-schema output: 5 vars × 7 horizons = 35 wx_*_tN columns added.
+    ``wx_weather_code_tN`` is a null stub (GFS/GEFS doesn't emit WMO codes;
+    see research doc R3). v2.0 (1-day-ahead) model consumes only `_t1`;
+    v2.1 (7-day) reuses the same matrix.
+
+    None-tolerant: if ``weather_gfs_dir`` is None / missing, or if
+    ``station_grid_mapping_path`` is None / missing, returns df with all
+    35 wx_*_tN columns as null (matching the existing
+    ``add_weather_features`` pattern).
+
+    Args:
+        df: panel DataFrame with at least `station_id` and `date` columns.
+        weather_gfs_dir: directory containing per-(date, horizon) grid
+            parquets named `<YYYY-MM-DD>_h<N>.parquet`.
+        station_grid_mapping_path: path to the parquet produced by
+            ``spatial.gfs_grid.compute_station_grid_mapping``.
+        horizons: which horizons to materialise. Default 1..7.
+
+    Spec: spec.md §13.7 (v2.0), §13.8 (v2.1).
+    """
+    all_wx_cols: list[str] = []
+    for h in horizons:
+        for base in _GFS_VALUE_BASES:
+            all_wx_cols.append(f"{base}_t{h}")
+        for base in _GFS_NULL_BASES:
+            all_wx_cols.append(f"{base}_t{h}")
+
+    # Fast None-tolerant exit — keeps the schema stable when the GFS
+    # cache hasn't been built yet.
+    if (
+        weather_gfs_dir is None
+        or not weather_gfs_dir.exists()
+        or station_grid_mapping_path is None
+        or not station_grid_mapping_path.exists()
+    ):
+        if weather_gfs_dir is not None and not weather_gfs_dir.exists():
+            logger.info(
+                "weather_gfs_dir not found at %s — wx_*_tN columns will be null",
+                weather_gfs_dir,
+            )
+        if (
+            station_grid_mapping_path is not None
+            and not station_grid_mapping_path.exists()
+        ):
+            logger.info(
+                "station_grid_mapping not found at %s — wx_*_tN columns will be null",
+                station_grid_mapping_path,
+            )
+        out = df.copy()
+        for col in all_wx_cols:
+            out[col] = np.nan
+        return out
+
+    mapping = pd.read_parquet(station_grid_mapping_path)
+    # Restrict to stations present in the panel — saves work for narrow
+    # panels (single station, etc.).
+    panel_station_ids = set(df["station_id"].unique())
+    mapping = mapping[mapping["station_id"].astype(str).isin(panel_station_ids)].copy()
+    mapping["station_id"] = mapping["station_id"].astype(str)
+
+    unique_dates = sorted(set(df["date"].unique()))
+
+    # For each horizon, build a per-(station_id, panel_date) DataFrame of
+    # interpolated values; merge each into the panel at the end.
+    out = df.copy()
+
+    # Cache loaded grid parquets across horizons (no overlap by default,
+    # but the structure is harmless).
+    grid_cache: dict[Path, pd.DataFrame | None] = {}
+
+    for horizon in horizons:
+        # Renamed value columns for this horizon.
+        rename_map = {base: f"{base}_t{horizon}" for base in _GFS_VALUE_BASES}
+
+        pieces: list[pd.DataFrame] = []
+        for panel_date in unique_dates:
+            grid_path = (
+                weather_gfs_dir / f"{panel_date.isoformat()}_h{horizon}.parquet"
+            )
+            if grid_path not in grid_cache:
+                grid_cache[grid_path] = (
+                    pd.read_parquet(grid_path) if grid_path.exists() else None
+                )
+            grid_df = grid_cache[grid_path]
+            if grid_df is None:
+                continue
+
+            res_prefix = _resolution_prefix_for_date(panel_date)
+            station_values = _bilinear_interp_grid_to_stations(
+                grid_df=grid_df,
+                mapping_subset=mapping,
+                resolution_prefix=res_prefix,
+                value_columns=_GFS_VALUE_BASES,
+            )
+            station_values["date"] = panel_date
+            pieces.append(station_values)
+
+        if pieces:
+            horizon_frame = pd.concat(pieces, ignore_index=True).rename(
+                columns=rename_map,
+            )
+            out = out.merge(horizon_frame, on=["station_id", "date"], how="left")
+        else:
+            for new_col in rename_map.values():
+                out[new_col] = np.nan
+
+        # Null-stub columns for this horizon (e.g. wx_weather_code_tN).
+        for base in _GFS_NULL_BASES:
+            out[f"{base}_t{horizon}"] = np.nan
+
+    logger.info(
+        "add_weather_features_gfs: wrote %d wx_*_tN columns (%d horizons × %d vars)",
+        len(all_wx_cols), len(horizons), len(_GFS_VALUE_BASES) + len(_GFS_NULL_BASES),
+    )
+    return out
 
 
 # ============================================================
@@ -863,6 +1157,8 @@ def make_features(
     asx200: pd.DataFrame | None = None,
     inflation_expectations: pd.DataFrame | None = None,
     stations_venues_path: Path | None = None,
+    weather_gfs_dir: Path | None = None,
+    station_grid_mapping_path: Path | None = None,
 ) -> pd.DataFrame:
     """Compose all feature blocks. Returns the full features.parquet shape.
 
@@ -871,6 +1167,16 @@ def make_features(
     corresponding columns ship as null. ``stations_venues_path`` (spec
     §13.6 Phase 1) is likewise optional: when None or missing, the
     venue columns ship as null.
+
+    GFS weather source (spec §13.7 v2.0 + §13.8 v2.1): when
+    ``config.resolve_weather_source() == "gfs"`` the multi-horizon
+    wide-schema GFS path (``add_weather_features_gfs``) is used instead
+    of the per-station Open-Meteo path. With WEATHER_SOURCE=auto and no
+    OPENMETEO_API_KEY this is the default. When the resolved source is
+    "openmeteo", the existing ``add_weather_features`` runs — same as v1.
+
+    Both paths are None-tolerant on their respective inputs: missing
+    dirs / mappings → null wx columns, no crash.
     """
     logger.info("starting feature build: %d panel rows", len(panel))
 
@@ -899,7 +1205,25 @@ def make_features(
     )
     logger.info("after stn block: %d cols", len(df.columns))
 
-    df = add_weather_features(df, weather_dir=weather_dir)
+    # Weather: dispatch on the WEATHER_SOURCE config router (spec §13.7).
+    #   "gfs":       multi-horizon wide-schema GFS path via
+    #                add_weather_features_gfs (None-tolerant on
+    #                weather_gfs_dir / station_grid_mapping_path).
+    #   "openmeteo": legacy per-station path via add_weather_features
+    #                (None-tolerant on weather_dir).
+    # Both paths' None-tolerance is intentional — callers can pass paths
+    # that don't exist yet and the wx columns simply ship as null.
+    weather_source = config.resolve_weather_source()
+    if weather_source == "gfs":
+        logger.info("weather source: gfs (spec §13.7 v2.0)")
+        df = add_weather_features_gfs(
+            df,
+            weather_gfs_dir=weather_gfs_dir,
+            station_grid_mapping_path=station_grid_mapping_path,
+        )
+    else:
+        logger.info("weather source: openmeteo (legacy / paid-tier path)")
+        df = add_weather_features(df, weather_dir=weather_dir)
     logger.info("after weather block: %d cols", len(df.columns))
 
     df = add_sa2_features(df, stations=stations)
@@ -928,6 +1252,8 @@ def make_features_from_paths(
     asx200_path: Path | None = None,
     inflation_expectations_path: Path | None = None,
     stations_venues_path: Path | None = None,
+    weather_gfs_dir: Path | None = None,
+    station_grid_mapping_path: Path | None = None,
 ) -> None:
     """File-IO convenience wrapper around `make_features`.
 
@@ -953,6 +1279,10 @@ def make_features_from_paths(
         inflation_expectations_path or raw / "inflation_expectations.parquet"
     )
     stations_venues_path = stations_venues_path or config.INTERIM_STATIONS_VENUES
+    # GFS-path defaults — config.resolve_weather_source() decides whether
+    # they're actually used; None-tolerant on the receiving side.
+    weather_gfs_dir = weather_gfs_dir or config.RAW_WEATHER_GFS_DIR
+    station_grid_mapping_path = station_grid_mapping_path or config.INTERIM_STATION_GRID_MAPPING
 
     panel = pd.read_parquet(panel_path)
     brent = pd.read_parquet(brent_path)
@@ -991,6 +1321,8 @@ def make_features_from_paths(
         asx200=asx200,
         inflation_expectations=inflation_expectations,
         stations_venues_path=venues_path,
+        weather_gfs_dir=weather_gfs_dir,
+        station_grid_mapping_path=station_grid_mapping_path,
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1021,6 +1353,26 @@ def main() -> None:
             "when the file doesn't exist."
         ),
     )
+    parser.add_argument(
+        "--weather-gfs-dir",
+        type=Path,
+        default=None,
+        help=(
+            "optional dir of per-(date, horizon) NOAA GFS grid parquets "
+            "from fetch.gfs. When present alongside --station-grid-mapping, "
+            "the multi-horizon wide-schema GFS path is used instead of "
+            "the per-station Open-Meteo path (spec §13.7 v2.0 / §13.8 v2.1)."
+        ),
+    )
+    parser.add_argument(
+        "--station-grid-mapping",
+        type=Path,
+        default=None,
+        help=(
+            "optional path to data/interim/station_grid_mapping.parquet "
+            "(from spatial.gfs_grid). Required when --weather-gfs-dir is set."
+        ),
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     make_features_from_paths(
@@ -1035,6 +1387,8 @@ def main() -> None:
         weather_dir=args.weather_dir,
         school_terms_path=args.school_terms,
         stations_venues_path=args.stations_venues,
+        weather_gfs_dir=args.weather_gfs_dir,
+        station_grid_mapping_path=args.station_grid_mapping,
     )
 
 

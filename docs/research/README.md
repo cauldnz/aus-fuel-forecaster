@@ -13,11 +13,11 @@ The convention exists because research artefacts often have lasting value beyond
 
 ## Index
 
-### Ready to build
+### Landed (in production on `main`)
 
-| File | Topic | Spec ref |
+| File trail | Topic | Spec ref |
 |---|---|---|
-| [`2026-05_weather_leakage_fix.md`](2026-05_weather_leakage_fix.md) | Switch Open-Meteo Archive → Historical Forecast API + 1-day join shift. Pre-flight passed; ~2.5 sessions of work. See also [`2026-05_weather_leakage_preflight.md`](2026-05_weather_leakage_preflight.md). | spec §13.7 |
+| Plan [`2026-05_weather_leakage_fix.md`](2026-05_weather_leakage_fix.md) → Preflight [`2026-05_weather_leakage_preflight.md`](2026-05_weather_leakage_preflight.md) → Architectural pivot [`2026-06_nwp_archive_alternative.md`](2026-06_nwp_archive_alternative.md) → **Outcome [`2026-05_weather_leakage_fix_outcome.md`](2026-05_weather_leakage_fix_outcome.md)** | v2.0 weather leakage fix — Open-Meteo → NOAA GFS day-ahead forecasts. Original Open-Meteo Historical Forecast API plan, but free-tier rate limits proved unworkable at 4,587-station scale; pivoted mid-implementation to NOAA GFS via anonymous AWS S3 byte-range subsetting. test_normal absolute MAE rose 0.07-0.15 c/L (within prediction); **test_crisis SA2 Δ MAE more than doubled** (−0.183 → −0.398). | spec §13.7 |
 
 ### Shelved (research complete, deferred)
 

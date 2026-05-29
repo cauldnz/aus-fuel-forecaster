@@ -538,6 +538,11 @@ def test_station_is_franchisee_stub_null() -> None:
 
 
 def test_weather_features_join_per_station(tmp_path: Path) -> None:
+    """Weather joins on (station_id, date) with the spec §13.7 −1-day shift.
+
+    Panel row at date `t` receives the day-ahead forecast for `t+1`, so the
+    weather fixture's value for `t+1` lands on the row at `t`.
+    """
     panel = _panel([
         {"station_id": "s1", "fuel_code": "U91", "date": "2024-01-01"},
         {"station_id": "s1", "fuel_code": "U91", "date": "2024-01-02"},
@@ -555,11 +560,47 @@ def test_weather_features_join_per_station(tmp_path: Path) -> None:
     }).to_parquet(weather_dir / "s1.parquet", engine="pyarrow", compression="zstd", index=False)
 
     out = mf.add_weather_features(panel, weather_dir)
+    # Spec §13.7: panel row at 2024-01-01 carries the forecast for 2024-01-02 → 26.0.
     s1_jan1 = out[(out["station_id"] == "s1") & (out["date"] == dt.date(2024, 1, 1))].iloc[0]
-    assert s1_jan1["wx_temp_max_c"] == 25.0
+    assert s1_jan1["wx_temp_max_c"] == 26.0
+    # Panel row at 2024-01-02 carries the forecast for 2024-01-03 → 27.0.
+    s1_jan2 = out[(out["station_id"] == "s1") & (out["date"] == dt.date(2024, 1, 2))].iloc[0]
+    assert s1_jan2["wx_temp_max_c"] == 27.0
     # s2 has no parquet — wx columns are null.
     s2_jan1 = out[out["station_id"] == "s2"].iloc[0]
     assert pd.isna(s2_jan1["wx_temp_max_c"])
+
+
+def test_weather_features_use_t_plus_1_forecast(tmp_path: Path) -> None:
+    """Spec §13.7 leakage fix: panel row at date `t` joins to weather valid at `t+1`.
+
+    Synthetic fixture sets `wx_temp_max_c = day_of_month` on three consecutive
+    days. After the shift, panel row at day-of-month `d` carries the value
+    for `d+1`, not `d`.
+    """
+    panel = _panel([
+        {"station_id": "s1", "fuel_code": "U91", "date": "2024-03-10"},
+        {"station_id": "s1", "fuel_code": "U91", "date": "2024-03-11"},
+        {"station_id": "s1", "fuel_code": "U91", "date": "2024-03-12"},
+    ])
+    weather_dir = tmp_path / "weather"
+    weather_dir.mkdir()
+    pd.DataFrame({
+        "date": pd.date_range("2024-03-10", periods=4, freq="D").date,
+        "wx_temp_max_c": [10.0, 11.0, 12.0, 13.0],
+        "wx_temp_min_c": [0.0, 1.0, 2.0, 3.0],
+        "wx_precipitation_mm": [0.0, 0.0, 0.0, 0.0],
+        "wx_wind_speed_max_kmh": [10.0, 10.0, 10.0, 10.0],
+        "wx_weather_code": [0, 0, 0, 0],
+    }).to_parquet(weather_dir / "s1.parquet", engine="pyarrow", compression="zstd", index=False)
+
+    out = mf.add_weather_features(panel, weather_dir).sort_values("date").reset_index(drop=True)
+    # Row at 2024-03-10 → forecast for 2024-03-11 → 11.0 (NOT 10.0).
+    assert float(out["wx_temp_max_c"].iloc[0]) == 11.0
+    # Row at 2024-03-11 → forecast for 2024-03-12 → 12.0.
+    assert float(out["wx_temp_max_c"].iloc[1]) == 12.0
+    # Row at 2024-03-12 → forecast for 2024-03-13 → 13.0.
+    assert float(out["wx_temp_max_c"].iloc[2]) == 13.0
 
 
 def test_weather_missing_dir_yields_null_columns(tmp_path: Path) -> None:
@@ -569,6 +610,301 @@ def test_weather_missing_dir_yields_null_columns(tmp_path: Path) -> None:
                 "wx_wind_speed_max_kmh", "wx_weather_code"):
         assert col in out.columns
         assert out[col].isna().all()
+
+
+# ============================================================
+# 7.6b GFS multi-horizon weather block (spec §13.7 v2.0 / §13.8 v2.1)
+# ============================================================
+
+
+_GFS_VALUE_COLS = (
+    "wx_temp_max_c",
+    "wx_temp_min_c",
+    "wx_precipitation_mm",
+    "wx_wind_speed_max_kmh",
+)
+
+
+def _write_gfs_grid_parquet(
+    out_dir: Path,
+    date: dt.date,
+    horizon: int,
+    *,
+    grid_cells: list[dict[str, float]],
+) -> Path:
+    """Write a synthetic per-(date, horizon) GFS grid parquet.
+
+    Each row in ``grid_cells`` should have keys: ``lat_idx, lon_idx, lat, lon``
+    plus the 4 ``wx_*`` value columns. Returns the written path.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{date.isoformat()}_h{horizon}.parquet"
+    pd.DataFrame(grid_cells).to_parquet(
+        path, engine="pyarrow", compression="zstd", index=False,
+    )
+    return path
+
+
+def _gfs_mapping_for_station(
+    station_id: str,
+    *,
+    lat_idx_0: int,
+    lat_idx_1: int,
+    lon_idx_0: int,
+    lon_idx_1: int,
+    w_00: float,
+    w_01: float,
+    w_10: float,
+    w_11: float,
+    resolution_prefix: str = "gfs",
+) -> dict[str, object]:
+    """One row of the station_grid_mapping for the given resolution prefix.
+
+    Other prefixes (gefs05/gefs1) get zero weights so they don't accidentally
+    pull values when the routing picks them.
+    """
+    row: dict[str, object] = {"station_id": station_id, "lat": 0.0, "lon": 0.0}
+    for prefix in ("gfs", "gefs05", "gefs1"):
+        if prefix == resolution_prefix:
+            row[f"{prefix}_lat_idx"] = lat_idx_0
+            row[f"{prefix}_lon_idx"] = lon_idx_0
+            row[f"{prefix}_bl_lat_idx_0"] = lat_idx_0
+            row[f"{prefix}_bl_lat_idx_1"] = lat_idx_1
+            row[f"{prefix}_bl_lon_idx_0"] = lon_idx_0
+            row[f"{prefix}_bl_lon_idx_1"] = lon_idx_1
+            row[f"{prefix}_bl_w_00"] = w_00
+            row[f"{prefix}_bl_w_01"] = w_01
+            row[f"{prefix}_bl_w_10"] = w_10
+            row[f"{prefix}_bl_w_11"] = w_11
+        else:
+            row[f"{prefix}_lat_idx"] = 0
+            row[f"{prefix}_lon_idx"] = 0
+            row[f"{prefix}_bl_lat_idx_0"] = 0
+            row[f"{prefix}_bl_lat_idx_1"] = 1
+            row[f"{prefix}_bl_lon_idx_0"] = 0
+            row[f"{prefix}_bl_lon_idx_1"] = 1
+            row[f"{prefix}_bl_w_00"] = 0.25
+            row[f"{prefix}_bl_w_01"] = 0.25
+            row[f"{prefix}_bl_w_10"] = 0.25
+            row[f"{prefix}_bl_w_11"] = 0.25
+    return row
+
+
+def _write_mapping(tmp_path: Path, rows: list[dict[str, object]]) -> Path:
+    path = tmp_path / "station_grid_mapping.parquet"
+    pd.DataFrame(rows).to_parquet(
+        path, engine="pyarrow", compression="zstd", index=False,
+    )
+    return path
+
+
+def test_add_weather_features_gfs_joins_via_grid_mapping(tmp_path: Path) -> None:
+    """3 stations × 1 date × 1 horizon — verify the bilinear join populates
+    `wx_*_t1` per the per-station weights.
+    """
+    panel_date = dt.date(2024, 1, 1)
+    panel = _panel([
+        {"station_id": "s1", "fuel_code": "U91", "date": panel_date.isoformat()},
+        {"station_id": "s2", "fuel_code": "U91", "date": panel_date.isoformat()},
+        {"station_id": "s3", "fuel_code": "U91", "date": panel_date.isoformat()},
+    ])
+
+    # 4-cell grid: (lat=100, lon=200), (100, 201), (101, 200), (101, 201).
+    # Encode wx_temp_max_c so it's easy to verify bilinear:
+    #   corner (100,200) = 10, (100,201) = 20, (101,200) = 30, (101,201) = 40
+    grid_cells = [
+        {"lat_idx": 100, "lon_idx": 200, "lat": -33.0, "lon": 150.0,
+         "wx_temp_max_c": 10.0, "wx_temp_min_c": 5.0,
+         "wx_precipitation_mm": 0.0, "wx_wind_speed_max_kmh": 10.0},
+        {"lat_idx": 100, "lon_idx": 201, "lat": -33.0, "lon": 150.25,
+         "wx_temp_max_c": 20.0, "wx_temp_min_c": 5.0,
+         "wx_precipitation_mm": 0.0, "wx_wind_speed_max_kmh": 10.0},
+        {"lat_idx": 101, "lon_idx": 200, "lat": -33.25, "lon": 150.0,
+         "wx_temp_max_c": 30.0, "wx_temp_min_c": 5.0,
+         "wx_precipitation_mm": 0.0, "wx_wind_speed_max_kmh": 10.0},
+        {"lat_idx": 101, "lon_idx": 201, "lat": -33.25, "lon": 150.25,
+         "wx_temp_max_c": 40.0, "wx_temp_min_c": 5.0,
+         "wx_precipitation_mm": 0.0, "wx_wind_speed_max_kmh": 10.0},
+    ]
+    weather_gfs_dir = tmp_path / "weather_gfs"
+    _write_gfs_grid_parquet(weather_gfs_dir, panel_date, 1, grid_cells=grid_cells)
+
+    # s1: nearest-NW corner only.
+    s1_map = _gfs_mapping_for_station(
+        "s1", lat_idx_0=100, lat_idx_1=101, lon_idx_0=200, lon_idx_1=201,
+        w_00=1.0, w_01=0.0, w_10=0.0, w_11=0.0,
+    )
+    # s2: midpoint of all four → average = (10+20+30+40)/4 = 25.0.
+    s2_map = _gfs_mapping_for_station(
+        "s2", lat_idx_0=100, lat_idx_1=101, lon_idx_0=200, lon_idx_1=201,
+        w_00=0.25, w_01=0.25, w_10=0.25, w_11=0.25,
+    )
+    # s3: pure SE corner.
+    s3_map = _gfs_mapping_for_station(
+        "s3", lat_idx_0=100, lat_idx_1=101, lon_idx_0=200, lon_idx_1=201,
+        w_00=0.0, w_01=0.0, w_10=0.0, w_11=1.0,
+    )
+    mapping_path = _write_mapping(tmp_path, [s1_map, s2_map, s3_map])
+
+    out = mf.add_weather_features_gfs(
+        panel, weather_gfs_dir=weather_gfs_dir,
+        station_grid_mapping_path=mapping_path, horizons=(1,),
+    )
+
+    s1 = out[out["station_id"] == "s1"].iloc[0]
+    s2 = out[out["station_id"] == "s2"].iloc[0]
+    s3 = out[out["station_id"] == "s3"].iloc[0]
+    assert s1["wx_temp_max_c_t1"] == pytest.approx(10.0)
+    assert s2["wx_temp_max_c_t1"] == pytest.approx(25.0)
+    assert s3["wx_temp_max_c_t1"] == pytest.approx(40.0)
+
+
+def test_add_weather_features_gfs_multi_horizon_columns(tmp_path: Path) -> None:
+    """All 35 wx_*_tN columns materialise even when only one horizon has data."""
+    panel_date = dt.date(2024, 6, 1)
+    panel = _panel([
+        {"station_id": "s1", "fuel_code": "U91", "date": panel_date.isoformat()},
+    ])
+    weather_gfs_dir = tmp_path / "weather_gfs"
+    _write_gfs_grid_parquet(
+        weather_gfs_dir, panel_date, 1,
+        grid_cells=[{
+            "lat_idx": 100, "lon_idx": 200, "lat": -33.0, "lon": 150.0,
+            "wx_temp_max_c": 22.0, "wx_temp_min_c": 11.0,
+            "wx_precipitation_mm": 0.5, "wx_wind_speed_max_kmh": 18.0,
+        }],
+    )
+    s1_map = _gfs_mapping_for_station(
+        "s1", lat_idx_0=100, lat_idx_1=101, lon_idx_0=200, lon_idx_1=201,
+        w_00=1.0, w_01=0.0, w_10=0.0, w_11=0.0,
+    )
+    mapping_path = _write_mapping(tmp_path, [s1_map])
+
+    out = mf.add_weather_features_gfs(
+        panel, weather_gfs_dir=weather_gfs_dir,
+        station_grid_mapping_path=mapping_path,
+    )
+
+    expected_cols: set[str] = set()
+    for h in range(1, 8):
+        for base in _GFS_VALUE_COLS:
+            expected_cols.add(f"{base}_t{h}")
+        expected_cols.add(f"wx_weather_code_t{h}")
+    assert expected_cols.issubset(out.columns)
+    assert len(expected_cols) == 35
+
+    # t1 was supplied; t2..t7 grid files missing → null wx_* values.
+    s1 = out[out["station_id"] == "s1"].iloc[0]
+    assert s1["wx_temp_max_c_t1"] == pytest.approx(22.0)
+    for h in range(2, 8):
+        assert pd.isna(s1[f"wx_temp_max_c_t{h}"])
+
+
+def test_add_weather_features_gfs_weather_code_null_stub(tmp_path: Path) -> None:
+    """wx_weather_code_t1..t7 are always null (GFS doesn't emit WMO codes)."""
+    panel_date = dt.date(2024, 1, 1)
+    panel = _panel([
+        {"station_id": "s1", "fuel_code": "U91", "date": panel_date.isoformat()},
+    ])
+    weather_gfs_dir = tmp_path / "weather_gfs"
+    # Supply all 7 horizons so we know nulls aren't from missing files.
+    for h in range(1, 8):
+        _write_gfs_grid_parquet(
+            weather_gfs_dir, panel_date, h,
+            grid_cells=[{
+                "lat_idx": 100, "lon_idx": 200, "lat": -33.0, "lon": 150.0,
+                "wx_temp_max_c": 20.0 + h, "wx_temp_min_c": 10.0,
+                "wx_precipitation_mm": 0.0, "wx_wind_speed_max_kmh": 12.0,
+            }],
+        )
+    s1_map = _gfs_mapping_for_station(
+        "s1", lat_idx_0=100, lat_idx_1=101, lon_idx_0=200, lon_idx_1=201,
+        w_00=1.0, w_01=0.0, w_10=0.0, w_11=0.0,
+    )
+    mapping_path = _write_mapping(tmp_path, [s1_map])
+
+    out = mf.add_weather_features_gfs(
+        panel, weather_gfs_dir=weather_gfs_dir,
+        station_grid_mapping_path=mapping_path,
+    )
+    for h in range(1, 8):
+        col = f"wx_weather_code_t{h}"
+        assert col in out.columns
+        assert out[col].isna().all()
+
+
+def test_add_weather_features_gfs_none_tolerant(tmp_path: Path) -> None:
+    """Missing dir / mapping → all 35 wx_*_tN columns are null, no crash."""
+    panel = _panel([
+        {"station_id": "s1", "fuel_code": "U91", "date": "2024-01-01"},
+    ])
+    # Case 1: weather_gfs_dir is None.
+    out1 = mf.add_weather_features_gfs(
+        panel, weather_gfs_dir=None,
+        station_grid_mapping_path=tmp_path / "nonexistent.parquet",
+    )
+    # Case 2: dir doesn't exist.
+    out2 = mf.add_weather_features_gfs(
+        panel, weather_gfs_dir=tmp_path / "nope",
+        station_grid_mapping_path=tmp_path / "nonexistent.parquet",
+    )
+    # Case 3: mapping is None.
+    out3 = mf.add_weather_features_gfs(
+        panel, weather_gfs_dir=tmp_path / "nope",
+        station_grid_mapping_path=None,
+    )
+
+    for out in (out1, out2, out3):
+        for h in range(1, 8):
+            for base in (*_GFS_VALUE_COLS, "wx_weather_code"):
+                col = f"{base}_t{h}"
+                assert col in out.columns
+                assert out[col].isna().all()
+
+
+def test_add_weather_features_gfs_bilinear_interp_correct(tmp_path: Path) -> None:
+    """Known 4-grid-point fixture with known weights → station value matches.
+
+    Setup: grid corners carry values (10, 20, 30, 40) for wx_temp_max_c.
+    Station weights (w_00, w_01, w_10, w_11) = (0.1, 0.2, 0.3, 0.4).
+    Expected: 0.1*10 + 0.2*20 + 0.3*30 + 0.4*40 = 1 + 4 + 9 + 16 = 30.0.
+    """
+    panel_date = dt.date(2024, 1, 1)
+    panel = _panel([
+        {"station_id": "s1", "fuel_code": "U91", "date": panel_date.isoformat()},
+    ])
+    grid_cells = [
+        {"lat_idx": 50, "lon_idx": 60, "lat": 0.0, "lon": 0.0,
+         "wx_temp_max_c": 10.0, "wx_temp_min_c": 1.0,
+         "wx_precipitation_mm": 0.0, "wx_wind_speed_max_kmh": 0.0},
+        {"lat_idx": 50, "lon_idx": 61, "lat": 0.0, "lon": 0.25,
+         "wx_temp_max_c": 20.0, "wx_temp_min_c": 2.0,
+         "wx_precipitation_mm": 0.0, "wx_wind_speed_max_kmh": 0.0},
+        {"lat_idx": 51, "lon_idx": 60, "lat": -0.25, "lon": 0.0,
+         "wx_temp_max_c": 30.0, "wx_temp_min_c": 3.0,
+         "wx_precipitation_mm": 0.0, "wx_wind_speed_max_kmh": 0.0},
+        {"lat_idx": 51, "lon_idx": 61, "lat": -0.25, "lon": 0.25,
+         "wx_temp_max_c": 40.0, "wx_temp_min_c": 4.0,
+         "wx_precipitation_mm": 0.0, "wx_wind_speed_max_kmh": 0.0},
+    ]
+    weather_gfs_dir = tmp_path / "weather_gfs"
+    _write_gfs_grid_parquet(weather_gfs_dir, panel_date, 1, grid_cells=grid_cells)
+
+    s1_map = _gfs_mapping_for_station(
+        "s1",
+        lat_idx_0=50, lat_idx_1=51, lon_idx_0=60, lon_idx_1=61,
+        w_00=0.1, w_01=0.2, w_10=0.3, w_11=0.4,
+    )
+    mapping_path = _write_mapping(tmp_path, [s1_map])
+
+    out = mf.add_weather_features_gfs(
+        panel, weather_gfs_dir=weather_gfs_dir,
+        station_grid_mapping_path=mapping_path, horizons=(1,),
+    )
+    s1 = out[out["station_id"] == "s1"].iloc[0]
+    assert s1["wx_temp_max_c_t1"] == pytest.approx(30.0)
+    # And wx_temp_min_c: 0.1*1 + 0.2*2 + 0.3*3 + 0.4*4 = 0.1+0.4+0.9+1.6 = 3.0
+    assert s1["wx_temp_min_c_t1"] == pytest.approx(3.0)
 
 
 # ============================================================

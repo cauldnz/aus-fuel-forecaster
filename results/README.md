@@ -11,17 +11,43 @@ and every brand on the headline fold.
 
 ---
 
-## Headline
+## Headline (v2.0, leakage-corrected)
 
 All metrics in cents/L except MAPE (%). **Negative Δ MAE = Model B beats Model A.**
 
 | Fold | n (U91) | MAE A | MAE B | Δ MAE | rel. | RMSE A | RMSE B | MAPE A | MAPE B |
 |------|--------:|------:|------:|------:|-----:|-------:|-------:|-------:|-------:|
-| test_normal (2024-01 → 2025-12) | 849,334 | 6.303 | **5.912** | **−0.391** | −6.2% | 10.973 | 10.338 | 3.303 | 3.101 |
-| test_crisis (2026-01 → 2026-04) | 172,858 | 13.466 | **13.283** | **−0.183** | −1.4% | 18.628 | 18.739 | 6.127 | 5.988 |
+| test_normal (2024-01 → 2025-12) | 849,334 | 6.373 | **6.020** | **−0.353** | −5.5% | 10.953 | 10.589 | 3.352 | 3.167 |
+| test_crisis (2026-01 → 2026-04) | 172,858 | 13.616 | **13.218** | **−0.398** | −2.9% | 19.054 | 18.578 | 6.181 | 6.002 |
 
 Full segmentation (metro/regional, brand, fuel, SEIFA quintile) + feature-importance
-tables in [`comparison.md`](comparison.md). SHAP visualisations in [`shap/`](shap/).
+tables in [`comparison.md`](comparison.md). SHAP visualisations in [`shap/`](shap/) (note:
+SHAP plots have not yet been regenerated against v2 — they reflect v1 features; refresh
+pending a notebook re-run).
+
+### v1 → v2 transition (spec §13.7)
+
+The v1 headline (preserved here for historical reference) used ERA5 reanalysis
+*actuals* for the weather block, which is leakage — in real deployment the model
+would have a *forecast* for tomorrow, not retrospective truth. v2.0 corrects this
+by switching to NOAA GFS day-ahead forecasts. The full transition is documented
+at [`docs/research/2026-05_weather_leakage_fix_outcome.md`](../docs/research/2026-05_weather_leakage_fix_outcome.md).
+
+| Fold | v1 MAE B | v2 MAE B | Δ | v1 Δ MAE | v2 Δ MAE |
+|------|---------:|---------:|--:|---------:|---------:|
+| test_normal | 5.912 | 6.020 | +0.108 (leakage tax) | −0.391 | −0.353 |
+| test_crisis | 13.283 | 13.218 | −0.065 | −0.183 | **−0.398** |
+
+**Two notable v2 findings:**
+
+1. The **leakage tax** on absolute MAE was small (+0.07-0.15 c/L) — within the
+   predicted 0.05-0.15 range. The model genuinely could only cheat with ERA5 by
+   small amounts because the wx_* block is low-rank in the feature set overall.
+2. The **crisis-fold SA2 lift more than doubled** in v2 (−0.183 → −0.398), and
+   the v1 crisis-fold RMSE regression (Model B *worse* than A) is gone (now
+   B beats A on RMSE). The honest weather block makes the SA2 block's true
+   contribution clearer, and that translates to a more robust improvement
+   on OOD 2026 data. See caveat #4 below.
 
 ---
 
@@ -110,11 +136,13 @@ Top 5 SA2 features by mean |SHAP| on the test_normal sample:
    day-of-fortnight SHAP values in an obvious way. We report the fortnight cycle as a **main effect**
    the model uses, and explicitly do **not** claim demonstrated demographic interaction.
 
-2. **The crisis-fold lift is real but smaller and noisier.** test_crisis (2026, out-of-distribution
-   prices) shows Δ MAE −0.183 — a genuine win, but Model B's RMSE is marginally *worse* than Model A's
-   (18.739 vs 18.628), and two brands (Metro, Independent) regress slightly. OOD generalization across
-   a price regime the model never trained on is inherently noisy; treat the crisis fold as supportive,
-   not headline.
+2. **~~The crisis-fold lift is real but smaller and noisier.~~** *(v1 caveat — invalidated by v2.)*
+   v1 reported crisis-fold Δ MAE −0.183 with Model B's RMSE marginally *worse* than A's (18.739 vs
+   18.628) and two brands regressing slightly. **v2.0 changed this:** crisis-fold Δ MAE more than
+   doubled to **−0.398**, B's RMSE is now lower than A's (18.578 vs 19.054), and every reported brand
+   benefits. The most plausible mechanism is that v1's leaky ERA5 weather block was an
+   unrealistically strong in-distribution predictor, masking the SA2 block's true marginal value.
+   See [`docs/research/2026-05_weather_leakage_fix_outcome.md`](../docs/research/2026-05_weather_leakage_fix_outcome.md).
 
 3. **SA2 features are collinear with the traffic/competitor blocks.** Several SA2 columns correlate
    |r| > 0.5 with `stn_competitors_*` / `ctx_traffic_*` (all downstream of urban density). The model
@@ -123,9 +151,18 @@ Top 5 SA2 features by mean |SHAP| on the test_normal sample:
    SA2 features (the 31-col experiment) overfit. The augmentor's effective new dimensionality for
    short-horizon fuel-price prediction is modest.
 
-4. **Weather is a known leakage compromise (spec §7.6).** v1 uses ERA5 reanalysis across the full span
-   rather than forecast-at-lead-time-1. This affects both models identically, so it doesn't bias the
-   A-vs-B comparison, but absolute MAE figures are optimistic. v2 should switch to the Previous-Runs API.
+4. **✅ Weather leakage (v1) — fixed in v2.0 (spec §13.7).** v1 used ERA5 reanalysis actuals across the
+   full span rather than forecast-at-lead-time-1. v2.0 switches to NOAA GFS day-ahead forecasts via
+   anonymous AWS S3 byte-range subsetting. The leakage tax on absolute MAE was small (+0.07-0.15 c/L,
+   within the predicted range), and as a bonus the crisis-fold SA2 lift improved substantially (caveat
+   #2 above). Numbers in the headline table reflect v2.0. Full v1 → v2 transition write-up at
+   [`docs/research/2026-05_weather_leakage_fix_outcome.md`](../docs/research/2026-05_weather_leakage_fix_outcome.md).
+
+   v2.0 carries three small acknowledged compromises (all documented in the outcome doc): `wx_weather_code_t1`
+   is null-stubbed (GFS doesn't emit WMO codes; low SHAP rank, costs <0.01 c/L), ~20% of training rows have
+   null `wx_*_t1` from 2016 + NOAA archive gaps (handled natively by LightGBM), and the daily aggregation
+   uses a UTC day boundary rather than Sydney-local (~10h offset, low-rank feature).
+
 
 ---
 

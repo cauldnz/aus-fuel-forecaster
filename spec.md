@@ -793,28 +793,63 @@ To be resolved during implementation, not blocking spec sign-off:
 
 7. **Weather leakage fix (v2.0)** — v1's `wx_*` columns join Open-Meteo ERA5 *reanalysis actuals* on the same date as the prediction row, which means the model sees retrospective truth rather than the forecast a real-time predictor would have. `results/README.md` caveat #4 acknowledges this; absolute MAE is optimistic, though the A-vs-B comparison is unbiased (both models leak equally).
 
-   **Status: research + pre-flight complete, ready to build.**
+   **Status: ✅ LANDED (2026-05-29).** Outcome doc: [`docs/research/2026-05_weather_leakage_fix_outcome.md`](docs/research/2026-05_weather_leakage_fix_outcome.md).
 
-   Full implementation plan in [`docs/research/2026-05_weather_leakage_fix.md`](docs/research/2026-05_weather_leakage_fix.md). Pre-flight verification at [`docs/research/2026-05_weather_leakage_preflight.md`](docs/research/2026-05_weather_leakage_preflight.md) (all 3 tests PASS: coverage boundary global, free-tier handles 100/100 requests at 0.1s spacing, no API key required). Headlines:
+   **Result summary** (v2.0 GFS day-ahead vs v1 ERA5 leaky):
+   - **Absolute MAE rose 0.07-0.15 c/L** — within predicted leakage-tax range
+   - **test_normal Δ MAE (B vs A)**: −0.391 → **−0.353** (essentially unchanged — A-vs-B comparison was indeed unbiased w.r.t. leakage)
+   - **test_crisis Δ MAE**: −0.183 → **−0.398** (more than doubled — SA2 lift is now bigger AND more robust on OOD data)
+   - **Crisis-fold RMSE regression fixed**: v1 had Model B's RMSE *worse* than A (18.739 vs 18.628); v2 has B better (18.578 vs 19.054)
+   - v1 results/README.md caveat #2 ("crisis-fold lift is real but smaller and noisier") is **invalidated** by v2
 
-   - **Fix:** swap the Open-Meteo Archive API for the **Historical Forecast API** (`historical-forecast-api.open-meteo.com/v1/forecast`) — same call signature, same variables, free-tier accessible, no auth required.
-   - **Coverage boundary:** empirically confirmed 2017-01-01 globally for Australian coordinates (probed Sydney, Broken Hill, Tweed Heads, Eden). Use ERA5 fallback for 2016-09-01 → 2016-12-31 (~2.2% of training rows, in the train fold only — no test-metric contamination).
-   - **Join change:** shift weather `date` by −1 day before merging. Panel row at `t` then receives the day-ahead NWP forecast for `t+1` (issued on `t`), matching deployment.
-   - **Expected absolute MAE rise:** 0.05–0.15 c/L. A-vs-B Δ MAE unchanged.
-   - **Effort:** ~2.5 sessions, mostly wall-clock for full retrain after invalidating `models/*.pkl`.
+   Original plan: [`docs/research/2026-05_weather_leakage_fix.md`](docs/research/2026-05_weather_leakage_fix.md) (Open-Meteo Historical Forecast API). Pre-flight at [`docs/research/2026-05_weather_leakage_preflight.md`](docs/research/2026-05_weather_leakage_preflight.md). **Empirical reality**: 2026-05-26/27 attempts to refetch all 4,587 NSW stations hit Open-Meteo's per-minute/per-hour/per-day rate limits within minutes, with each 429 itself counting against the daily quota — three attempts burned through the daily 10,000-call cap before completing ~3% of the fetch. The free tier is unworkable at this volume.
+
+   **Revised plan**: [`docs/research/2026-06_nwp_archive_alternative.md`](docs/research/2026-06_nwp_archive_alternative.md). Strict-free path via **NOAA GFS 0.25°** (2021-04+) + **NOAA GEFS 1°/0.5°** (2017-01 → 2021-03) on anonymous AWS S3 buckets — no key, no quota, no 429s. Trade-off: ~10-14 hour one-time backfill via GRIB byte-range subsetting (7 horizons × 9 years of data). Open-Meteo path retained as optional paid-tier upgrade via `WEATHER_SOURCE=openmeteo` config switch + `OPENMETEO_API_KEY` env var.
+
+   **Code landed (implementation commits, all on `claude/weather-leakage-fix-v2` branch):**
+   - Session 1 (`17f491c`): GFS scaffolding + `spatial/gfs_grid.py` station-grid mapping
+   - Session 2 (`14c9e2e`): `fetch/gfs.py` multi-horizon fetcher + `tools/parallel_gfs_fetch.py` orchestrator
+   - Session 3 (`86f2071`): `build/make_features.py` `add_weather_features_gfs()` with bilinear interp + 35-column wide schema
+   - Session 4a (`8ae01b7`, `4a7f9bc`, `3d3c4e8`, `25c651e`, `cb91719`, `36df15d`, `c3b23db`, `92d2dc1`, `0f54604`): `WEATHER_SOURCE` config router, `MODEL_*_GFS_BLOCKS`, `train_models` dispatch, categorical fix, `make_features` orchestrator dispatch, Makefile targets, docs (this entry), self-hosted-Open-Meteo backlog item (§13.9)
+   - Session 4b (production fetch + retrain): GFS fetch ran 2026-05-28 18:03 → 2026-05-29 11:07 (~17h wall-clock), then features regen + train + evaluate completed 12:43. 3,029 dates fetched (89% of in-range); 374 NOAA archive gaps + 122 pre-2017 fail-fast = ~20% rows with null `wx_*_t1` (handled natively by LightGBM)
+
+   **`WEATHER_SOURCE` env var contract:**
+   - `auto` (default): picks `openmeteo` if `OPENMETEO_API_KEY` is set, else `gfs`
+   - `gfs`: strict-free NOAA GFS/GEFS path
+   - `openmeteo`: optional paid-tier Open-Meteo path
+
+   **2016-09 → 2016-12 gap decision: null-stub for v2.0.** Recommended in the research doc was a one-time Open-Meteo Archive backfill, but today's evidence (Open-Meteo free-tier rate limits make even small fetches finicky) makes the deferred approach cleaner. 2016 Sept-Dec is 2.2% of training rows, train fold only — val (2023) and test_normal (2024-25) and test_crisis (2026) all use post-2017 dates with 100% wx coverage. LightGBM handles nulls natively. If post-retrain SHAP shows the 2016 nulls cost more than expected, the backfill is a clean v2.0.1 follow-up.
+
+   Headlines:
+
+   - **Sources:** NOAA GFS 0.25° + GEFS 1° + GEFS 0.5° hybrid for 2017-01 → present.
+   - **Spatial smartness:** grid-cell caching, not per-station. ~600 unique GFS cells cover the 4,587-station NSW roster (many stations resolve to the same cell, especially in Sydney metro). Per-(date, lead) grid parquet + pre-computed `station_grid_mapping.parquet` with bilinear interpolation weights. Adding new stations later requires no API calls.
+   - **Join semantics:** GFS parquet `<date>_h<N>.parquet` carries the forecast *issued on `date`, valid on `date + N` days*. Panel row at `t` reads `<t>_h<N>.parquet` directly — **no date shift needed** (unlike the Open-Meteo path which stored valid-date and required a -1d shift).
+   - **Expected absolute MAE rise:** 0.05-0.15 c/L. A-vs-B Δ MAE unchanged.
+   - **Methodological compromises:** `wx_weather_code` becomes null-stub (GFS/GEFS doesn't emit WMO codes; low SHAP rank); UTC vs Sydney day-boundary aggregation shifts daily aggregates by ~10h (low-rank feature, acceptable). 2016-09 → 2016-12 wx columns are null (~2.2% of training rows, train fold only).
 
 8. **7-day forecast horizon (v2.1)** — extend v1's 1-day prediction (`y_t1`) to per-day predictions for t+1 through t+7. Substantial architectural change: target schema, multi-horizon feature engineering, per-horizon model training, evaluation.
 
-   **Status: research complete, SHELVED pending historical multi-day NWP forecast data.**
+   **Status: data path unblocked by NOAA GFS pivot (§13.7); modelling work still queued.**
 
-   Full planning doc in [`docs/research/2026-05_7day_forecast_horizon.md`](docs/research/2026-05_7day_forecast_horizon.md) (Architecture A recommended — one LightGBM per horizon; 5-8 sessions estimated). **The pre-flight for §13.7 discovered a substantive blocker**: the Open-Meteo Historical Forecast API only exposes 0–24h lead time. The sibling Previous Runs API exposes multi-day lead times but only covers January 2024 onwards — so 7+ years of training data (2016-09 → 2023-12) would have no real multi-day forecast values. Follow-up research at [`docs/research/2026-05_weather_leakage_fix.md`](docs/research/2026-05_weather_leakage_fix.md) addendum surveyed alternatives:
+   The data blocker that originally shelved this is now solved. NOAA GFS/GEFS publishes forecast lead times out to 384 hours (16 days), so for each prediction date `t` the same files used for the 1-day case also serve t+2, t+3, …, t+7 (via `f048`, `f072`, …, `f168` lead-time slices of the same 00Z run on day `t`). User decision (2026-05-27): bundle multi-horizon data path with §13.7 v2.0 implementation (~1 extra session of fetcher work, ~10-14 hours wall-clock total backfill) so the data layer is 7-day-ready from day one and v2.1 modelling can land as a clean follow-up.
 
-   - **NOAA GFS archive (AWS S3):** earliest surface forecast files only from 2021-04-01, GRIB2-only (~544 MB each) — categorical complexity jump; doesn't fully solve the gap.
-   - **ECMWF Open Data, Planetary Computer ECMWF, NCEI historical GFS:** none retain a usable historical multi-day forecast archive on the free tier.
-   - **Commercial sources (Visual Crossing, etc.):** would cost ~$5–15k for full pre-2024 backfill, disproportionate for a ~3% SHAP feature block.
-   - **Recommended fallback if revisited:** day-1 forecast values used as a proxy for multi-day horizons in pre-2024 data + real Previous Runs API for 2024+. Re-introduces controlled leakage (proxy doesn't represent what a real multi-day forecast would have said), but strictly better than ERA5 actuals and trivial to implement.
+   Full modelling plan still in [`docs/research/2026-05_7day_forecast_horizon.md`](docs/research/2026-05_7day_forecast_horizon.md) — Architecture A (one LightGBM per horizon), 5-8 sessions estimated for the modelling work itself (target schema, per-horizon weather joins, 14-model training loop, per-horizon evaluation, notebook updates). This is **unchanged** by the data-source pivot; only the upstream weather pipeline changed.
 
-   **Why shelved:** the v1 model is performant at the 1-day horizon, the data constraint for honest multi-horizon is real, and the proxy fallback is not strictly leakage-free. Revisit if (a) Open-Meteo Previous Runs API gains historical coverage, (b) a usable free multi-day NWP archive emerges for Australia 2016-2023, or (c) the proxy approach is judged acceptable given the bounded leakage. §13.7 should land independently first — it has standalone value as a methodological correction at the 1-day horizon.
+   Total path to v2.1 from current state: **~9-12 sessions** in 3 logical phases: (Phase 1+2) NOAA GFS/GEFS data pipeline with 7-horizon support [4 sessions, this is §13.7 v2.0 plus the multi-horizon bundle]; (Phase 3) v2.1 modelling work [5-8 sessions, future].
+
+   Multi-horizon data path design + grid-cell caching architecture documented in [`docs/research/2026-06_nwp_archive_alternative.md`](docs/research/2026-06_nwp_archive_alternative.md) ("Multi-horizon extension" and "Grid-cell caching architecture" sections).
+
+9. **Self-hosted Open-Meteo (long-term weather-pipeline alternative)** — Open-Meteo publishes the server software open-source ([getting-started docs](https://github.com/open-meteo/open-meteo/blob/main/docs/getting-started.md)) and the underlying NWP data on a public S3 mirror. Running the Open-Meteo stack ourselves would give us:
+
+   - **No rate limits** (our own instance, our own resources)
+   - **Multi-day lead times** out of the box via their Previous Runs API — directly unblocks v2.1 §13.8 with the same Python client we already wrote (`src/fuel_pred/fetch/weather.py`), instead of the GFS GRIB pipeline (§13.7).
+   - **Pre-built variable derivations** including `weather_code` (the WMO code we null-stubbed in §13.7), wind gusts, cloud cover, etc. — recovers the small SHAP signal we discarded.
+   - **Same call signature** as the existing Open-Meteo fetcher, so the pivot is a config swap of `WEATHER_SOURCE=openmeteo` + a base-URL override pointing at our instance.
+
+   **Trade-off:** infra ownership. The Open-Meteo server has non-trivial system requirements (containerised, ~30 GB disk per model per global run, regular sync from S3). Worth it if v2.1+ weather work intensifies; not worth it for v2.0 alone (the §13.7 GFS pipeline already solves the rate-limit problem).
+
+   **Status: backlog, no current action.** Revisit when (a) v2.1 multi-horizon modelling work begins and the §13.7 GFS pipeline's parse-time cost becomes painful, OR (b) we want the richer Open-Meteo derived variables. Either trigger justifies the infra investment; v2.0 alone does not.
 
 ## 14. References
 

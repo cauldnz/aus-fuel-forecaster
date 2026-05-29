@@ -37,7 +37,9 @@ from fuel_pred.train._fit import DEFAULT_LOG_PERIOD, FitResult, fit_lgbm
 from fuel_pred.train.feature_blocks import (
     BLOCK_COLUMNS,
     MODEL_A_BLOCKS,
+    MODEL_A_GFS_BLOCKS,
     MODEL_B_BLOCKS,
+    MODEL_B_GFS_BLOCKS,
     MODEL_B_PRIME_BLOCKS,
     categorical_columns,
     feature_columns,
@@ -118,9 +120,25 @@ def train(
     # is intended for callers (notebooks / interactive use) that want the
     # spec drift to surface as a hard error; the production training
     # pipeline should be defensive about known-pending feature columns.
+    #
+    # Weather block selection (spec §13.7 v2.0): when WEATHER_SOURCE resolves
+    # to 'gfs', swap the Open-Meteo "wx" block for the GFS-day-1 "wx_gfs"
+    # block. Everything else stays the same. Model B' (the venue+long-weekend
+    # ablation) keeps the Open-Meteo block — it was a 2026-05 experiment
+    # against the v1 baseline; not worth re-running against v2 weather.
+    weather_source = config.resolve_weather_source()
+    if weather_source == "gfs":
+        a_blocks = MODEL_A_GFS_BLOCKS
+        b_blocks = MODEL_B_GFS_BLOCKS
+        logger.info("weather source: gfs — using MODEL_A_GFS_BLOCKS / MODEL_B_GFS_BLOCKS")
+    else:
+        a_blocks = MODEL_A_BLOCKS
+        b_blocks = MODEL_B_BLOCKS
+        logger.info("weather source: openmeteo — using canonical MODEL_A_BLOCKS / MODEL_B_BLOCKS")
+
     _warn_on_missing_blocks(work, MODEL_B_PRIME_BLOCKS)
-    cols_a = feature_columns(work, MODEL_A_BLOCKS, strict=False)
-    cols_b = feature_columns(work, MODEL_B_BLOCKS, strict=False)
+    cols_a = feature_columns(work, a_blocks, strict=False)
+    cols_b = feature_columns(work, b_blocks, strict=False)
     cols_b_prime = feature_columns(work, MODEL_B_PRIME_BLOCKS, strict=False)
     cat_a = categorical_columns(cols_a)
     cat_b = categorical_columns(cols_b)

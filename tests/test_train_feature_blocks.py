@@ -10,8 +10,8 @@ from fuel_pred.train import feature_blocks as fb
 
 
 def test_block_columns_match_spec_set_completely() -> None:
-    """All seven §7 blocks + the §13.6 Phase 1 venue block are present."""
-    expected = {"lag", "upstream", "cal", "ctx", "stn", "wx", "sa2", "venue"}
+    """All seven §7 blocks + the §13.6 Phase 1 venue + §13.7 v2.0 wx_gfs block."""
+    expected = {"lag", "upstream", "cal", "ctx", "stn", "wx", "sa2", "venue", "wx_gfs"}
     assert set(fb.BLOCK_COLUMNS) == expected
 
 
@@ -182,3 +182,52 @@ def test_categorical_columns_picks_venue_type_in_model_b_prime() -> None:
     cols_bp = fb.feature_columns(df, fb.MODEL_B_PRIME_BLOCKS)
     cats = fb.categorical_columns(cols_bp)
     assert "stn_nearest_venue_type" in cats
+
+
+# ---------- GFS weather-block variants (spec §13.7 v2.0) -----------------
+
+
+def test_model_a_gfs_blocks_swaps_wx_for_wx_gfs() -> None:
+    """Model A GFS variant: identical to Model A but the wx block becomes wx_gfs."""
+    assert set(fb.MODEL_A_GFS_BLOCKS) == set(fb.MODEL_A_BLOCKS) - {"wx"} | {"wx_gfs"}
+
+
+def test_model_b_gfs_blocks_swaps_wx_for_wx_gfs() -> None:
+    """Model B GFS variant: identical to Model B but the wx block becomes wx_gfs."""
+    assert set(fb.MODEL_B_GFS_BLOCKS) == set(fb.MODEL_B_BLOCKS) - {"wx"} | {"wx_gfs"}
+
+
+def test_wx_gfs_block_in_block_columns() -> None:
+    """BLOCK_COLUMNS must map 'wx_gfs' to WX_COLUMNS_GFS_T1, the day-1 set only."""
+    assert fb.BLOCK_COLUMNS["wx_gfs"] == fb.WX_COLUMNS_GFS_T1
+    assert len(fb.BLOCK_COLUMNS["wx_gfs"]) == 5  # 5 wx_* vars, day-1 only
+
+
+def test_wx_weather_code_t1_is_categorical() -> None:
+    """The day-1 GFS weather code is categorical (spec §13.7 v2.0).
+
+    GFS/GEFS doesn't emit WMO codes — this is null today — but listing
+    it as categorical means LightGBM treats the column type correctly
+    if a derivation lands later. Session 3 flagged the missing suffixed
+    entry as a future-pitfall; Session 4a fixes it.
+    Wider _t2..t7 horizons are added in v2.1 alongside the multi-horizon
+    block; they're deliberately NOT in CATEGORICAL_COLUMNS yet because
+    they're not in any BLOCK_COLUMNS entry (subset invariant).
+    """
+    assert "wx_weather_code_t1" in fb.CATEGORICAL_COLUMNS
+
+
+def test_wx_gfs_block_excludes_multi_horizon_columns() -> None:
+    """wx_gfs is t1-only; _t2..t7 cols must NOT be in MODEL_*_GFS_BLOCKS expansion."""
+    # All cols implied by MODEL_B_GFS_BLOCKS
+    expanded = set()
+    for block in fb.MODEL_B_GFS_BLOCKS:
+        expanded.update(fb.BLOCK_COLUMNS[block])
+    # No _t2..t7 weather columns should be present
+    for h in range(2, 8):
+        for var in ("temp_max_c", "temp_min_c", "precipitation_mm",
+                    "wind_speed_max_kmh", "weather_code"):
+            assert f"wx_{var}_t{h}" not in expanded, (
+                f"wx_{var}_t{h} should not be in v2.0 GFS model — "
+                f"only t1 horizon for spec §13.7"
+            )

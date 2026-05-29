@@ -76,6 +76,11 @@ Desktop.ini
 *.log
 logs/
 
+# Research spike outputs — captured stdout from one-off scripts under
+# tools/research/. Scripts themselves are tracked; output is ephemeral
+# and re-generatable, and may contain user-specific paths/emails.
+tools/research/*.out.txt
+
 # Local environment / secrets — API keys, OAuth tokens, etc.
 # .env contains real secrets and must never be committed.
 # .env.example is the template (committed, no real values).

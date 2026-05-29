@@ -793,17 +793,25 @@ To be resolved during implementation, not blocking spec sign-off:
 
 7. **Weather leakage fix (v2.0)** — v1's `wx_*` columns join Open-Meteo ERA5 *reanalysis actuals* on the same date as the prediction row, which means the model sees retrospective truth rather than the forecast a real-time predictor would have. `results/README.md` caveat #4 acknowledges this; absolute MAE is optimistic, though the A-vs-B comparison is unbiased (both models leak equally).
 
-   **Status: code complete (Sessions 1-4a landed); production fetch + retrain pending (Session 4b — ~10-14h unattended overnight job).**
+   **Status: ✅ LANDED (2026-05-29).** Outcome doc: [`docs/research/2026-05_weather_leakage_fix_outcome.md`](docs/research/2026-05_weather_leakage_fix_outcome.md).
+
+   **Result summary** (v2.0 GFS day-ahead vs v1 ERA5 leaky):
+   - **Absolute MAE rose 0.07-0.15 c/L** — within predicted leakage-tax range
+   - **test_normal Δ MAE (B vs A)**: −0.391 → **−0.353** (essentially unchanged — A-vs-B comparison was indeed unbiased w.r.t. leakage)
+   - **test_crisis Δ MAE**: −0.183 → **−0.398** (more than doubled — SA2 lift is now bigger AND more robust on OOD data)
+   - **Crisis-fold RMSE regression fixed**: v1 had Model B's RMSE *worse* than A (18.739 vs 18.628); v2 has B better (18.578 vs 19.054)
+   - v1 results/README.md caveat #2 ("crisis-fold lift is real but smaller and noisier") is **invalidated** by v2
 
    Original plan: [`docs/research/2026-05_weather_leakage_fix.md`](docs/research/2026-05_weather_leakage_fix.md) (Open-Meteo Historical Forecast API). Pre-flight at [`docs/research/2026-05_weather_leakage_preflight.md`](docs/research/2026-05_weather_leakage_preflight.md). **Empirical reality**: 2026-05-26/27 attempts to refetch all 4,587 NSW stations hit Open-Meteo's per-minute/per-hour/per-day rate limits within minutes, with each 429 itself counting against the daily quota — three attempts burned through the daily 10,000-call cap before completing ~3% of the fetch. The free tier is unworkable at this volume.
 
    **Revised plan**: [`docs/research/2026-06_nwp_archive_alternative.md`](docs/research/2026-06_nwp_archive_alternative.md). Strict-free path via **NOAA GFS 0.25°** (2021-04+) + **NOAA GEFS 1°/0.5°** (2017-01 → 2021-03) on anonymous AWS S3 buckets — no key, no quota, no 429s. Trade-off: ~10-14 hour one-time backfill via GRIB byte-range subsetting (7 horizons × 9 years of data). Open-Meteo path retained as optional paid-tier upgrade via `WEATHER_SOURCE=openmeteo` config switch + `OPENMETEO_API_KEY` env var.
 
-   **Code landed (4 implementation commits + Session 4a wiring):**
+   **Code landed (implementation commits, all on `claude/weather-leakage-fix-v2` branch):**
    - Session 1 (`17f491c`): GFS scaffolding + `spatial/gfs_grid.py` station-grid mapping
    - Session 2 (`14c9e2e`): `fetch/gfs.py` multi-horizon fetcher + `tools/parallel_gfs_fetch.py` orchestrator
    - Session 3 (`86f2071`): `build/make_features.py` `add_weather_features_gfs()` with bilinear interp + 35-column wide schema
-   - Session 4a (`8ae01b7`, `4a7f9bc`, `3d3c4e8`, `25c651e`, `cb91719`, `36df15d`): `WEATHER_SOURCE` config router, `MODEL_*_GFS_BLOCKS`, `train_models` dispatch, categorical fix, `make_features` orchestrator dispatch, Makefile targets
+   - Session 4a (`8ae01b7`, `4a7f9bc`, `3d3c4e8`, `25c651e`, `cb91719`, `36df15d`, `c3b23db`, `92d2dc1`, `0f54604`): `WEATHER_SOURCE` config router, `MODEL_*_GFS_BLOCKS`, `train_models` dispatch, categorical fix, `make_features` orchestrator dispatch, Makefile targets, docs (this entry), self-hosted-Open-Meteo backlog item (§13.9)
+   - Session 4b (production fetch + retrain): GFS fetch ran 2026-05-28 18:03 → 2026-05-29 11:07 (~17h wall-clock), then features regen + train + evaluate completed 12:43. 3,029 dates fetched (89% of in-range); 374 NOAA archive gaps + 122 pre-2017 fail-fast = ~20% rows with null `wx_*_t1` (handled natively by LightGBM)
 
    **`WEATHER_SOURCE` env var contract:**
    - `auto` (default): picks `openmeteo` if `OPENMETEO_API_KEY` is set, else `gfs`

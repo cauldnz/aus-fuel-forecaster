@@ -53,15 +53,19 @@ at [`docs/research/2026-05_weather_leakage_fix_outcome.md`](../docs/research/202
 
 ## How we got here — the iteration story
 
-The headline number is the end of a three-step search, not a first try. Each step is a
+The headline number is the end of a four-step search, not a first try. Each step is a
 real data point about how much SA2 demographics help and which ones.
 
-| Iteration | SA2 cols | Test_normal Δ MAE | What we learned |
-|-----------|---------:|------------------:|-----------------|
-| v1.4.2 augmentor, 10-col block | 10 | **+0.104** (Model B *lost*) | First real run; SA2 hurt the headline fold |
-| v1.5 augmentor, 10-col block | 10 | **−0.059** | The augmentor's improved parsing (v1.5) was itself a material win — same column *names*, better values |
-| v1.5 augmentor, 31-col block | 31 | **−0.025** | Broadening (DSS welfare + ERP + ABS_PIA + all SEIFA scores) *regressed* — better val MAE, worse test: textbook overfitting |
-| **v1.5 augmentor, 15-col block (final)** | **15** | **−0.391** | Curating to the original 10 + the 5 highest-gain new features recovered the full benefit *without* the overfitting tax |
+| Iteration | Augmentor | Weather | SA2 cols | Test_normal Δ MAE | What we learned |
+|-----------|---------|---------|---------:|------------------:|-----------------|
+| v1.0 | v1.4.2 | ERA5 (leaky) | 10 | **+0.104** (Model B *lost*) | First real run; SA2 hurt the headline fold |
+| v1.1 | v1.5 | ERA5 (leaky) | 10 | **−0.059** | The augmentor's improved parsing (v1.5) was itself a material win — same column *names*, better values |
+| v1.2 | v1.5 | ERA5 (leaky) | 31 | **−0.025** | Broadening (DSS welfare + ERP + ABS_PIA + all SEIFA scores) *regressed* — better val MAE, worse test: textbook overfitting |
+| v1.3 | v1.5 | ERA5 (leaky) | 15 | **−0.391** | Curating to the original 10 + the 5 highest-gain new features recovered the full benefit *without* the overfitting tax |
+| v2.0 weather fix | v1.5 | **NOAA GFS** (honest, spec §13.7) | 15 | **−0.353** | Weather-leakage fix; small absolute-MAE tax (~0.04 c/L), but **crisis-fold Δ doubled** (−0.183 → −0.398). Headline switched to this row when v2.0 landed |
+| **augmentor v2.0 bump (current)** | **v2.0** | **NOAA GFS** | **15** | **−0.353** | Pin bump with identical model block; cross-sectional v2.0 produces (byte-)identical predictions to v1.5 on this 15-col surface. Validates the upgrade is a no-op for the modeled features and the 5 new columns (ERP age/sex + 3 cross-dataset PRESETs) are safely available in `stations.parquet` for a follow-up curation experiment |
+
+The v1.5 review's recommendation #1 — "re-run your headline experiment on every minor-version bump" — was respected: this time the bump was a no-op on the 15-col surface. Compare with the v1.4.2→v1.5 swing on the same 10-col block (+0.104 → −0.059, a 0.163 c/L shift), which was a non-trivial reminder that augmentor versions can be hyperparameters when they're not.
 
 The key methodological finding: **more features didn't help — the right features did.**
 Broadening from 10 → 31 columns added 21 features that mostly re-encoded urban density

@@ -4,12 +4,16 @@ Reads:
 - ``data/interim/stations.parquet`` (post Phase 2 — has lat/lon).
 - The augmentor's local caches under ``data/raw/`` (one subdir per dataset:
   ``boundaries/<edition>/``, ``census/<edition>/``, ``mb/<edition>/``,
-  ``seifa_2021/``, ``erp_by_sa2/``, ``dss_payments/``, ``abs_personal_income/``).
+  ``seifa/``, ``erp_by_sa2/``, ``dss_payments/``, ``abs_personal_income/``).
   Per-edition layout is required by augmentor v1.5+ (Temporal Phase D).
+  v2.0 renamed the dataset id ``seifa_2021 → seifa`` (now covers both
+  2016 and 2021 releases under one cache); ``gcp_2021 → gcp`` similarly.
 
 Writes (overwrites in place):
 - ``data/interim/stations.parquet`` with the §6.1 SA2 keys + the §7.7
-  ``sa2_*`` enrichment block (28 columns at v1.5).
+  ``sa2_*`` enrichment block (33 columns at v2.0 — adds ``sa2_erp_population_65_plus``,
+  ``sa2_erp_median_age``, ``sa2_pct_age_pension_recipients``,
+  ``sa2_pct_jobseeker_recipients``, ``sa2_welfare_density_index``).
 
 Pipeline:
 1. One ``Pipeline.augment(stations, latitude_column='lat', longitude_column='lon')``
@@ -64,13 +68,24 @@ ENRICHED_COLUMNS: tuple[str, ...] = (
 # columns are excluded because they have legitimate per-SA2 nulls (publication
 # coverage gaps + DSS small-cell suppression — see spec §7.7). We log per-column
 # coverage for them but don't fail the run.
+#
+# The 6 v1.x GCP PRESETs (drive_to_work, motor_vehicles_per_dwelling, renters,
+# employed_full_time, aged_65_plus, one_parent_family) are dense and gated.
+# The v2.0 cross-dataset PRESETs (pct_age_pension_recipients,
+# pct_jobseeker_recipients, welfare_density_index) use DSS numerators so they
+# inherit small-cell suppression and are NOT gated — listed by exact name
+# to avoid the broad ``sa2_pct_`` prefix sweeping them in.
 ACCEPTANCE_PREFIXES: tuple[str, ...] = (
     "sa2_code",
     "sa2_name",
     "sa2_total_population",
     "sa2_median_age",
     "sa2_median_household_income_weekly",
-    "sa2_pct_",
+    "sa2_pct_drive_to_work",
+    "sa2_pct_renters",
+    "sa2_pct_employed_full_time",
+    "sa2_pct_aged_65_plus",
+    "sa2_pct_one_parent_family",
     "sa2_motor_vehicles_per_dwelling",
     "sa2_seifa_",
 )
@@ -85,14 +100,23 @@ def _ensure_columns_exist(stations: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _split_for_gcp_collision(variables: dict[str, str]) -> list[dict[str, str]]:
+def _split_for_preset_collision(variables: dict[str, str]) -> list[dict[str, str]]:
     """Group ``variables`` into augmentor-safe subsets.
 
-    See module docstring (UPSTREAM_GCP_COLLISION). When a direct GCP ref
-    (``G\\d+.<col>``) shares its code with the source fields of any
-    requested ``PRESET.<id>``, a single ``Pipeline.augment(...)`` call
-    crashes. We split the colliding direct refs into a separate group
-    so each call sees a non-colliding subset.
+    See module docstring (UPSTREAM_GCP_COLLISION). When any direct
+    ``<NAMESPACE>.<field>`` ref (e.g. ``G01.Tot_P_P``, ``DSS.age_pension_recipients``)
+    appears in the source-field list of a requested ``PRESET.<id>``, a single
+    ``Pipeline.augment(...)`` call crashes inside the PRESET evaluator
+    with ``ValueError: cannot reindex on an axis with duplicate labels``
+    (or, in v1.4.2, inside ``_build_gcp_lookup``).
+
+    Originally observed for GCP-internal PRESETs (`pct_aged_65_plus` uses
+    `G04.*` codes that we also request directly). v2.0 PR #86 adds three
+    cross-dataset PRESETs (`pct_age_pension_recipients`, `pct_jobseeker_recipients`,
+    `welfare_density_index`) that use DSS sources we also request directly
+    — same collision pattern. The splitter is therefore namespace-agnostic
+    in v2.0: it inspects every non-PRESET ref against every PRESET's
+    declared source_fields().
 
     The common (no collision) case returns ``[variables]`` — one group,
     one augment call. Tests rely on this single-call behaviour via
@@ -103,31 +127,29 @@ def _split_for_gcp_collision(variables: dict[str, str]) -> list[dict[str, str]]:
     except ImportError:  # augmentor not installed (e.g. some test envs)
         return [variables]
 
-    direct_codes: dict[str, str] = {}  # friendly -> "Gxx.<code>"
+    # Direct refs are anything that isn't a PRESET; we used to require a
+    # ``G\d+.`` prefix but v2.0's cross-dataset PRESETs collide with DSS
+    # too, so we look at every non-PRESET ref.
+    direct_refs: dict[str, str] = {}  # friendly -> "<NS>.<field>"
     preset_ids: list[str] = []
     for friendly, ref in variables.items():
         if ref.startswith("PRESET."):
             preset_ids.append(ref[len("PRESET.") :])
-        elif ref and ref[0].upper() == "G" and "." in ref:
-            direct_codes[friendly] = ref
+        elif "." in ref:
+            direct_refs[friendly] = ref
 
-    if not direct_codes or not preset_ids:
+    if not direct_refs or not preset_ids:
         return [variables]
 
-    direct_refs = set(direct_codes.values())
     colliding_friendlies: set[str] = set()
     for preset_id in preset_ids:
         try:
             sources = set(features.get(preset_id).source_fields())
         except KeyError:
             continue
-        for friendly, ref in direct_codes.items():
+        for friendly, ref in direct_refs.items():
             if ref in sources:
                 colliding_friendlies.add(friendly)
-                # Note: we intentionally don't break — a single direct
-                # ref could collide with multiple PRESETs, but the
-                # collision is symmetric so one membership flag suffices.
-                _ = direct_refs  # silence pyflakes; kept for readability above
 
     if not colliding_friendlies:
         return [variables]
@@ -136,12 +158,17 @@ def _split_for_gcp_collision(variables: dict[str, str]) -> list[dict[str, str]]:
     pass_b = {f: r for f, r in variables.items() if f in colliding_friendlies}
     logger.info(
         "augmentor split: %d non-colliding vars + %d colliding direct vars (%s) "
-        "to work around upstream #UPSTREAM_GCP_COLLISION",
+        "to work around upstream PRESET-collision bug",
         len(pass_a),
         len(pass_b),
         sorted(colliding_friendlies),
     )
     return [pass_a, pass_b]
+
+
+# Backwards-compat alias — tests in test_build_enrich_census.py import the
+# old name. Keep this until those tests migrate.
+_split_for_gcp_collision = _split_for_preset_collision
 
 
 def _augment_one_pass(
@@ -188,7 +215,7 @@ def _augment(
     column-wise; the first pass supplies ``sa2_code``/``sa2_name`` and
     the row scaffold.
     """
-    groups = _split_for_gcp_collision(DIRECT_VARIABLES)
+    groups = _split_for_preset_collision(DIRECT_VARIABLES)
     frames = [
         _augment_one_pass(
             stations, g, pipeline_factory=pipeline_factory, data_dir=data_dir
@@ -254,7 +281,7 @@ def enrich(
         data_dir: where the augmentor stores per-dataset caches. Defaults to
             ``config.DATA_RAW`` so caches live under ``data/raw/`` alongside
             our other raw inputs (each dataset gets its own subdir per the
-            v1.5 layout: ``seifa_2021/``, ``erp_by_sa2/``, ``dss_payments/``,
+            v2.0 layout: ``seifa/``, ``gcp/``, ``erp_by_sa2/``, ``dss_payments/``,
             ``abs_personal_income/``, plus ``boundaries/<edition>/`` etc.).
         force: if True, re-enrich every row even if `sa2_code` is populated.
         pipeline_factory: test seam — replaces the real augmentor pipeline.

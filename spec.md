@@ -412,14 +412,18 @@ Originally Phase 3 v1 stubbed the 6 derived percentages with nulls because (a) t
 
 `build.enrich_census` now passes all 6 PRESETs as variables to `Pipeline.augment(...)`. All Census-derived columns are populated. Acceptance threshold (≥ 95% non-null on the GCP / SEIFA columns) applies as spec'd. No null-stub framework remains.
 
-#### 7.7.2 Temporal DSS — deferred to a follow-up PR
+#### 7.7.2 Temporal augmentation — still deferred under augmentor v2.0
 
-The DSS Payment Demographic Data feed publishes one snapshot per calendar quarter going back to 2022-Q4. The augmentor's v1.5 Temporal mode (`Pipeline.augment(df, date_column=...)`) can resolve each row to the closest quarter independently, giving per-(station, date) DSS values rather than a single static snapshot. This is the natural fit for the augmentor-narrative story — fortnightly Centrelink-day pricing cycles depend on *current* welfare populations, not a 2025-Q3 snapshot held constant across the panel.
+The DSS Payment Demographic Data feed publishes one snapshot per calendar quarter going back to 2022-Q4. The augmentor's Temporal mode (`Pipeline.augment(df, date_column=...)`) can resolve each row to the closest quarter independently, giving per-(station, date) DSS values rather than a single static snapshot. This is the natural fit for the augmentor-narrative story — fortnightly Centrelink-day pricing cycles depend on *current* welfare populations, not a 2025-Q3 snapshot held constant across the panel.
 
-Two reasons we defer the temporal version to its own PR:
+**v1.5 status (historical):** Temporal mode existed but was single-edition (ASGS Edition 3 only); pre-2023-Q2 DSS releases on ASGS Edition 2 would fail or null out. This was the original blocker.
 
-1. **Architectural change.** Temporal augmentation runs against a panel-shaped DataFrame (one row per (station, date)), not the per-station stations.parquet. That requires a new pipeline step between `panel_grid` and `make_features`, and a Makefile rewire.
-2. **Cross-edition support is not yet available upstream.** Temporal Phase E.2 is single-edition; pre-2023-Q2 DSS releases are on ASGS Edition 2 and would need Phase F (deferred upstream) to mix with our Edition-3 boundaries. For our train fold (≤ 2022-12-31) the augmentor would either fail or null out. Workaround design (e.g. clamp to earliest Edition-3 release for old rows) is its own conversation.
+**v2.0 status (current):** Cross-edition orchestration landed (Phases F.1–F.4), making the v1.5 blocker conceptually resolved. **But our spike** (see [`docs/research/2026-05_abs_census_augmentor_v2.0_review.md`](docs/research/2026-05_abs_census_augmentor_v2.0_review.md)) **found two new implementation gaps**:
+
+1. **GCP cross-edition lookup returns NaN for 2016-dated rows.** The augmentor passes the Edition-3 SA2 code (current panel) to the 2016 GCP DataPack which is Edition-2 keyed — the lookup misses while reporting `gcp_release="2016"`. SEIFA temporal works correctly; GCP doesn't.
+2. **ERP temporal raises `RuntimeError: ERP release '<year>' not found. Available: ['<latest>']`.** ABS publishes ERP as one annual workbook containing the full time series in `population_history_<year>` columns, not per-year releases. v2.0's per-release resolver treats it like SEIFA and fails for any row whose date doesn't match a publication year.
+
+Both blockers are filed (or will be) upstream. Until they land, temporal mode adoption stays on hold. We also retain the architectural concerns from v1.5 — temporal augmentation runs against a panel-shaped DataFrame (one row per (station, date), ~15M rows), requiring a new pipeline step between `panel_grid` and `make_features` and a Makefile rewire.
 
 For v1, DSS lives in the static block at the latest-release pin. The signal it adds (per-SA2 welfare recipient counts) is meaningful even as a constant-across-time feature; the temporal upgrade adds *per-quarter variation*, which only kicks in for val + test data.
 
@@ -432,6 +436,8 @@ PR #45 was drafted against the dataset spec markdown files in `cauldnz/abs-censu
 - **DSS**: spec lists 9 named payment columns. Fetcher emits 21 (everything DSS publishes per quarter), and one of the spec'd names (`youth_allowance_student_recipients`) is actually `youth_allowance_student_and_apprentice_recipients` post-snake-casing.
 
 PR #46 fixed our `AUGMENTOR_VARIABLES` dict to match what's actually emitted: ERP shrank from 5 to 1 column, ABS_PIA grew from 1 to 4 columns (the gini was the one promised-but-missing entry), DSS grew from 9 to 13 (using real names + 4 bonus payment categories — FTB-A, FTB-B, carer allowance, seniors health card). Net SA2 surface: 28 → 29 columns.
+
+**Augmentor v2.0 update (§7.7.5):** PR #82 upstream closed the ERP age/sex gap — `population_male/female`, `population_0_14/15_64/65_plus`, and `median_age` are now emitted by the v2.0 fetcher. We picked up `population_65_plus` + `median_age` in PR A; the gender split is fetched-but-not-modeled for v1. The ABS_PIA `gini_coefficient` + income-by-source medians remain on the spec-only side.
 
 This is the second occurrence of the same root-cause pattern — [augmentor #23](https://github.com/cauldnz/abs-census-augmentor/issues/23) was the first, where v1.3 PRESETs referenced GCP columns that didn't exist and tests passed against synthetic fixtures encoding the same broken names. Upstream issue [#65](https://github.com/cauldnz/abs-census-augmentor/issues/65) was filed against the augmentor to (a) trim the dataset spec markdowns to reality or (b) implement the spec'd columns, *and* to add a `test_spec_matches_fetcher_columns` test rung that locks the door against this category of bug recurring. Local copy of the issue body is in `tools/upstream_issue_dataset_spec_drift.md`.
 
@@ -464,6 +470,20 @@ The v1.2 curation keeps the original 10 + the 5 top-by-gain new features:
 `AUGMENTOR_VARIABLES` in `config.py` still requests all 31 columns so they remain available in `stations.parquet` for future ablation studies. The model just doesn't consume them.
 
 **Implication for temporal-DSS (§7.7.2):** if *static* DSS recipient counts contribute ≤ 0.04% gain at the top end (and most at noise floor), the marginal value of per-quarter temporal resolution is questionable — the temporal hypothesis would need to live entirely in quarter-to-quarter variation that the static snapshot misses. Temporal-DSS is **further deprioritised** until a separate experiment demonstrates the static signal floor isn't the ceiling.
+
+#### 7.7.5 Augmentor v2.0 upgrade — static-surface bump
+
+PR A (this phase) bumps the pin to augmentor v2.0.0 and broadens `AUGMENTOR_VARIABLES` by 5 columns — all in **cross-sectional** mode (temporal mode remains deferred per §7.7.2):
+
+- `sa2_erp_population_65_plus` (ERP age-cohort split, new in v2.0 PR #82)
+- `sa2_erp_median_age` (ERP median age, new in v2.0 PR #82)
+- `sa2_pct_age_pension_recipients` (cross-dataset PRESET, DSS ÷ ERP 65+; new in v2.0 PR #86)
+- `sa2_pct_jobseeker_recipients` (cross-dataset PRESET, DSS ÷ ERP working-age; new in v2.0 PR #86)
+- `sa2_welfare_density_index` (cross-dataset PRESET, 9 DSS payments ÷ ERP total; new in v2.0 PR #86)
+
+These land in `stations.parquet` but **do not enter `SA2_COLUMNS` (the 15-col model block)** automatically — per the §7.7.4 curation pattern, the model consumes a curated subset and gain-based ranking decides what's worth keeping. A follow-up curation experiment (similar to v1.5's 31→15 trim) can re-rank with the new 5 candidates in the pool. The PR A headline experiment is "same 15-col block, augmentor v2.0 vs v1.5 — does the upstream version bump alone move the test fold?" — analogous to the v1.4.2→v1.5 swing documented in [`docs/research/2026-05_abs_census_augmentor_v1.5_review.md`](docs/research/2026-05_abs_census_augmentor_v1.5_review.md).
+
+For the temporal-mode (PR B) work that follows once the upstream blockers in §7.7.2 close, the 3 cross-dataset PRESETs inherit the ERP single-publication limitation (they use ERP denominators); they freeze to the latest ERP release regardless of `date_column`. Not a behavioural difference for PR A but worth flagging for PR B planning.
 
 ### 7.8 Target
 

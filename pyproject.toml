@@ -33,16 +33,28 @@ dependencies = [
     "shapely>=2.0",
     # Plotting (notebooks pull this in)
     "matplotlib>=3.8",
-    # The augmentor itself. Pinned to 8fe6fa55 (post-PR #64), the head of
-    # the upstream "Temporal" feature theme — adds the ERP / DSS / ABS_PIA
-    # dataset families and the Temporal mode infrastructure. Two upstream
-    # BREAKING changes land at this rev:
-    #   - `ATO.*` namespace renamed to `ABS_PIA.*` (we never used ATO; no impact)
-    #   - cache restructure to per-ASGS-edition subdirs (must wipe
-    #     `data/raw/seifa/`, `data/raw/boundaries/`, `data/raw/census/`,
-    #     `data/raw/mb/` once on next `make enrich` so the augmentor
-    #     repopulates the new layout).
-    "abs-census-augmentor @ git+https://github.com/cauldnz/abs-census-augmentor.git@8fe6fa55247def1e5bc1be81a2cd33775680ac3e",
+    # The augmentor itself. Pinned to v2.0.0 (commit 887ec011, 2026-05-27).
+    # The v2.0.0 release ships cross-edition temporal augmentation plus
+    # 2016 GCP/SEIFA snapshots; we adopt only the *cross-sectional* parts
+    # here (ERP age/sex columns + cross-dataset PRESETs). Temporal mode is
+    # deferred to a follow-up phase pending two upstream gaps:
+    #   - GCP cross-edition lookup returns NaN for 2016 release rows
+    #     (uses Edition-3 SA2 codes against Edition-2 keyed data).
+    #   - ERP temporal resolution can't find pre-current-year releases
+    #     (ABS publishes one annual workbook with `population_history_<year>`
+    #     columns; the augmentor models it as one release per year).
+    # See docs/research/2026-05_abs_census_augmentor_v2.0_review.md for the
+    # spike findings and phased adoption plan, and the v1.5 review for the
+    # earlier upgrade narrative.
+    #
+    # Migration notes from v1.5 → v2.0:
+    #   - Cache layout changed flat → per-ASGS-edition subdirs (already
+    #     adopted under v1.5 since temporal-Phase D landed there).
+    #   - Dataset IDs renamed (`gcp_2021 → gcp`, `seifa_2021 → seifa`).
+    #     We don't reference dataset IDs in our code (only the namespace
+    #     refs `G02.*`, `SEIFA.*`), so no source changes needed.
+    #   - `ATO.*` → `ABS_PIA.*` already handled at v1.5.
+    "abs-census-augmentor @ git+https://github.com/cauldnz/abs-census-augmentor.git@887ec011359493d6d1c71323cebdad1da14400aa",
     "python-dotenv>=1.2.2",
     "cfgrib>=0.9.15.1",
     "eccodes>=2.47.0",

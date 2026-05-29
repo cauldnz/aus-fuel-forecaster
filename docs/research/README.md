@@ -24,6 +24,7 @@ The convention exists because research artefacts often have lasting value beyond
 | File | Topic | Spec ref |
 |---|---|---|
 | [`2026-05_7day_forecast_horizon.md`](2026-05_7day_forecast_horizon.md) | Multi-output 7-day forecast (Architecture A: one LightGBM per horizon). Shelved pending historical multi-day NWP forecast data — Open-Meteo Previous Runs only goes back to Jan 2024; no good free alternative for pre-2024 Australia. | spec §13.8 |
+| [`2026-05_abs_census_augmentor_v2.0_review.md`](2026-05_abs_census_augmentor_v2.0_review.md) | v1.5 → v2.0.0 upgrade. Spike confirmed cross-edition temporal works for SEIFA but reveals GCP cross-edition lookup returns NaN for 2016-dated rows and ERP raises `RuntimeError` (single-publication, time series in columns). PR A (cross-sectional upgrade + new ERP age/sex + cross-dataset PRESETs) is ready to ship; PR B (temporal-mode adoption) waits on upstream fixes. | spec §7.7.2 |
 
 ### Tested and stopped (null / negative results)
 

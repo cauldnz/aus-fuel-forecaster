@@ -190,15 +190,18 @@ AUGMENTOR_VARIABLES: dict[str, str] = {
     "seifa_ier_score": "SEIFA.ier_score",
     "seifa_ieo_score": "SEIFA.ieo_score",
     # ABS Estimated Resident Population — latest annual release (currently
-    # 2024). The augmentor's ERP fetcher only exposes a single point-in-time
-    # value (`population_total`) plus per-year history columns; the dataset
-    # spec markdown promises age bands / density / median age but those
-    # aren't wired up in v1.5. See upstream
-    # <https://github.com/cauldnz/abs-census-augmentor/issues/65> for the
-    # spec-drift discussion. Useful signal here is the post-Census drift:
-    # ERP `population_total` (2024) vs `G01.Tot_P_P` (2021) lets the model
-    # see growth corridors that Census alone misses.
+    # 2024). The augmentor's ERP fetcher exposes a single point-in-time
+    # value (`population_total`) plus per-year history columns; v2.0 (PR #82)
+    # closes the v1.5 spec-drift gap by also emitting age bands, gender
+    # splits, and median age. We adopt the age-cohort split + median age
+    # (skip the gender split for v1 — likely low marginal rank in curation).
+    # Useful signal: post-Census drift (ERP `population_total` 2024 vs
+    # `G01.Tot_P_P` 2021) lets the model see growth corridors Census misses;
+    # the new `population_65_plus` complements `sa2_pct_aged_65_plus` (a
+    # PRESET ratio over total population) with a level rather than a rate.
     "erp_population_total": "ERP.population_total",
+    "erp_population_65_plus": "ERP.population_65_plus",
+    "erp_median_age": "ERP.median_age",
     # ABS Personal Income in Australia — latest financial-year release
     # (currently 2022-23). LEED-derived from ATO data, so different bias
     # profile to Census's self-report household income (`G02.Median_tot_hhd_inc_weekly`):
@@ -235,4 +238,16 @@ AUGMENTOR_VARIABLES: dict[str, str] = {
     ),
     "dss_family_tax_benefit_a_recipients": "DSS.family_tax_benefit_a_recipients",
     "dss_family_tax_benefit_b_recipients": "DSS.family_tax_benefit_b_recipients",
+    # Cross-dataset PRESETs new in augmentor v2.0 (PR #86). Each pulls a
+    # DSS numerator and an ERP denominator. Worth adopting because we
+    # currently take raw DSS recipient counts that collinearise with
+    # `n_pop_total` / `stn_competitors_within_*km` density signals; ratios
+    # decouple welfare-cohort signal from urban-density signal.
+    # Caveat: until upstream temporal-mode bug for ERP releases is fixed,
+    # the ERP denominator falls back to the latest ERP publication (2024)
+    # regardless of cross-sectional vs temporal mode. We're cross-sectional
+    # anyway in PR A, so no behaviour change — flagged for the PR B planning.
+    "pct_age_pension_recipients": "PRESET.pct_age_pension_recipients",
+    "pct_jobseeker_recipients": "PRESET.pct_jobseeker_recipients",
+    "welfare_density_index": "PRESET.welfare_density_index",
 }

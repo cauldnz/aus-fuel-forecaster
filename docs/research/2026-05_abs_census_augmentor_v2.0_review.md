@@ -173,12 +173,12 @@ Risk: low. Variable refs unchanged for the most-used datasets; new columns drop 
 
 Estimate: 1–2 sessions.
 
-### Pre-PR-B work: file upstream issues first
+### Pre-PR-B work: upstream issues filed
 
-Before opening PR B, file two upstream issues with reproducers from the spike:
+Two upstream issues filed alongside PR A:
 
-1. **GCP cross-edition lookup returns NaN for the 2016 release** ([Surprise 3](#surprise-3-gcp-cross-edition-lookup-returns-nan-for-2016-rows)). The augmentor reports `gcp_release="2016"` and `gcp_sa2_code_source="<Ed.3 code>"` but the value lookup misses. The diagnostic script [`tools/research/v2_spike_diagnose.py`](../../tools/research/v2_spike_diagnose.py) is a 30-line reproducer.
-2. **ERP temporal-release resolution only sees the latest publication** ([Surprise 1](#surprise-1-erp-temporal-resolution-is-single-release-only)). ABS publishes ERP as one annual workbook with the full time series back to 2001; the augmentor's per-release temporal resolution doesn't model this. The "fix" might be docs (clarify that ERP is cross-sectional only, or use `population_history_<year>` for back-fill) rather than code.
+1. **[abs-census-augmentor#91](https://github.com/cauldnz/abs-census-augmentor/issues/91)** — GCP cross-edition lookup returns NaN for the 2016 release ([Surprise 3](#surprise-3-gcp-cross-edition-lookup-returns-nan-for-2016-rows)). The augmentor reports `gcp_release="2016"` and `gcp_sa2_code_source="<Ed.3 code>"` but the value lookup misses. The diagnostic script [`tools/research/v2_spike_diagnose.py`](../../tools/research/v2_spike_diagnose.py) is a 30-line reproducer.
+2. **[abs-census-augmentor#92](https://github.com/cauldnz/abs-census-augmentor/issues/92)** — ERP temporal-release resolution only sees the latest publication ([Surprise 1](#surprise-1-erp-temporal-resolution-is-single-release-only)). ABS publishes ERP as one annual workbook with the full time series back to 2001; the augmentor's per-release temporal resolution doesn't model this. The "fix" might be docs (clarify that ERP is cross-sectional only, or use `population_history_<year>` for back-fill) rather than code.
 
 These aren't blockers for PR A. They are blockers for PR B until resolved upstream.
 

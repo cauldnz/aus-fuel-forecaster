@@ -113,13 +113,19 @@ def lookup() -> dict[tuple[float, float], dict[str, object]]:
             "sa2_seifa_irsad_score": 1102.0,
             "sa2_seifa_ier_score": 1085.0,
             "sa2_seifa_ieo_score": 1110.0,
-            # ERP
+            # ERP (v2.0 adds age-cohort split + median age via PR #82)
             "sa2_erp_population_total": 21800,
+            "sa2_erp_population_65_plus": 3231,
+            "sa2_erp_median_age": 30,
             # ABS_PIA
             "sa2_pia_median_total_income": 65000.0,
             "sa2_pia_mean_total_income": 78000.0,
             "sa2_pia_income_earners_count": 14500,
             "sa2_pia_median_age_of_earners": 34.0,
+            # Cross-dataset PRESETs (new in v2.0 PR #86)
+            "sa2_pct_age_pension_recipients": 26.31,
+            "sa2_pct_jobseeker_recipients": 2.65,
+            "sa2_welfare_density_index": 0.31,
             # DSS
             "sa2_dss_age_pension_recipients": 850,
             "sa2_dss_jobseeker_payment_recipients": 410,
@@ -152,10 +158,15 @@ def lookup() -> dict[tuple[float, float], dict[str, object]]:
             "sa2_seifa_ier_score": 1095.0,
             "sa2_seifa_ieo_score": 1130.0,
             "sa2_erp_population_total": 13900,
+            "sa2_erp_population_65_plus": 3447,
+            "sa2_erp_median_age": 46,
             "sa2_pia_median_total_income": 95000.0,
             "sa2_pia_mean_total_income": 145000.0,
             "sa2_pia_income_earners_count": 8400,
             "sa2_pia_median_age_of_earners": 47.0,
+            "sa2_pct_age_pension_recipients": 36.26,
+            "sa2_pct_jobseeker_recipients": 1.29,
+            "sa2_welfare_density_index": 0.32,
             "sa2_dss_age_pension_recipients": 1250,
             "sa2_dss_jobseeker_payment_recipients": 180,
             "sa2_dss_disability_support_pension_recipients": 110,
@@ -271,17 +282,22 @@ def test_pipeline_receives_preset_variables(
     tmp_path: Path,
     stations_in: Path,
 ) -> None:
-    """The DIRECT_VARIABLES dict passes 6 PRESET refs to the augmentor."""
+    """The DIRECT_VARIABLES dict passes the v1.x GCP PRESETs + v2.0 cross-dataset PRESETs."""
     preset_keys = [
         k for k, v in ec.DIRECT_VARIABLES.items() if str(v).startswith("PRESET.")
     ]
     assert sorted(preset_keys) == sorted([
+        # v1.x GCP-internal PRESETs (6)
         "pct_drive_to_work",
         "motor_vehicles_per_dwelling",
         "pct_renters",
         "pct_employed_full_time",
         "pct_aged_65_plus",
         "pct_one_parent_family",
+        # v2.0 cross-dataset PRESETs (3, augmentor PR #86)
+        "pct_age_pension_recipients",
+        "pct_jobseeker_recipients",
+        "welfare_density_index",
     ])
     # Each PRESET ref is well-formed (PRESET.<id> matching one we know upstream ships).
     for k, v in ec.DIRECT_VARIABLES.items():

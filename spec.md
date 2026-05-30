@@ -412,20 +412,33 @@ Originally Phase 3 v1 stubbed the 6 derived percentages with nulls because (a) t
 
 `build.enrich_census` now passes all 6 PRESETs as variables to `Pipeline.augment(...)`. All Census-derived columns are populated. Acceptance threshold (≥ 95% non-null on the GCP / SEIFA columns) applies as spec'd. No null-stub framework remains.
 
-#### 7.7.2 Temporal augmentation — still deferred under augmentor v2.0
+#### 7.7.2 Temporal augmentation — landed (PR B)
 
-The DSS Payment Demographic Data feed publishes one snapshot per calendar quarter going back to 2022-Q4. The augmentor's Temporal mode (`Pipeline.augment(df, date_column=...)`) can resolve each row to the closest quarter independently, giving per-(station, date) DSS values rather than a single static snapshot. This is the natural fit for the augmentor-narrative story — fortnightly Centrelink-day pricing cycles depend on *current* welfare populations, not a 2025-Q3 snapshot held constant across the panel.
+The DSS Payment Demographic Data feed publishes one snapshot per calendar quarter going back to 2022-Q4. The augmentor's Temporal mode (`Pipeline.augment(df, date_column=...)`) resolves each row to the closest snapshot independently, giving per-(station, date) values rather than a single static snapshot. This is the natural fit for the augmentor-narrative story — fortnightly Centrelink-day pricing cycles depend on *current* welfare populations, not a 2025-Q3 snapshot held constant across the panel. Per-row SEIFA similarly differentiates 2016 vs 2021 Census release values across the panel's 2016-09 → 2026-04 span.
 
 **v1.5 status (historical):** Temporal mode existed but was single-edition (ASGS Edition 3 only); pre-2023-Q2 DSS releases on ASGS Edition 2 would fail or null out. This was the original blocker.
 
-**v2.0 status (current):** Cross-edition orchestration landed (Phases F.1–F.4), making the v1.5 blocker conceptually resolved. **But our spike** (see [`docs/research/2026-05_abs_census_augmentor_v2.0_review.md`](docs/research/2026-05_abs_census_augmentor_v2.0_review.md)) **found two new implementation gaps**:
+**v2.0 status (2026-05-27 release):** Cross-edition orchestration landed (Phases F.1–F.4). Our PR A spike (see [`docs/research/2026-05_abs_census_augmentor_v2.0_review.md`](docs/research/2026-05_abs_census_augmentor_v2.0_review.md)) found two implementation gaps and filed them upstream as cauldnz/abs-census-augmentor#91 (GCP cross-edition NaN) and #92 (ERP single-publication).
 
-1. **GCP cross-edition lookup returns NaN for 2016-dated rows.** The augmentor passes the Edition-3 SA2 code (current panel) to the 2016 GCP DataPack which is Edition-2 keyed — the lookup misses while reporting `gcp_release="2016"`. SEIFA temporal works correctly; GCP doesn't.
-2. **ERP temporal raises `RuntimeError: ERP release '<year>' not found. Available: ['<latest>']`.** ABS publishes ERP as one annual workbook containing the full time series in `population_history_<year>` columns, not per-year releases. v2.0's per-release resolver treats it like SEIFA and fails for any row whose date doesn't match a publication year.
+**v2.0 post-fix status (2026-05-29, current commit `65fd3fa6`):**
 
-Both blockers are filed (or will be) upstream. Until they land, temporal mode adoption stays on hold. We also retain the architectural concerns from v1.5 — temporal augmentation runs against a panel-shaped DataFrame (one row per (station, date), ~15M rows), requiring a new pipeline step between `panel_grid` and `make_features` and a Makefile rewire.
+- **#92 fully resolved** via PR #95 — `ErpDataSource` now serves any historical year ≤ latest via column projection at `load()` time. `ERP.population_total` works for any panel row from 2017+.
+- **#91 Stage 1 resolved** via PR #94 — silent-NaN replaced with a loud `ValueError`. Stage 2 (the proper per-release `DataPacksDataSource` routing) remains on upstream backlog.
 
-For v1, DSS lives in the static block at the latest-release pin. The signal it adds (per-SA2 welfare recipient counts) is meaningful even as a constant-across-time feature; the temporal upgrade adds *per-quarter variation*, which only kicks in for val + test data.
+**PR B architecture (landed in this PR):** split the augmentor surface into two passes, one cross-sectional and one temporal, with each variable belonging to exactly one pass.
+
+- **Cross-sectional pass** (existing `build.enrich_census` against `stations.parquet`) — GCP direct + GCP-internal PRESETs + ERP age/sex + ABS_PIA + cross-dataset PRESETs + **DSS welfare** (latest quarter). Four reasons a variable stays cross-sectional:
+  1. GCP-routed: upstream #91 Stage 2 pending — temporal mode raises a loud `ValueError`.
+  2. ERP age/sex: ABS 3235.0 cube ships these only for the latest publication year (documented in upstream #92 resolution); historical rows would return null.
+  3. Cross-dataset PRESETs depend on ERP age/sex denominators → inherit (2).
+  4. **DSS welfare**: the augmentor's DSS XLSX parser fails on the 2022-Q4 release (the earliest available) — `RuntimeError: No SA2 data rows`. Filed upstream as cauldnz/abs-census-augmentor#99. Until that lands, DSS stays cross-sectional (latest quarter only). Moving DSS to the temporal pass when #99 closes is a one-line config change.
+- **Temporal pass** (new `build.enrich_panel_temporal` against the panel, deduped to unique (station_id, date)) — SEIFA + ERP `population_total`. Output joins back to `features.parquet` on (station_id, date) at make_features time.
+
+The split is exhaustive — `config.AUGMENTOR_VARIABLES_TEMPORAL` and `config.AUGMENTOR_VARIABLES_CROSS_SECTIONAL` are disjoint, guarded by a unit test. Each variable's `sa2_*` column name is the same regardless of source; the model code (`feature_blocks.SA2_COLUMNS`) doesn't care which pass populated which column.
+
+**Coverage on train fold:** Train rows (≤ 2022-12-31) get genuine per-row SEIFA variation across the 2016/2021 release transition (~50/50 split). ERP `population_total` projects back to 2017 via column projection on the 2024 publication cube (ABS internal concordance, see upstream #92 docs); pre-2017 rows clamp to release 2017 via `temporal.out_of_range: nearest`. DSS adds no per-quarter variation in this PR (pending #99); it remains frozen at the latest published quarter via the cross-sectional pass — same behaviour as PR A.
+
+**Empirical outcome (PR B headline retrain):** Per-row temporal SEIFA + ERP `population_total` **regressed** test_normal Δ MAE from −0.353 → −0.239 and test_crisis Δ MAE from −0.398 → −0.321 vs. the PR A cross-sectional baseline. The architecture is correct and the columns flow through correctly (verified by the temporal-block merge log + 99.2-100% coverage on the new panel parquet), but per-row variation in 2016-vs-2021 SEIFA + 2017-2024 ERP appears to introduce noise the model doesn't pay back — possibly because the panel-skew toward post-2020 dates makes the older releases low-value, or because the model was already extracting whatever temporal-demographics signal exists via `date`/year features. The architecture remains in place as a no-regret platform for future column moves (especially DSS once upstream #99 lands), but the **temporal-demographics hypothesis from this section is not empirically supported** on the v2.0+weather-fix problem as configured. See [`results/README.md`](results/README.md) iteration table for the full row.
 
 #### 7.7.3 Augmentor schema vs spec drift — narrowed surface for ERP / ABS_PIA
 
@@ -484,6 +497,8 @@ PR A (this phase) bumps the pin to augmentor v2.0.0 and broadens `AUGMENTOR_VARI
 These land in `stations.parquet` but **do not enter `SA2_COLUMNS` (the 15-col model block)** automatically — per the §7.7.4 curation pattern, the model consumes a curated subset and gain-based ranking decides what's worth keeping. A follow-up curation experiment (similar to v1.5's 31→15 trim) can re-rank with the new 5 candidates in the pool. The PR A headline experiment is "same 15-col block, augmentor v2.0 vs v1.5 — does the upstream version bump alone move the test fold?" — analogous to the v1.4.2→v1.5 swing documented in [`docs/research/2026-05_abs_census_augmentor_v1.5_review.md`](docs/research/2026-05_abs_census_augmentor_v1.5_review.md).
 
 For the temporal-mode (PR B) work that follows once the upstream blockers in §7.7.2 close, the 3 cross-dataset PRESETs inherit the ERP single-publication limitation (they use ERP denominators); they freeze to the latest ERP release regardless of `date_column`. Not a behavioural difference for PR A but worth flagging for PR B planning.
+
+**PR B follow-up (2026-05-30):** With upstream cauldnz/abs-census-augmentor#92 fully resolved and #91 Stage-1 fixed (loud error), the split documented in §7.7.2 landed. The 5 columns above remain cross-sectional per the routing decisions there; PR B added SEIFA + DSS + `ERP.population_total` to a new temporal pass (`build.enrich_panel_temporal`).
 
 ### 7.8 Target
 

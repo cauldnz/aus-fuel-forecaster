@@ -51,9 +51,12 @@ from fuel_pred import config
 logger = logging.getLogger(__name__)
 
 # Variables we ask the augmentor to compute on each station's SA2.
-# Sourced from ``config.AUGMENTOR_VARIABLES`` so the spec / config file is the
-# single source of truth — see that module for per-namespace commentary.
-DIRECT_VARIABLES: dict[str, str] = dict(config.AUGMENTOR_VARIABLES)
+# Sourced from ``config.AUGMENTOR_VARIABLES_CROSS_SECTIONAL`` per the
+# spec §7.7.2 split — this module only enriches the *cross-sectional*
+# block (GCP + GCP-internal PRESETs + ERP age/sex + ABS_PIA + cross-dataset
+# PRESETs). The *temporal* block (SEIFA + DSS + ERP.population_total) is
+# handled by ``build.enrich_panel_temporal`` against the panel, not stations.
+DIRECT_VARIABLES: dict[str, str] = dict(config.AUGMENTOR_VARIABLES_CROSS_SECTIONAL)
 
 # Schema we add to stations.parquet — sa2_code / sa2_name come from the
 # augmentor's geographic resolution; the rest are 1:1 with DIRECT_VARIABLES
@@ -75,6 +78,10 @@ ENRICHED_COLUMNS: tuple[str, ...] = (
 # pct_jobseeker_recipients, welfare_density_index) use DSS numerators so they
 # inherit small-cell suppression and are NOT gated — listed by exact name
 # to avoid the broad ``sa2_pct_`` prefix sweeping them in.
+#
+# v2.0+ (spec §7.7.2): SEIFA moved to the temporal pass and is no longer
+# enriched here; the ``sa2_seifa_`` acceptance prefix accordingly drops.
+# Coverage of SEIFA columns is gated by ``build.enrich_panel_temporal``.
 ACCEPTANCE_PREFIXES: tuple[str, ...] = (
     "sa2_code",
     "sa2_name",
@@ -87,7 +94,6 @@ ACCEPTANCE_PREFIXES: tuple[str, ...] = (
     "sa2_pct_aged_65_plus",
     "sa2_pct_one_parent_family",
     "sa2_motor_vehicles_per_dwelling",
-    "sa2_seifa_",
 )
 
 

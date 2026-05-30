@@ -165,9 +165,34 @@ LGBM_PARAMS: dict[str, object] = {
 # ``<NAMESPACE>.<field>`` form — see each dataset's spec markdown in the
 # augmentor repo (`datasets/<id>.md`) for the canonical schema.
 #
-# Spec: spec.md §7.7. The order here mirrors the spec block order.
+# v2.0+ (spec §7.7.2) splits the augmentor surface into two passes:
+#
+# - CROSS_SECTIONAL: variables that don't temporal cleanly — frozen at
+#   latest release per spec §7.7.5. Enriched onto stations.parquet via
+#   build.enrich_census. Three reasons a variable belongs here:
+#     1. GCP-routed (direct G##.* or GCP-internal PRESETs): upstream
+#        augmentor #91 Stage 2 (proper per-release DataPacks routing) is
+#        still on backlog; temporal mode raises a loud ValueError today.
+#     2. ERP age/sex (population_65_plus, median_age): the source ABS
+#        3235.0 cube only ships these for the latest publication year;
+#        historical releases return null per the augmentor #92 docs.
+#     3. Cross-dataset PRESETs that depend on ERP age/sex denominators
+#        (pct_age_pension_recipients etc.): inherit (2) above.
+#
+# - TEMPORAL: variables that resolve per-row to the contemporaneous
+#   release. Enriched onto data/interim/panel_sa2_temporal.parquet via
+#   build.enrich_panel_temporal, then merged on (station_id, date) at
+#   feature build time. Three families today:
+#     - SEIFA 2016 + 2021 (~50/50 split across train fold).
+#     - ERP population_total (annual back-projection via augmentor #92 fix,
+#       2017+).
+#     - DSS welfare (quarterly back to 2022-Q4 — gives val+test fold
+#       per-quarter variation against a constant-2022-Q4 train fold).
+#
+# Spec: spec.md §7.7 — block schema; §7.7.2 — temporal split; §7.7.5 —
+# v2.0 static-surface bump.
 
-AUGMENTOR_VARIABLES: dict[str, str] = {
+AUGMENTOR_VARIABLES_CROSS_SECTIONAL: dict[str, str] = {
     # Census 2021 GCP — direct fields
     "median_age": "G02.Median_age_persons",
     "median_household_income_weekly": "G02.Median_tot_hhd_inc_weekly",
@@ -175,31 +200,17 @@ AUGMENTOR_VARIABLES: dict[str, str] = {
     # Census 2021 PRESETs — six curated ratios with their right denominators
     # baked in; resolves the long-standing "what's the right denominator
     # per column" spike (augmentor #11, #18, #23 history in spec §7.7.1).
+    # GCP-internal so routes through the GCP DataPacks — must stay
+    # cross-sectional (upstream #91 Stage 2 pending).
     "pct_drive_to_work": "PRESET.pct_drive_to_work",
     "motor_vehicles_per_dwelling": "PRESET.motor_vehicles_per_dwelling",
     "pct_renters": "PRESET.pct_renters",
     "pct_employed_full_time": "PRESET.pct_employed_full_time",
     "pct_aged_65_plus": "PRESET.pct_aged_65_plus",
     "pct_one_parent_family": "PRESET.pct_one_parent_family",
-    # SEIFA 2021 — four indexes, score values (technical paper recommends
-    # quantiles over scores for modelling but we keep the score for
-    # finer-grained tree splits). State-relative deciles deferred until
-    # we see whether the score scale alone gives the model enough signal.
-    "seifa_irsd_score": "SEIFA.irsd_score",
-    "seifa_irsad_score": "SEIFA.irsad_score",
-    "seifa_ier_score": "SEIFA.ier_score",
-    "seifa_ieo_score": "SEIFA.ieo_score",
-    # ABS Estimated Resident Population — latest annual release (currently
-    # 2024). The augmentor's ERP fetcher exposes a single point-in-time
-    # value (`population_total`) plus per-year history columns; v2.0 (PR #82)
-    # closes the v1.5 spec-drift gap by also emitting age bands, gender
-    # splits, and median age. We adopt the age-cohort split + median age
-    # (skip the gender split for v1 — likely low marginal rank in curation).
-    # Useful signal: post-Census drift (ERP `population_total` 2024 vs
-    # `G01.Tot_P_P` 2021) lets the model see growth corridors Census misses;
-    # the new `population_65_plus` complements `sa2_pct_aged_65_plus` (a
-    # PRESET ratio over total population) with a level rather than a rate.
-    "erp_population_total": "ERP.population_total",
+    # ABS ERP age/sex — latest release only. The 3235.0 cube doesn't ship
+    # these for historical releases (augmentor #92 docs); they would be
+    # null in temporal mode, so we keep them on the cross-sectional pass.
     "erp_population_65_plus": "ERP.population_65_plus",
     "erp_median_age": "ERP.median_age",
     # ABS Personal Income in Australia — latest financial-year release
@@ -209,18 +220,26 @@ AUGMENTOR_VARIABLES: dict[str, str] = {
     # excludes non-filers (low end). Both signals worth keeping. The dataset
     # spec markdown promises `gini_coefficient` + 4 income-by-source medians
     # but the v1.5 fetcher only parses Table 1.4 (the summary sheet); see
-    # upstream issue #65.
+    # upstream issue #65. ABS_PIA also has a sparse temporal release
+    # cadence and isn't worth the split here.
     "pia_median_total_income": "ABS_PIA.median_total_income",
     "pia_mean_total_income": "ABS_PIA.mean_total_income",
     "pia_income_earners_count": "ABS_PIA.income_earners_count",
     "pia_median_age_of_earners": "ABS_PIA.median_age_of_earners",
-    # DSS Payment Demographic Data — latest quarter (currently 2025-Q3),
-    # snapshot pinned. SA2-level recipient counts, not rates; the model
-    # picks up per-station scaling via interaction with the §7.5 stn block.
-    # Per-row temporal resolution deferred (spec §7.7.2). Selected from the
-    # ~21 columns DSS publishes per quarter — the ones excluded (e.g.
-    # ABSTUDY, special benefit, austudy, low-income card) have very small
-    # recipient pops that suppress to null in most NSW SA2s.
+    # Cross-dataset PRESETs new in augmentor v2.0 (PR #86). Each pulls a
+    # DSS numerator and an ERP age/sex denominator. They MUST stay
+    # cross-sectional because of the ERP age/sex limitation (above) —
+    # temporal mode would null them for non-latest-release rows.
+    "pct_age_pension_recipients": "PRESET.pct_age_pension_recipients",
+    "pct_jobseeker_recipients": "PRESET.pct_jobseeker_recipients",
+    "welfare_density_index": "PRESET.welfare_density_index",
+    # DSS Payment Demographic Data — latest quarter snapshot only. Per-row
+    # temporal resolution attempted in PR B but blocked by an upstream
+    # parser issue on the 2022-Q4 file (see AUGMENTOR_VARIABLES_TEMPORAL
+    # comment for the cross-ref). Selected from the ~21 columns DSS
+    # publishes per quarter — the ones excluded (ABSTUDY, special benefit,
+    # austudy, low-income card) have very small recipient pops that
+    # suppress to null in most NSW SA2s.
     "dss_age_pension_recipients": "DSS.age_pension_recipients",
     "dss_jobseeker_payment_recipients": "DSS.jobseeker_payment_recipients",
     "dss_disability_support_pension_recipients": "DSS.disability_support_pension_recipients",
@@ -238,16 +257,42 @@ AUGMENTOR_VARIABLES: dict[str, str] = {
     ),
     "dss_family_tax_benefit_a_recipients": "DSS.family_tax_benefit_a_recipients",
     "dss_family_tax_benefit_b_recipients": "DSS.family_tax_benefit_b_recipients",
-    # Cross-dataset PRESETs new in augmentor v2.0 (PR #86). Each pulls a
-    # DSS numerator and an ERP denominator. Worth adopting because we
-    # currently take raw DSS recipient counts that collinearise with
-    # `n_pop_total` / `stn_competitors_within_*km` density signals; ratios
-    # decouple welfare-cohort signal from urban-density signal.
-    # Caveat: until upstream temporal-mode bug for ERP releases is fixed,
-    # the ERP denominator falls back to the latest ERP publication (2024)
-    # regardless of cross-sectional vs temporal mode. We're cross-sectional
-    # anyway in PR A, so no behaviour change — flagged for the PR B planning.
-    "pct_age_pension_recipients": "PRESET.pct_age_pension_recipients",
-    "pct_jobseeker_recipients": "PRESET.pct_jobseeker_recipients",
-    "welfare_density_index": "PRESET.welfare_density_index",
+}
+
+AUGMENTOR_VARIABLES_TEMPORAL: dict[str, str] = {
+    # SEIFA — four indexes, score values. Augmentor v2.0 ships both 2016
+    # (Edition 2) and 2021 (Edition 3) snapshots; temporal mode resolves
+    # per-row to the contemporaneous release. Our 2016-09 → 2026-04 panel
+    # gets a ~50/50 split (2017-2020 rows → 2016, 2021+ rows → 2021).
+    "seifa_irsd_score": "SEIFA.irsd_score",
+    "seifa_irsad_score": "SEIFA.irsad_score",
+    "seifa_ier_score": "SEIFA.ier_score",
+    "seifa_ieo_score": "SEIFA.ieo_score",
+    # ABS ERP `population_total` — augmentor #92 closed via column
+    # projection (PR #95). Per-row resolution back to release year 2017
+    # against `population_history_<year>` cube data on Edition 3 (ABS
+    # re-aggregates back-data via internal concordance). Pre-2017 rows
+    # resolve to release 2017 (no earlier ERP release registered).
+    "erp_population_total": "ERP.population_total",
+    # NOTE: DSS variables are NOT in the temporal pass today.
+    #
+    # The augmentor's DSS XLSX parser fails on the 2022-Q4 release
+    # (`RuntimeError: No SA2 data rows in dss-2022-Q4.xlsx`) — older
+    # quarterly files have a different sheet/header layout that the
+    # current parser doesn't handle. Filed upstream as
+    # cauldnz/abs-census-augmentor#99 (see
+    # tools/upstream_issue_v2_dss_2022q4_parser.md).
+    #
+    # Until that lands, DSS stays in AUGMENTOR_VARIABLES_CROSS_SECTIONAL
+    # (latest quarter only), unchanged from PR A behaviour. Adding DSS
+    # here later is a one-line move once the parser issue is resolved.
+}
+
+# Back-compat alias. Pre-PR-B code (and any old test) reads
+# AUGMENTOR_VARIABLES as the full union. Keep the union exported so
+# external scripts that probed the full surface keep working; modules
+# that own one or the other pass should import the specific dict.
+AUGMENTOR_VARIABLES: dict[str, str] = {
+    **AUGMENTOR_VARIABLES_CROSS_SECTIONAL,
+    **AUGMENTOR_VARIABLES_TEMPORAL,
 }

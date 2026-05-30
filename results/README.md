@@ -11,14 +11,16 @@ and every brand on the headline fold.
 
 ---
 
-## Headline (v2.0, leakage-corrected)
+## Headline (v2.0, leakage-corrected, augmentor v2.0 + temporal SA2)
 
 All metrics in cents/L except MAPE (%). **Negative Δ MAE = Model B beats Model A.**
 
 | Fold | n (U91) | MAE A | MAE B | Δ MAE | rel. | RMSE A | RMSE B | MAPE A | MAPE B |
 |------|--------:|------:|------:|------:|-----:|-------:|-------:|-------:|-------:|
-| test_normal (2024-01 → 2025-12) | 849,334 | 6.373 | **6.020** | **−0.353** | −5.5% | 10.953 | 10.589 | 3.352 | 3.167 |
-| test_crisis (2026-01 → 2026-04) | 172,858 | 13.616 | **13.218** | **−0.398** | −2.9% | 19.054 | 18.578 | 6.181 | 6.002 |
+| test_normal (2024-01 → 2025-12) | 849,334 | 6.373 | **6.134** | **−0.239** | −3.7% | 10.953 | 10.798 | 3.352 | 3.225 |
+| test_crisis (2026-01 → 2026-04) | 172,858 | 13.616 | **13.295** | **−0.321** | −2.4% | 19.054 | 18.601 | 6.181 | 6.034 |
+
+**Note on numbers vs. earlier iterations:** these test_normal/crisis Δ MAE are 0.08-0.11 c/L *smaller in magnitude* than the augmentor-v2.0-cross-sectional baseline (−0.353 / −0.398; see the iteration table below). PR B (spec §7.7.2) moved SEIFA + ERP `population_total` from a static per-station snapshot to per-row temporal resolution; the temporal split *regressed* the headline. The architectural change is correct (no crashes, columns flow through correctly), but the per-row variation in 2016-vs-2021 SEIFA and 2017-2024 ERP appears to introduce noise the model doesn't pay back. Hypothesis "temporal demographics will improve test-fold accuracy" is **not supported** on this problem; ship the architecture as a no-regret platform for future PRESET sources (especially DSS once augmentor #99 lands) and document the negative finding.
 
 Full segmentation (metro/regional, brand, fuel, SEIFA quintile) + feature-importance
 tables in [`comparison.md`](comparison.md). SHAP visualisations in [`shap/`](shap/) (note:
@@ -33,10 +35,10 @@ would have a *forecast* for tomorrow, not retrospective truth. v2.0 corrects thi
 by switching to NOAA GFS day-ahead forecasts. The full transition is documented
 at [`docs/research/2026-05_weather_leakage_fix_outcome.md`](../docs/research/2026-05_weather_leakage_fix_outcome.md).
 
-| Fold | v1 MAE B | v2 MAE B | Δ | v1 Δ MAE | v2 Δ MAE |
-|------|---------:|---------:|--:|---------:|---------:|
-| test_normal | 5.912 | 6.020 | +0.108 (leakage tax) | −0.391 | −0.353 |
-| test_crisis | 13.283 | 13.218 | −0.065 | −0.183 | **−0.398** |
+| Fold | v1 MAE B | v2-weather MAE B | v2.0-augmentor MAE B | Δ | v1 Δ MAE | v2-weather Δ MAE | current Δ MAE |
+|------|---------:|-----------------:|--------------------:|--:|---------:|-----------------:|--------------:|
+| test_normal | 5.912 | 6.020 | 6.134 | +0.108 (leakage tax), then +0.114 (temporal-SA2 regression) | −0.391 | −0.353 | −0.239 |
+| test_crisis | 13.283 | 13.218 | 13.295 | −0.065, then +0.077 | −0.183 | **−0.398** | −0.321 |
 
 **Two notable v2 findings:**
 
@@ -63,9 +65,10 @@ real data point about how much SA2 demographics help and which ones.
 | v1.2 | v1.5 | ERA5 (leaky) | 31 | **−0.025** | Broadening (DSS welfare + ERP + ABS_PIA + all SEIFA scores) *regressed* — better val MAE, worse test: textbook overfitting |
 | v1.3 | v1.5 | ERA5 (leaky) | 15 | **−0.391** | Curating to the original 10 + the 5 highest-gain new features recovered the full benefit *without* the overfitting tax |
 | v2.0 weather fix | v1.5 | **NOAA GFS** (honest, spec §13.7) | 15 | **−0.353** | Weather-leakage fix; small absolute-MAE tax (~0.04 c/L), but **crisis-fold Δ doubled** (−0.183 → −0.398). Headline switched to this row when v2.0 landed |
-| **augmentor v2.0 bump (current)** | **v2.0** | **NOAA GFS** | **15** | **−0.353** | Pin bump with identical model block; cross-sectional v2.0 produces (byte-)identical predictions to v1.5 on this 15-col surface. Validates the upgrade is a no-op for the modeled features and the 5 new columns (ERP age/sex + 3 cross-dataset PRESETs) are safely available in `stations.parquet` for a follow-up curation experiment |
+| augmentor v2.0 bump (PR A) | v2.0 | NOAA GFS | 15 | **−0.353** | Pin bump with identical model block; cross-sectional v2.0 produces (byte-)identical predictions to v1.5 on this 15-col surface. Validated the upgrade is a no-op for the modeled features and the 5 new columns (ERP age/sex + 3 cross-dataset PRESETs) are available in `stations.parquet` for follow-up curation |
+| **augmentor v2.0 + temporal SA2 (PR B / current)** | **v2.0+main** (`65fd3fa6`) | **NOAA GFS** | **15** | **−0.239** | Split SEIFA + ERP `population_total` to per-row temporal resolution via `build.enrich_panel_temporal` (spec §7.7.2). Honest negative result: **regressed** test_normal by 0.114 c/L vs PR A. Per-row 2016/2021 SEIFA + 2017-2024 ERP swap introduced noise the model doesn't pay back. Architecture lands as a no-regret platform for future moves (DSS held back pending augmentor #99) but the temporal-demographics hypothesis is **not supported** on this problem |
 
-The v1.5 review's recommendation #1 — "re-run your headline experiment on every minor-version bump" — was respected: this time the bump was a no-op on the 15-col surface. Compare with the v1.4.2→v1.5 swing on the same 10-col block (+0.104 → −0.059, a 0.163 c/L shift), which was a non-trivial reminder that augmentor versions can be hyperparameters when they're not.
+The v1.5 review's recommendation #1 — "re-run your headline experiment on every minor-version bump" — was respected at both the augmentor v2.0 pin bump (no-op) and the PR B temporal split (regression). The pattern from v1.2 — broadening hurt; curating helped — has a sibling here: **changing dimensionality from "constant" to "per-row" also costs accuracy without changing column count.** The 15-col block is a good operating point; tweaking how it's *sourced* doesn't trivially improve it.
 
 The key methodological finding: **more features didn't help — the right features did.**
 Broadening from 10 → 31 columns added 21 features that mostly re-encoded urban density

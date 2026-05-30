@@ -98,7 +98,7 @@ fetch-tier2:
 
 # ----------------------------- Build -----------------------------
 
-.PHONY: clean-data enrich features
+.PHONY: clean-data enrich enrich-panel-temporal features
 
 clean-data:
 	$(PYTHON) -m $(PKG).clean.fuelcheck --in $(DATA_RAW)/fuelcheck --out $(DATA_INTERIM)/fuel_daily.parquet --stations-out $(DATA_INTERIM)/stations.parquet
@@ -108,10 +108,23 @@ enrich: clean-data
 	$(PYTHON) -m $(PKG).spatial.resolve_addrs --in $(DATA_INTERIM)/stations.parquet --out $(DATA_INTERIM)/stations.parquet
 	$(PYTHON) -m $(PKG).build.enrich_census --in $(DATA_INTERIM)/stations.parquet --out $(DATA_INTERIM)/stations.parquet --data-dir $(DATA_RAW)
 
-features: enrich station-grid-mapping
+# Spec §7.7.2: per-(station, date) SA2 enrichment for SEIFA + DSS + ERP-total.
+# Needs panel.parquet (from panel_grid, fired below via features) and
+# stations.parquet (from enrich). Output joins back to features.parquet at
+# make_features time on (station_id, date).
+enrich-panel-temporal: $(DATA_INTERIM)/panel.parquet $(DATA_INTERIM)/stations.parquet
+	$(PYTHON) -m $(PKG).build.enrich_panel_temporal --panel $(DATA_INTERIM)/panel.parquet --stations $(DATA_INTERIM)/stations.parquet --out $(DATA_INTERIM)/panel_sa2_temporal.parquet
+
+# panel.parquet is a prerequisite for both panel-temporal and features —
+# build it via panel_grid as a side-effect of the `features` recipe (which
+# is what existed pre-PR-B). Keep panel_grid + spatial.nearest at the top
+# of the recipe so enrich-panel-temporal can fire from a clean tree.
+$(DATA_INTERIM)/panel.parquet: $(DATA_INTERIM)/stations.parquet $(DATA_INTERIM)/fuel_daily.parquet
 	$(PYTHON) -m $(PKG).spatial.nearest --stations $(DATA_INTERIM)/stations.parquet --counters $(DATA_INTERIM)/traffic_stations.parquet --out $(DATA_INTERIM)/station_to_counter.parquet
 	$(PYTHON) -m $(PKG).build.panel_grid --stations $(DATA_INTERIM)/stations.parquet --fuel $(DATA_INTERIM)/fuel_daily.parquet --out $(DATA_INTERIM)/panel.parquet
-	$(PYTHON) -m $(PKG).build.make_features --panel $(DATA_INTERIM)/panel.parquet --out $(DATA_PROCESSED)/features.parquet --weather-gfs-dir $(DATA_RAW)/weather_gfs --station-grid-mapping $(DATA_INTERIM)/station_grid_mapping.parquet
+
+features: enrich enrich-panel-temporal station-grid-mapping
+	$(PYTHON) -m $(PKG).build.make_features --panel $(DATA_INTERIM)/panel.parquet --out $(DATA_PROCESSED)/features.parquet --weather-gfs-dir $(DATA_RAW)/weather_gfs --station-grid-mapping $(DATA_INTERIM)/station_grid_mapping.parquet --panel-sa2-temporal $(DATA_INTERIM)/panel_sa2_temporal.parquet
 
 # ----------------------------- Train + evaluate -----------------------------
 #

@@ -206,6 +206,58 @@ Estimate: 2–3 sessions plus the headline-experiment retrain, *after* upstream 
 
 Don't combine PR A and PR B. The v1.5 review's recommendation #1 is "re-run your headline experiment on every minor-version bump." A combined PR conflates upstream-parsing deltas (PR A's scope) with temporal-architecture deltas (PR B's scope), and we lose the ability to attribute any regression to either cause. **Plus**: PR B's value proposition rests on temporal mode working correctly across all our SA2-family datasets, and the spike shows that's not the case in v2.0.0. Shipping PR A independently captures the documented wins immediately; PR B waits for upstream readiness.
 
+## PR B outcome (2026-05-30 update)
+
+Upstream resolved both issues filed during the spike:
+
+- **#92 (ERP single-publication)** — fully fixed via PR #95. `ErpDataSource` now serves any historical year ≤ latest via column projection. Spike verification confirmed `releases_used` reports per-year resolution (2017, 2018, ..., 2024); per-row `sa2_erp_population_total` 100% non-null.
+- **#91 (GCP cross-edition NaN)** — Stage 1 only (PR #94). Silent NaN now raises a loud `ValueError`. The proper per-release `DataPacksDataSource` routing (Stage 2) remains on backlog. We route GCP cross-sectional in PR B to avoid hitting the error.
+
+Bumped to upstream main at commit `65fd3fa6` to pick up both fixes plus PR #89 (SEIFA 2011), PR #90 (4 more cross-dataset PRESETs), and PR #93 (carer-payment PRESET) — the last three are available in the augmentor surface but not adopted yet (would need a separate curation experiment).
+
+### PR B implementation: split-pass architecture
+
+- **Cross-sectional pass** (existing `build.enrich_census`): GCP direct + GCP-internal PRESETs + ERP age/sex + ABS_PIA + cross-dataset PRESETs + DSS welfare. DSS held back from temporal pending upstream #99.
+- **Temporal pass** (new `build.enrich_panel_temporal`): SEIFA scores + `ERP.population_total`. Output joins on (station_id, date).
+
+The architecture works end-to-end. Coverage on the 6.86M unique (station_id, date) panel: SEIFA 99.2-99.6%, ERP 100%, releases used `{seifa: ['2016', '2021'], erp_by_sa2: ['2017', ..., '2024']}`.
+
+### PR B headline result: temporal demographics regressed both folds
+
+Same 15-col SA2 block as PR A, same Model A/B contrast — just SEIFA + ERP-total swapped from static (per-station) to temporal (per-row):
+
+| Fold | PR A Δ MAE (cross-sectional) | PR B Δ MAE (temporal) | Difference |
+|---|---:|---:|---:|
+| test_normal | −0.353 | −0.239 | +0.114 (worse) |
+| test_crisis | −0.398 | −0.321 | +0.077 (worse) |
+
+The hypothesis behind §7.7.2 — "temporal demographics will improve test-fold accuracy" — is **not empirically supported** on this problem as configured. Three plausible mechanisms for the regression:
+
+1. **2016 SEIFA values may be noisier than 2021** (older Census, different methodology). Pre-2021 panel rows that now get 2016 SEIFA scores might lose accuracy vs the cleaner 2021 values they had under static-mode.
+2. **The model was already extracting whatever temporal-demographic signal exists** via `date`/year features in the cal block. Per-row variation re-encodes a signal that the model had a different (working) handle on.
+3. **The panel skews post-2020** (lag/rolling features can't fit early dates), so the older releases get applied to a smaller training subset where they're less informative.
+
+Diagnosing which mechanism dominates would require a follow-up experiment (e.g. temporal-SEIFA-only vs temporal-ERP-only vs both vs neither). Out of scope for PR B.
+
+### What landed in PR B (and what didn't)
+
+| What | Status |
+|---|---|
+| Augmentor pin bump to main `65fd3fa6` | ✅ |
+| `config.AUGMENTOR_VARIABLES_{CROSS_SECTIONAL,TEMPORAL}` split | ✅ |
+| `build.enrich_panel_temporal` module | ✅ |
+| `make_features.add_sa2_features` temporal-merge logic | ✅ |
+| Makefile `enrich-panel-temporal` target | ✅ |
+| Spec §7.7.2 marked landed + §7.7.5 follow-up note | ✅ |
+| `results/README.md` iteration table + headline updated to PR B numbers | ✅ |
+| Tests: 8 new for `enrich_panel_temporal`, 22 passing total for the SA2 enrich modules | ✅ |
+| DSS in the temporal pass | ❌ — blocked by upstream cauldnz/abs-census-augmentor#99 (DSS XLSX parser fails on 2022-Q4). One-line config change once that lands. |
+| Net improvement in headline Δ MAE | ❌ — regression of ~0.1 c/L. Architecture stays in place anyway; future ablation experiments can flip columns between passes trivially. |
+
+### Recommendation for future projects
+
+Don't assume "more temporal resolution = better predictions". For tree-based models on already-well-featured tabular problems, the model often extracts temporal-demographic signal indirectly via date/year features and adding per-row SA2 variation introduces noise on the release boundaries. **Always treat temporal-mode adoption as a hypothesis to test, not a free upgrade.** Land the architecture so future ablations are cheap, but report the headline honestly.
+
 ## Known limitations of v2.0
 
 - **Address-retirement awareness deferred post-G** ([release notes](https://github.com/cauldnz/abs-census-augmentor/releases/tag/v2.0.0)). Retired G-NAF addresses don't auto-rejoin to current-edition counterparts. Low-impact for our use case (fuel stations rarely change PID).

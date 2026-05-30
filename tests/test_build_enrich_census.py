@@ -200,34 +200,26 @@ def test_writes_full_schema(
     for col in ec.ENRICHED_COLUMNS:
         assert col in df.columns, f"missing column {col}"
 
-    # Both stations enriched on the dense (GCP / SEIFA) columns.
+    # GCP cross-sectional columns enriched on every row.
+    # SEIFA is no longer on this path post spec §7.7.2 split — it's
+    # supplied by build.enrich_panel_temporal instead.
     assert df["sa2_code"].notna().all()
     assert df["sa2_total_population"].notna().all()
-    assert df["sa2_seifa_irsd_score"].notna().all()
-    assert df["sa2_seifa_irsad_score"].notna().all()
 
 
-def test_seifa_indexes_populate_via_unified_dispatch(
-    tmp_path: Path,
-    stations_in: Path,
-    lookup: dict[tuple[float, float], dict[str, object]],
-) -> None:
-    """v1.5 routes ``SEIFA.<field>`` through the same Pipeline.augment call
-    as everything else. All four SEIFA scores land on the output frame.
+def test_seifa_not_on_cross_sectional_schema_post_split() -> None:
+    """spec §7.7.2 split: SEIFA migrates to build.enrich_panel_temporal.
+
+    The cross-sectional ENRICHED_COLUMNS must not include any sa2_seifa_*
+    entries — those now come from the temporal pass. If a future PR
+    accidentally adds SEIFA back to AUGMENTOR_VARIABLES_CROSS_SECTIONAL,
+    this test catches it before the column gets dual-sourced.
     """
-    out = tmp_path / "stations_out.parquet"
-    ec.enrich(
-        stations_in,
-        out,
-        pipeline_factory=_make_stub_factory(lookup),
+    seifa_cols = [c for c in ec.ENRICHED_COLUMNS if "seifa" in c]
+    assert seifa_cols == [], (
+        f"sa2_seifa_* columns should not be on the cross-sectional pass; "
+        f"found: {seifa_cols}"
     )
-    df = pd.read_parquet(out)
-    by_id = {row["station_id"]: row for _, row in df.iterrows()}
-    assert int(by_id["s1"]["sa2_seifa_irsd_score"]) == 1098
-    assert int(by_id["s1"]["sa2_seifa_irsad_score"]) == 1102
-    assert int(by_id["s1"]["sa2_seifa_ier_score"]) == 1085
-    assert int(by_id["s1"]["sa2_seifa_ieo_score"]) == 1110
-    assert int(by_id["s2"]["sa2_seifa_irsd_score"]) == 1102
 
 
 def test_six_preset_derivations_populate(
@@ -261,7 +253,13 @@ def test_new_dataset_columns_populate(
     stations_in: Path,
     lookup: dict[tuple[float, float], dict[str, object]],
 ) -> None:
-    """ERP / ABS_PIA / DSS columns from the v1.5 surface land on the output."""
+    """ERP age/sex + ABS_PIA + DSS columns land on the cross-sectional pass.
+
+    SEIFA migrates to ``build.enrich_panel_temporal`` post spec §7.7.2
+    split — so this test no longer asserts SEIFA. DSS was intended to
+    move temporal too but is blocked by an upstream parser bug on
+    2022-Q4; it stays cross-sectional until that lands.
+    """
     out = tmp_path / "stations_out.parquet"
     ec.enrich(
         stations_in,
@@ -276,6 +274,12 @@ def test_new_dataset_columns_populate(
             assert df[col].notna().all(), (
                 f"{col} should be populated by the stub, got {df[col].tolist()}"
             )
+    # SEIFA columns explicitly absent — handled by enrich_panel_temporal.
+    seifa_cols = [c for c in df.columns if c.startswith("sa2_seifa_")]
+    assert seifa_cols == [], (
+        f"sa2_seifa_* columns should not be on cross-sectional output; "
+        f"found: {seifa_cols}"
+    )
 
 
 def test_pipeline_receives_preset_variables(
@@ -308,16 +312,22 @@ def test_pipeline_receives_preset_variables(
             )
 
 
-def test_pipeline_includes_all_v15_namespaces() -> None:
-    """DIRECT_VARIABLES exercises every v1.5 dispatch namespace we expect.
+def test_pipeline_includes_all_cross_sectional_namespaces() -> None:
+    """DIRECT_VARIABLES exercises every namespace we expect on the
+    cross-sectional pass.
 
-    The augmentor v1.5 surface registers G (GCP), PRESET, SEIFA, ERP,
-    ABS_PIA, and DSS. Phase 3 of this project pulls from all six.
+    Post spec §7.7.2 split (PR B): the cross-sectional pass is
+    G## (GCP), PRESET, ERP (age/sex only), ABS_PIA, and DSS (latest
+    quarter only — pending upstream parser fix to move it temporal).
+    SEIFA migrates to the temporal pass and is exercised by
+    ``test_build_enrich_panel_temporal``.
     """
     namespaces = {v.split(".", 1)[0] for v in ec.DIRECT_VARIABLES.values()}
-    expected = {"G01", "G02", "PRESET", "SEIFA", "ERP", "ABS_PIA", "DSS"}
+    expected = {"G01", "G02", "PRESET", "ERP", "ABS_PIA", "DSS"}
     missing = expected - namespaces
     assert not missing, f"DIRECT_VARIABLES missing namespaces: {missing}"
+    # SEIFA must NOT be on the cross-sectional pass post split.
+    assert "SEIFA" not in namespaces
 
 
 def test_idempotent_skip_when_already_enriched(

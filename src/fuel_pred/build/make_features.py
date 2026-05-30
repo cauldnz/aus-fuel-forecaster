@@ -1082,21 +1082,77 @@ def add_weather_features_gfs(
 # ============================================================
 
 
-def add_sa2_features(df: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:
-    """Join the §7.7 demographic block from `stations.parquet`.
+def add_sa2_features(
+    df: pd.DataFrame,
+    stations: pd.DataFrame,
+    *,
+    panel_sa2_temporal_path: Path | None = None,
+) -> pd.DataFrame:
+    """Join the §7.7 demographic block from per-station static SA2 +
+    per-(station, date) temporal SA2.
 
-    The SA2 columns are sourced from ``feature_blocks.SA2_COLUMNS`` so this
-    function stays in lockstep with what the model code expects. Columns
-    in the block that don't exist in ``stations`` yet are added as nulls
-    (then either populated downstream or filtered out by the model's
-    feature-list logic).
+    Two sources merge in:
+
+    1. **Static SA2** from ``stations.parquet`` (one row per station).
+       This block covers GCP + GCP-internal PRESETs + ERP age/sex +
+       ABS_PIA + cross-dataset PRESETs — the variables that can't
+       temporal-mode cleanly today per spec §7.7.2.
+
+    2. **Temporal SA2** from
+       ``data/interim/panel_sa2_temporal.parquet`` (one row per
+       (station_id, date)) — SEIFA + DSS + ERP `population_total`. When
+       the temporal parquet doesn't exist, columns it would have
+       supplied ship as null (then filtered out by the model's
+       feature-list logic, same pattern as Phase-5 macro inputs).
+
+    SA2 columns are sourced from ``feature_blocks.SA2_COLUMNS`` so the
+    set the model consumes is the single source of truth. Each column
+    can be supplied by either source; in the (deliberate) overlap-free
+    case there's no precedence question, but if both sources happened
+    to carry the same column, the temporal value wins (it's more
+    informative).
     """
-    cols = ["station_id"] + [c for c in SA2_FEATURE_COLS if c in stations.columns]
-    sa2 = stations[cols].copy()
-    out = df.merge(sa2, on="station_id", how="left")
+    static_cols = ["station_id"] + [c for c in SA2_FEATURE_COLS if c in stations.columns]
+    sa2_static = stations[static_cols].copy()
+    out = df.merge(sa2_static, on="station_id", how="left")
 
-    # Add any deferred columns that aren't in stations yet, as nulls.
-    # np.nan → float64 (not pd.NA → object) per the convention
+    if panel_sa2_temporal_path is not None and panel_sa2_temporal_path.exists():
+        sa2_temporal = pd.read_parquet(panel_sa2_temporal_path)
+        # Project to (station_id, date) + columns the model actually wants.
+        temporal_cols = ["station_id", "date"] + [
+            c for c in SA2_FEATURE_COLS if c in sa2_temporal.columns
+        ]
+        sa2_temporal = sa2_temporal[temporal_cols]
+        # If a column collides with the static merge (shouldn't happen with
+        # the spec §7.7.2 split, but be defensive), drop the static side so
+        # the temporal value wins post-merge.
+        collision = [
+            c for c in temporal_cols
+            if c not in ("station_id", "date") and c in out.columns
+        ]
+        if collision:
+            logger.info(
+                "sa2: temporal columns also present in static set — temporal wins: %s",
+                collision,
+            )
+            out = out.drop(columns=collision)
+        # Type-align join keys to avoid pandas warning on mixed object/string.
+        out["station_id"] = out["station_id"].astype(str)
+        sa2_temporal["station_id"] = sa2_temporal["station_id"].astype(str)
+        out = out.merge(sa2_temporal, on=["station_id", "date"], how="left")
+        logger.info(
+            "sa2: merged temporal block (%d rows × %d value cols) on (station_id, date)",
+            len(sa2_temporal),
+            len(temporal_cols) - 2,
+        )
+    else:
+        logger.info(
+            "sa2: panel_sa2_temporal not found at %s — temporal cols ship as null",
+            panel_sa2_temporal_path,
+        )
+
+    # Add any columns SA2_COLUMNS expects that neither source supplied,
+    # as nulls. np.nan → float64 (not pd.NA → object) per the convention
     # documented in the upstream / ctx / stn / wx blocks above.
     for col in SA2_FEATURE_COLS:
         if col not in out.columns:
@@ -1159,14 +1215,16 @@ def make_features(
     stations_venues_path: Path | None = None,
     weather_gfs_dir: Path | None = None,
     station_grid_mapping_path: Path | None = None,
+    panel_sa2_temporal_path: Path | None = None,
 ) -> pd.DataFrame:
     """Compose all feature blocks. Returns the full features.parquet shape.
 
     Phase-5 inputs (`aip_tgp`, `cash_rate`, `asx200`,
     `inflation_expectations`) are optional — when omitted, the
     corresponding columns ship as null. ``stations_venues_path`` (spec
-    §13.6 Phase 1) is likewise optional: when None or missing, the
-    venue columns ship as null.
+    §13.6 Phase 1) and ``panel_sa2_temporal_path`` (spec §7.7.2) are
+    likewise optional: when None or missing, the corresponding columns
+    ship as null.
 
     GFS weather source (spec §13.7 v2.0 + §13.8 v2.1): when
     ``config.resolve_weather_source() == "gfs"`` the multi-horizon
@@ -1226,7 +1284,11 @@ def make_features(
         df = add_weather_features(df, weather_dir=weather_dir)
     logger.info("after weather block: %d cols", len(df.columns))
 
-    df = add_sa2_features(df, stations=stations)
+    df = add_sa2_features(
+        df,
+        stations=stations,
+        panel_sa2_temporal_path=panel_sa2_temporal_path,
+    )
     logger.info("after sa2 block: %d cols", len(df.columns))
 
     df = add_targets(df)
@@ -1254,13 +1316,15 @@ def make_features_from_paths(
     stations_venues_path: Path | None = None,
     weather_gfs_dir: Path | None = None,
     station_grid_mapping_path: Path | None = None,
+    panel_sa2_temporal_path: Path | None = None,
 ) -> None:
     """File-IO convenience wrapper around `make_features`.
 
     Phase-5 paths are optional — missing files become null feature
     columns rather than fatal errors, so feature builds work
     incrementally as upstream fetchers come online. Same applies to
-    ``stations_venues_path`` (spec §13.6 Phase 1).
+    ``stations_venues_path`` (spec §13.6 Phase 1) and
+    ``panel_sa2_temporal_path`` (spec §7.7.2).
     """
     raw = config.DATA_RAW
     interim = config.DATA_INTERIM
@@ -1283,6 +1347,9 @@ def make_features_from_paths(
     # they're actually used; None-tolerant on the receiving side.
     weather_gfs_dir = weather_gfs_dir or config.RAW_WEATHER_GFS_DIR
     station_grid_mapping_path = station_grid_mapping_path or config.INTERIM_STATION_GRID_MAPPING
+    panel_sa2_temporal_path = panel_sa2_temporal_path or (
+        interim / "panel_sa2_temporal.parquet"
+    )
 
     panel = pd.read_parquet(panel_path)
     brent = pd.read_parquet(brent_path)
@@ -1323,6 +1390,7 @@ def make_features_from_paths(
         stations_venues_path=venues_path,
         weather_gfs_dir=weather_gfs_dir,
         station_grid_mapping_path=station_grid_mapping_path,
+        panel_sa2_temporal_path=panel_sa2_temporal_path,
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1373,6 +1441,18 @@ def main() -> None:
             "(from spatial.gfs_grid). Required when --weather-gfs-dir is set."
         ),
     )
+    parser.add_argument(
+        "--panel-sa2-temporal",
+        type=Path,
+        default=None,
+        help=(
+            "optional path to data/interim/panel_sa2_temporal.parquet "
+            "(from build.enrich_panel_temporal). When omitted, defaults "
+            "to <interim>/panel_sa2_temporal.parquet; null SEIFA / DSS / "
+            "ERP-total feature columns when the file doesn't exist "
+            "(spec §7.7.2)."
+        ),
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     make_features_from_paths(
@@ -1389,6 +1469,7 @@ def main() -> None:
         stations_venues_path=args.stations_venues,
         weather_gfs_dir=args.weather_gfs_dir,
         station_grid_mapping_path=args.station_grid_mapping,
+        panel_sa2_temporal_path=args.panel_sa2_temporal,
     )
 
 

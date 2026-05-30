@@ -33,25 +33,27 @@ dependencies = [
     "shapely>=2.0",
     # Plotting (notebooks pull this in)
     "matplotlib>=3.8",
-    # The augmentor itself. Pinned to commit 65fd3fa6 (post v2.0.0,
-    # 2026-05-29) — main with the two PR-A-era issue fixes:
+    # The augmentor itself. Pinned to commit 762a6a0f (post v2.0.0,
+    # 2026-05-30) — main with all three of our filed issues resolved
+    # plus a new ERP variable:
     #   - cauldnz/abs-census-augmentor#92 (PR #95) — ERP temporal-release
-    #     resolution via historical-year projection. Works for
-    #     `ERP.population_total` back to 2017. Age/sex cols still null for
-    #     historical releases (documented limitation; we route those
-    #     cross-sectional).
-    #   - cauldnz/abs-census-augmentor#91 Stage 1 (PR #94) — GCP cross-edition
-    #     in temporal mode now raises a loud ValueError instead of silently
-    #     returning NaN. Stage 2 (the proper per-release DataPacks routing)
-    #     remains on upstream backlog; we route GCP variables
-    #     cross-sectional to avoid hitting the error.
+    #     resolution via historical-year projection.
+    #   - cauldnz/abs-census-augmentor#91 Stage 2 (PR #96) — per-release
+    #     `DataPacksDataSource` routing in temporal mode. GCP cross-edition
+    #     temporal lookups now route through the right DataPack per
+    #     release; the Stage-1 loud-error guard is no longer reachable
+    #     under normal use.
+    #   - cauldnz/abs-census-augmentor#99 (PR #100) — DSS XLSX parser now
+    #     handles pre-Q2-2023 releases (5-digit SA2 codes) end-to-end.
+    #   - PR #97 — new `ERP.population_density_per_km2` column.
     # Also picks up PR #89 (SEIFA 2011), PR #90 (4 more cross-dataset
-    # PRESETs), PR #93 (carer-payment PRESET) — none adopted in this PR;
-    # available for a follow-up curation experiment.
+    # PRESETs), PR #93 (carer-payment PRESET).
     #
-    # See docs/research/2026-05_abs_census_augmentor_v2.0_review.md for the
-    # spike findings, post-fix re-verification, and adoption strategy.
-    "abs-census-augmentor @ git+https://github.com/cauldnz/abs-census-augmentor.git@65fd3fa63be2f5a27ace01f415e6632a67ce1b41",
+    # PR C in this repo runs overnight experiments exercising the new
+    # temporal-mode capabilities and adopts the new ERP density column.
+    # See docs/research/2026-05_abs_census_augmentor_v2.0_review.md for
+    # the spike + experiment summary.
+    "abs-census-augmentor @ git+https://github.com/cauldnz/abs-census-augmentor.git@762a6a0f15b7b8167a497ed78be001671ec0b7e8",
     "python-dotenv>=1.2.2",
     "cfgrib>=0.9.15.1",
     "eccodes>=2.47.0",

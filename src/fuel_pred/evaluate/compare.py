@@ -780,6 +780,297 @@ def _signed(value: float) -> str:
     return f"{sign}{abs(value):.3f}"
 
 
+# ============================================================
+# v3.0 k-fold CV report (spec §15.2)
+# ============================================================
+
+
+def compare_kfold(
+    features_path: Path, kfold_models_root: Path, out_path: Path
+) -> None:
+    """Build a merged k-fold comparison report.
+
+    For each ``fold_N/`` subdir under ``kfold_models_root``: load
+    ``predictions_test.parquet``, merge with segmentation, compute
+    headline metrics. Render a single merged table with per-fold rows
+    + aggregate rows (mean, stdev, min, max). Segmentation tables
+    operate on the concatenated union of all folds' test predictions.
+
+    Spec §15.2: judgement is "is the mean Δ MAE meaningful relative to
+    the across-fold stdev?" — no p-values, just per-fold visibility.
+
+    Args:
+        features_path: ``data/processed/features.parquet``.
+        kfold_models_root: parent dir from ``train.cv.train_kfold``
+            (contains ``fold_N/`` subdirs + ``kfold_audit.json``).
+        out_path: target Markdown file, typically
+            ``results/comparison_kfold.md``.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    audit = _load_kfold_audit(kfold_models_root)
+    fold_dirs = sorted(
+        p for p in kfold_models_root.glob("fold_*") if p.is_dir()
+    )
+    if not fold_dirs:
+        raise RuntimeError(
+            f"no fold_*/ subdirs found under {kfold_models_root}; "
+            f"is this a k-fold output root from train.cv.train_kfold?"
+        )
+
+    seg = _load_segmentation_slice(features_path)
+    logger.info("loaded segmentation slice: %d rows", len(seg))
+
+    enriched: dict[str, pd.DataFrame] = {}
+    for fold_dir in fold_dirs:
+        path = fold_dir / "predictions_test.parquet"
+        if not path.exists():
+            logger.warning("missing %s — skipping", path)
+            continue
+        preds = pd.read_parquet(path)
+        merged = preds.merge(
+            seg, on=["station_id", "fuel_code", "date"], how="left"
+        )
+        if "sa2_seifa_irsd_score" in merged.columns:
+            merged["seifa_quintile"] = _seifa_quintile(merged["sa2_seifa_irsd_score"])
+        if "stn_brand_canonical" in merged.columns:
+            merged["brand_bucket"] = _bucket_brand(merged["stn_brand_canonical"])
+        enriched[fold_dir.name] = merged
+        logger.info(
+            "fold %s: %d prediction rows after segmentation join",
+            fold_dir.name, len(merged),
+        )
+
+    if not enriched:
+        raise RuntimeError(
+            f"no per-fold predictions_test.parquet found under {kfold_models_root}"
+        )
+
+    sections: list[str] = []
+    sections.append(_render_kfold_header(features_path, kfold_models_root, audit))
+    sections.append(_render_kfold_headline(enriched, audit))
+    # Segmentation tables operate on the concatenated union of folds —
+    # gives an across-all-folds-combined view (useful) but not per-fold
+    # segmented (which would explode the table count).
+    combined = _concat_folds_for_segments(enriched)
+    sections.append(
+        _render_segment_section(
+            "Metro / regional (across all folds combined)",
+            {"all_folds": combined}, "stn_is_metro",
+        )
+    )
+    sections.append(
+        _render_segment_section(
+            "Brand (across all folds combined; top 8 + Other)",
+            {"all_folds": combined}, "brand_bucket",
+        )
+    )
+    sections.append(
+        _render_segment_section(
+            "Fuel type (across all folds combined)",
+            {"all_folds": combined}, "fuel_code",
+        )
+    )
+    sections.append(
+        _render_segment_section(
+            "SEIFA quintile (across all folds combined)",
+            {"all_folds": combined}, "seifa_quintile",
+        )
+    )
+    sections.append(_render_kfold_footer())
+
+    md = "\n\n".join(s for s in sections if s) + "\n"
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp.write_text(md, encoding="utf-8")
+    tmp.replace(out_path)
+    logger.info("wrote %s (%d bytes)", out_path, len(md))
+
+
+def _load_kfold_audit(root: Path) -> dict[str, Any]:
+    """Read kfold_audit.json if present; return empty dict otherwise."""
+    p = root / "kfold_audit.json"
+    if not p.exists():
+        logger.warning(
+            "no kfold_audit.json under %s — proceeding without geometry annotations",
+            root,
+        )
+        return {}
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def _concat_folds_for_segments(
+    enriched: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """Stack per-fold enriched frames for the segment renderers.
+
+    Drops the per-fold identity — segments are computed across the
+    union of all folds' test predictions. Per-fold segment tables
+    aren't generated (would inflate the report by k× per dimension).
+    """
+    return pd.concat(enriched.values(), ignore_index=True)
+
+
+def _render_kfold_header(
+    features_path: Path, root: Path, audit: dict[str, Any]
+) -> str:
+    ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    cfg = audit.get("kfold_config", {})
+    cfg_line = ""
+    if cfg:
+        cfg_line = (
+            f"\n        K-fold config: k={cfg.get('k')}, "
+            f"test_window_months={cfg.get('test_window_months')}, "
+            f"val_window_days={cfg.get('val_window_days')}, "
+            f"gap_days={cfg.get('gap_days')}, "
+            f"horizon_days={cfg.get('horizon_days')}, "
+            f"warmup_end={cfg.get('warmup_end')}, "
+            f"panel_end={cfg.get('panel_end')}"
+        )
+    return textwrap.dedent(
+        f"""
+        # Model A vs Model B vs Model B' — k-fold CV comparison report (spec §15.2)
+
+        Generated: {ts}
+        Features: `{features_path}`
+        K-fold models root: `{root}`{cfg_line}
+
+        v3.0 methodology: per-fold rows + aggregate (mean / stdev /
+        min / max) replace the single-split test_normal / test_crisis
+        of v2.x. **Crisis-as-separate is dropped** — 2026 data rotates
+        into the test windows like every other year. Per-fold spread
+        vs. mean is the significance signal; no p-values (see design
+        doc §2.5 for why naive k-fold paired t-tests are misleading).
+
+        - **Negative `Δ MAE` = Model B beats Model A** (augmentor adds value)
+        - **Negative `Δ MAE (B'−B)` = venue features add lift** beyond Model B
+        - All metrics in cents/L except MAPE (in %)
+        """
+    ).strip()
+
+
+def _render_kfold_headline(
+    enriched: dict[str, pd.DataFrame], audit: dict[str, Any]
+) -> str:
+    """Merged per-fold + aggregate table (the v3.0 headline).
+
+    ``audit`` is unused today — kept on the signature so callers don't
+    rebuild the call when the renderer starts using it (e.g. to label
+    folds with audit-side test_window dates).
+    """
+    del audit  # see docstring
+    rows: list[dict[str, Any]] = []
+    has_b_prime = False
+    for fold_name, df in enriched.items():
+        m = _row_metrics(df)
+        m["Fold"] = fold_name
+        # Test window from audit (test dates from the predictions
+        # parquet itself would also work; audit is cheaper).
+        if not df.empty:
+            test_dates = pd.to_datetime(df["date"])
+            m["test_window"] = f"{test_dates.min().date()} → {test_dates.max().date()}"
+        else:
+            m["test_window"] = "(empty)"
+        rows.append(m)
+        if "y_pred_b_prime" in df.columns:
+            has_b_prime = True
+
+    if not rows:
+        return ""
+
+    from collections.abc import Callable
+
+    def _agg(key: str, agg_fn: Callable[[list[float]], float]) -> float:
+        vals = [r[key] for r in rows if not pd.isna(r[key])]
+        if not vals:
+            return float("nan")
+        return float(agg_fn(vals))
+
+    import statistics as _stats
+
+    n_total = sum(r["n"] for r in rows)
+    agg_rows = []
+    for label, fn in (
+        ("**Mean**", _stats.fmean),
+        ("Stdev", lambda v: _stats.pstdev(v) if len(v) > 1 else 0.0),
+        ("Min", min),
+        ("Max", max),
+    ):
+        agg_rows.append({
+            "Fold": label,
+            "test_window": "—",
+            "n": n_total if label == "**Mean**" else float("nan"),
+            "mae_a": _agg("mae_a", fn),
+            "mae_b": _agg("mae_b", fn),
+            "delta_mae": _agg("delta_mae", fn),
+            "mae_b_prime": _agg("mae_b_prime", fn),
+            "delta_mae_b_prime_vs_b": _agg("delta_mae_b_prime_vs_b", fn),
+            "delta_mae_b_prime_vs_a": _agg("delta_mae_b_prime_vs_a", fn),
+            "mape_a": _agg("mape_a", fn),
+            "mape_b": _agg("mape_b", fn),
+            "delta_mape": _agg("delta_mape", fn),
+            "rmse_a": _agg("rmse_a", fn),
+            "rmse_b": _agg("rmse_b", fn),
+            "rmse_b_prime": _agg("rmse_b_prime", fn),
+            "mape_b_prime": _agg("mape_b_prime", fn),
+            "delta_mape_b_prime_vs_b": _agg("delta_mape_b_prime_vs_b", fn),
+            "delta_mape_b_prime_vs_a": _agg("delta_mape_b_prime_vs_a", fn),
+        })
+
+    body_lines = [
+        "## Headline — A vs B (per-fold + aggregate)",
+        "",
+        "| Fold | Test window | n | MAE A | MAE B | Δ MAE | RMSE A | RMSE B | "
+        "MAPE A | MAPE B | Δ MAPE |",
+        "|------|-------------|--:|------:|------:|------:|-------:|-------:|"
+        "-------:|-------:|-------:|",
+    ]
+    for r in rows + agg_rows:
+        n_str = f"{int(r['n']):,}" if not pd.isna(r["n"]) else "—"
+        body_lines.append(
+            f"| {r['Fold']} | {r['test_window']} | {n_str} | "
+            f"{r['mae_a']:.3f} | {r['mae_b']:.3f} | {_signed(r['delta_mae'])} | "
+            f"{r['rmse_a']:.3f} | {r['rmse_b']:.3f} | "
+            f"{r['mape_a']:.3f} | {r['mape_b']:.3f} | {_signed(r['delta_mape'])} |"
+        )
+
+    if has_b_prime:
+        body_lines.extend([
+            "",
+            "## Headline — B vs B' (venue-block additive sanity check, per-fold + aggregate)",
+            "",
+            "| Fold | Test window | n | MAE B | MAE B' | Δ MAE (B'−B) | "
+            "RMSE B' | MAPE B' | Δ MAE (B'−A) |",
+            "|------|-------------|--:|------:|-------:|-------------:|"
+            "--------:|--------:|-------------:|",
+        ])
+        for r in rows + agg_rows:
+            n_str = f"{int(r['n']):,}" if not pd.isna(r["n"]) else "—"
+            body_lines.append(
+                f"| {r['Fold']} | {r['test_window']} | {n_str} | "
+                f"{r['mae_b']:.3f} | {r['mae_b_prime']:.3f} | "
+                f"{_signed(r['delta_mae_b_prime_vs_b'])} | "
+                f"{r['rmse_b_prime']:.3f} | {r['mape_b_prime']:.3f} | "
+                f"{_signed(r['delta_mae_b_prime_vs_a'])} |"
+            )
+
+    return "\n".join(body_lines)
+
+
+def _render_kfold_footer() -> str:
+    return textwrap.dedent(
+        """
+        ---
+
+        _Generated by `python -m fuel_pred.evaluate.compare_kfold`. v3.0
+        Phase 1 (spec §15.2). The "Mean" / "Stdev" / "Min" / "Max" rows
+        aggregate the per-fold metrics for the A-vs-B headline (and the
+        B-vs-B' table if Model B' was fit). Use stdev as the across-
+        fold variance signal: if |Mean Δ MAE| ≫ Stdev, the change is
+        robust; if comparable, fold-specific noise dominates._
+        """
+    ).strip()
+
+
 # ---- CLI -------------------------------------------------------------------
 
 
@@ -793,6 +1084,24 @@ def main() -> None:
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
     )
     compare(args.features, args.models, args.out)
+
+
+def main_kfold() -> None:
+    """CLI entry point for ``python -m fuel_pred.evaluate.compare_kfold``."""
+    parser = argparse.ArgumentParser(description=compare_kfold.__doc__)
+    parser.add_argument("--features", required=True, type=Path)
+    parser.add_argument(
+        "--models-root",
+        required=True,
+        type=Path,
+        help="parent dir of fold_*/ subdirs (from train.cv.train_kfold)",
+    )
+    parser.add_argument("--out", required=True, type=Path)
+    args = parser.parse_args()
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
+    )
+    compare_kfold(args.features, args.models_root, args.out)
 
 
 if __name__ == "__main__":

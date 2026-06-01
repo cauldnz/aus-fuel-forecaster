@@ -886,6 +886,8 @@ To be resolved during implementation, not blocking spec sign-off:
 
    **Status: backlog, no current action.** Revisit when (a) v2.1 multi-horizon modelling work begins and the §13.7 GFS pipeline's parse-time cost becomes painful, OR (b) we want the richer Open-Meteo derived variables. Either trigger justifies the infra investment; v2.0 alone does not.
 
+10. **Time-series k-fold cross-validation + remote training offload — PROMOTED to v3.0.** Originally filed as backlog after PR C's overnight experiments made the single-split methodology gap concrete (E1 wins test_normal while losing test_crisis, E4 does the reverse, E5's "combine the wins" hypothesis blew up). The full plan now lives at [§15](#15-v30-plan--methodology-overhaul) — it's the next major version's primary work, not deferred maintenance.
+
 ## 14. References
 
 - `abs-census-augmentor`: https://github.com/cauldnz/abs-census-augmentor
@@ -895,3 +897,68 @@ To be resolved during implementation, not blocking spec sign-off:
 - Open-Meteo: https://open-meteo.com/
 - ABS 2021 Census GCP DataPack: https://www.abs.gov.au/census/find-census-data/datapacks
 - ABS SEIFA 2021: https://www.abs.gov.au/statistics/people/people-and-communities/socio-economic-indexes-areas-seifa-australia/latest-release
+
+## 15. v3.0 plan — methodology overhaul
+
+Promoted from [§13](#13-open-questions) #10. The v2.x arc (see [`docs/research/2026-05_v2_closing_summary.md`](docs/research/2026-05_v2_closing_summary.md)) ran out of confidence in the single-split evaluation methodology before it ran out of features to try. v3.0 replaces the methodology, then re-evaluates the v2.x feature surface under it.
+
+### 15.1 Why the change
+
+Concretely, the cases v2.x has no good answer for:
+
+- Is PR C's E4 test_crisis +0.282 c/L gain robust, or fold-specific?
+- Would the candidates that didn't make the v1.5-era 15-col cut survive a different fold? (We curated by gain rank from a single 31-col fit.)
+- Would temporal-mode benefits (PR C E1) show up on different historical splits, or are they 2024-25 artefacts?
+- How much of any reported Δ MAE is real and how much is what a 6-fold mean ± stdev would call within-noise?
+
+The committed v2.x headline (PR B + augmentor v2.1.0): test_normal Δ MAE −0.239, test_crisis Δ MAE −0.321. None of PR C's 7 experiments beat this on both folds simultaneously — and the strongest crisis-fold result (E4 −0.603) cost the test_normal fold meaningfully. **The decision of which configuration to ship can't be made under the current methodology.**
+
+### 15.2 Phase plan (sketch — to be detailed during planning session)
+
+**Phase 1 — k-fold CV harness.** Replace the two-fold reporting (test_normal vs test_crisis) with a proper time-series k-fold across the full panel. Decisions needed:
+
+- CV scheme: expanding-window (each fold's train = everything before its test window) vs rolling-origin (fixed-width train sliding through time). Expanding-window is the safer first cut for non-stationary signals.
+- Fold count: 6–10 across 2018–2026. Trade-off: more folds = tighter mean ± stdev but slower.
+- Gap-fold behaviour: should there be a small gap between train end and test start (typical for forecasting CV to avoid lag-feature leakage)? Probably yes — match the lag-window depth (~28 days from `lag_price_28`).
+- Crisis-fold handling: keep 2026-Q1 as a separate held-out "OOD verification" fold, OR fold it in to the rolling CV and lose the explicit OOD signal? Probably the former — crisis fold remains the headline robustness check, while CV runs on 2018-2025.
+- Reporting format: replace the single A-vs-B comparison.md with per-fold + aggregate mean/stdev/CI. `evaluate.compare` needs a refactor.
+
+**Phase 2 — Re-evaluation of the v2.x feature surface under k-fold CV.** Re-run the studies that the v2.x methodology couldn't cleanly attribute:
+
+- PR A v2.0 bump — confirm it's actually a no-op or whether the previous "byte-identical" finding was fold-specific
+- PR B temporal-mode (SEIFA + ERP-total) — re-evaluate per-fold; does the static-vs-temporal trade-off hold across all folds or only the 2024-25 one?
+- PR C E1 (DSS temporal) — was the test_normal win general or 2024-25 specific?
+- PR C E4 / E4a / E4b — does the density column really drive the crisis-fold gain across all folds?
+- The v1.5-era 31 → 15 curation — would the cut survive a fold-by-fold gain analysis?
+
+Outcome should be a small set of robust feature recommendations + a clean "this is the v3.0 baseline" config.
+
+**Phase 3 — Docker handoff to home AMD server.** k-fold × multi-experiment retrain pattern is significantly more expensive than v2.x's single-fit (a 6-fold CV multiplies wall-clock by ~6 per experiment; PR C's 7 experiments × 30-60 min each at single-fit ≈ 5h becomes ~30h at 6-fold). To keep iteration practical:
+
+- Docker container wrapping the train + evaluate stages with the project's `uv.lock` baked in
+- Container reads features parquet from a mounted volume (or fetches from a bucket), writes models/predictions/comparison back the same way
+- Orchestrator on the laptop becomes "build features locally → ship features parquet to remote → trigger remote train → pull artefacts back" instead of running everything inline
+- Possibly: distribute the k-fold loop across remote workers (one fold per worker)
+
+Decisions needed: container build (multi-stage with `uv sync --frozen`?); mount strategy (NFS share vs S3-like object store vs HTTPS file transfer); artefact return path; security (the AMD server is on a home LAN, likely no public exposure required).
+
+**Phase 4 — Documentation + retrospective.** Update `results/README.md` to reflect the new methodology and the re-evaluated headline. Spec §8.3 (folds) gets rewritten. The closing-summary doc gets an addendum on what survived the re-evaluation.
+
+### 15.3 Out of scope for v3.0
+
+- Hyperparameter tuning. v2.x's LightGBM config (spec §8.2) stays unchanged through v3.0; we're testing methodology and features, not model.
+- New data sources. v3.0 works against the existing fetched data — no new fetchers, no new augmentor pin bumps (unless a fix lands that we explicitly want).
+- 7-day forecast horizon (§13.8). Still backlogged for a v4.0 or follow-up; v3.0 stays single-target (`y_t1`).
+- Self-hosted Open-Meteo (§13.9). Same — backlogged.
+
+### 15.4 Branches + ship cadence
+
+- All v3.0 work on `claude/v3.0-*` branches off main
+- Phase 1 lands first as its own PR (k-fold CV harness + new evaluate.compare); a smoke retrain on the existing PR B baseline produces the first per-fold report
+- Phase 2 lands as a series of small PRs, one per re-evaluated study
+- Phase 3 can run in parallel with Phase 2 once the Docker container builds cleanly against a baseline fit
+- Phase 4 closes v3.0 and updates `results/README.md` to the new methodology headline
+
+### 15.5 What's pinned at v2.x
+
+See [`docs/research/2026-05_v2_closing_summary.md`](docs/research/2026-05_v2_closing_summary.md). The v2.x state is the stable baseline v3.0 measures against — augmentor v2.1.0, NOAA GFS weather, split cross-sectional + temporal SA2 pass, 15-col model block, test_normal Δ MAE −0.239 / test_crisis Δ MAE −0.321.

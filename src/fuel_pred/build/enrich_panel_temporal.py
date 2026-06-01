@@ -99,75 +99,123 @@ def _load_unique_panel_keys(
     return keys
 
 
-def _augment(
+def _build_temporal_pipeline(variables: dict[str, str]) -> object:
+    """Construct a temporal-mode Pipeline with ``out_of_range='nearest'``.
+
+    Extracted so each pass of the collision splitter can build its own
+    Pipeline against a smaller variable subset. Real-augmentor path only;
+    the test seam in ``_augment`` short-circuits this.
+    """
+    from census_augment import Pipeline
+    from census_augment.config import (
+        Config,
+        DataSourcesConfig,
+        GeocodingConfig,
+        InputConfig,
+        NominatimConfig,
+        OutputConfig,
+        TemporalConfig,
+    )
+
+    # Pipeline.create() doesn't expose temporal config; build Config
+    # manually so we can set out_of_range='nearest'.
+    cfg = Config(
+        input=InputConfig(
+            latitude_column="lat",
+            longitude_column="lon",
+            date_column="date",
+        ),
+        output=OutputConfig(prefix="sa2_"),
+        geocoding=GeocodingConfig(
+            providers=["nominatim"],
+            nominatim=NominatimConfig(user_agent=config.USER_AGENT),
+        ),
+        data_sources=DataSourcesConfig(),
+        variables=variables,
+        temporal=TemporalConfig(out_of_range="nearest"),
+    )
+    return Pipeline.from_config(cfg)
+
+
+def _augment_one_pass(
     keys: pd.DataFrame,
+    variables: dict[str, str],
     *,
     pipeline_factory: object | None = None,
 ) -> pd.DataFrame:
-    """Run a single ``Pipeline.augment`` call in temporal mode.
-
-    Returns the augmented frame with the augmentor's full output schema;
-    callers project to ``OUTPUT_COLUMNS`` separately.
-
-    Temporal config:
-    - ``out_of_range='nearest'`` — pre-2022-Q4 train rows (most of train
-      fold) predate the earliest DSS release. Default ``fail`` aborts;
-      we clamp to the earliest release instead, which gives the same
-      value cross-sectional mode would have given anyway. The augmentor
-      logs a WARNING per affected row.
-    - ``resolution='closest_at_or_before'`` (default) — causally safe;
-      no peek-ahead at quarter midpoints.
+    """Single ``Pipeline.augment`` call in temporal mode. See ``_augment``
+    for the multi-pass driver (collision-splitter aware).
     """
     if pipeline_factory is None:
-        from census_augment import Pipeline
-        from census_augment.config import (
-            Config,
-            DataSourcesConfig,
-            GeocodingConfig,
-            InputConfig,
-            NominatimConfig,
-            OutputConfig,
-            TemporalConfig,
-        )
-
-        # Pipeline.create() doesn't expose temporal config; build Config
-        # manually so we can set out_of_range='nearest'.
-        cfg = Config(
-            input=InputConfig(
-                latitude_column="lat",
-                longitude_column="lon",
-                date_column="date",
-            ),
-            output=OutputConfig(prefix="sa2_"),
-            geocoding=GeocodingConfig(
-                providers=["nominatim"],
-                nominatim=NominatimConfig(user_agent=config.USER_AGENT),
-            ),
-            data_sources=DataSourcesConfig(),
-            variables=TEMPORAL_VARIABLES,
-            temporal=TemporalConfig(out_of_range="nearest"),
-        )
-        pipeline = Pipeline.from_config(cfg)
+        pipeline = _build_temporal_pipeline(variables)
     else:
         # Test seam: stubs may take no args (legacy) or accept variables.
         try:
-            pipeline = pipeline_factory(variables=TEMPORAL_VARIABLES)  # type: ignore[operator]
+            pipeline = pipeline_factory(variables=variables)  # type: ignore[operator]
         except TypeError:
             pipeline = pipeline_factory()  # type: ignore[operator]
 
-    logger.info(
-        "temporal augment: %d unique (station_id, date) rows, %d variables",
-        len(keys),
-        len(TEMPORAL_VARIABLES),
-    )
     result = pipeline.augment(keys)  # type: ignore[attr-defined]
     logger.info(
-        "temporal augment complete: %d rows × %d cols (releases: %s)",
+        "  temporal pass complete: %d rows × %d cols (releases: %s)",
         len(result.df),  # type: ignore[attr-defined]
         len(result.df.columns),  # type: ignore[attr-defined]
         getattr(result, "releases_used", {}),
     )
     return result.df  # type: ignore[no-any-return]
+
+
+def _augment(
+    keys: pd.DataFrame,
+    *,
+    pipeline_factory: object | None = None,
+) -> pd.DataFrame:
+    """Run the temporal-mode augment, splitting on PRESET collisions.
+
+    Returns the merged augmented frame with the augmentor's full output
+    schema; callers project to ``OUTPUT_COLUMNS`` separately.
+
+    Splits into multiple passes when ``TEMPORAL_VARIABLES`` triggers the
+    same PRESET-collision bug as the cross-sectional pass (see
+    ``build._augmentor_helpers``). Merges per-pass ``sa2_*`` blocks
+    column-wise; the first pass supplies bookkeeping
+    (``sa2_code``/``sa2_name``/``*_release``) and the row scaffold.
+
+    Temporal config:
+    - ``out_of_range='nearest'`` — pre-earliest-release rows clamp to
+      the earliest available release (e.g. pre-2022-Q4 train rows
+      get the 2022-Q4 DSS values, same as cross-sectional). The
+      augmentor logs a WARNING per affected row.
+    - ``resolution='closest_at_or_before'`` (default) — causally safe;
+      no peek-ahead at quarter midpoints.
+    """
+    from fuel_pred.build._augmentor_helpers import (
+        merge_augmented_frames,
+        split_for_preset_collision,
+    )
+
+    groups = split_for_preset_collision(TEMPORAL_VARIABLES)
+    logger.info(
+        "temporal augment: %d unique (station_id, date) rows, %d variables in %d pass(es)",
+        len(keys),
+        len(TEMPORAL_VARIABLES),
+        len(groups),
+    )
+    frames = [
+        _augment_one_pass(keys, g, pipeline_factory=pipeline_factory) for g in groups
+    ]
+    # Temporal mode adds *_release / sa2_code_edition / *_sa2_code_source
+    # bookkeeping cols per dataset family. The merge helper must not
+    # overwrite the first pass's metadata when subsequent passes carry
+    # their own; pass them as primary_key_cols.
+    bookkeeping = tuple(
+        c
+        for c in frames[0].columns
+        if c.endswith("_release")
+        or c.endswith("_sa2_code_source")
+        or c in {"sa2_code_edition", "sa2_resolution"}
+    )
+    return merge_augmented_frames(frames, primary_key_cols=bookkeeping)
 
 
 def _check_acceptance(out: pd.DataFrame, threshold: float = 0.95) -> None:

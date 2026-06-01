@@ -186,6 +186,33 @@ train-fresh: features
 evaluate-fresh: train-fresh
 	$(MAKE) evaluate
 
+# ----------------------------- v3.0 k-fold CV (spec §15.2) -----------------------------
+#
+# Replaces the v2.x single-split test_normal / test_crisis reporting
+# with time-series k-fold (k=6, 12-month test windows, gap_days=1,
+# crisis dropped as separate concept). Writes per-fold artefacts under
+# models_kfold/fold_N/; aggregate report at results/comparison_kfold.md.
+#
+# Wall-clock ~6× single-split train (one fit per fold). All folds run
+# locally for now; Phase 3 (Docker handoff) is deferred.
+
+MODELS_KFOLD := models_kfold
+
+.PHONY: train-kfold evaluate-kfold train-kfold-fresh evaluate-kfold-fresh
+
+train-kfold: $(DATA_PROCESSED)/features.parquet
+	$(PYTHON) -m $(PKG).train.cv --features $(DATA_PROCESSED)/features.parquet --out $(MODELS_KFOLD) $(TRAIN_OPTS)
+
+evaluate-kfold:
+	$(PYTHON) -m $(PKG).evaluate.compare_kfold --features $(DATA_PROCESSED)/features.parquet --models-root $(MODELS_KFOLD) --out $(RESULTS)/comparison_kfold.md
+
+# Force-rebuild aliases.
+train-kfold-fresh: features
+	$(MAKE) train-kfold
+
+evaluate-kfold-fresh: train-kfold-fresh
+	$(MAKE) evaluate-kfold
+
 # ----------------------------- Notebooks -----------------------------
 
 .PHONY: notebooks

@@ -27,6 +27,9 @@ results/*
 # comparison.md tables, and the preserved Round-1 backups.
 !results/pr_c_*.md
 !results/pr_c_*.json
+# v3.0 smoke + Phase 2 re-eval reports — same rationale.
+!results/v3_*.md
+!results/v3_*.json
 
 # Python
 __pycache__/

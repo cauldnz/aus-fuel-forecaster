@@ -542,16 +542,20 @@ These are deliberately reasonable defaults. **Hyperparameter tuning is out of sc
 
 ### 8.3 Validation strategy
 
-Time-based, no shuffling. Splits:
+**Status:** v2.x ran the single-split scheme below; v3.0 ([§15](#15-v30-plan--methodology-overhaul)) replaces it with **time-series k-fold CV** that treats every date range as a rotating test window — no separate "crisis" fold. Both the §8.3 v2.x scheme and the v3.0 k-fold scheme live in `train.folds`; the runner picks per CLI flag.
+
+**v2.x scheme (historical, still supported for compat):** time-based, no shuffling, four folds.
 
 | Fold | Date range | Use |
 |---|---|---|
 | Train | 2016-09-01 → 2022-12-31 | Fit |
 | Validation | 2023-01-01 → 2023-12-31 | Early stopping |
 | Test (normal) | 2024-01-01 → 2025-12-31 | Headline metrics |
-| Test (crisis) | 2026-01-01 → end of data | Reported separately as out-of-distribution |
+| Test (crisis) | 2026-01-01 → end of data | Reported separately — **deprecated in v3.0** |
 
-No k-fold CV in v1 — the time-based holdout is the validation. Group-aware splitting is unnecessary because we never train on a station-day's future and predict its past; targets are strictly forward-shifted.
+The v2.x "test_crisis" fold treated 2026's price-spike period as an out-of-distribution holdout, separate from the in-distribution test_normal headline. v3.0 drops the separation: 2026 is just another time period in the rotating CV.
+
+**v3.0 scheme (current default):** 6-fold expanding-window CV with 12-month test windows ending at 2026-04 (the panel's last date), `gap_days=1` between train end and test start to prevent `y_t1` target leakage. Geometry table + full design in [§15.2](#152-phase-plan-locked-in--v30-phase-1-design-doc-for-rationale). No k-fold CV in v1/v2 — group-aware splitting is unnecessary because we never train on a station-day's future and predict its past; targets are strictly forward-shifted.
 
 ### 8.4 The A/B comparison
 
@@ -906,43 +910,61 @@ Promoted from [§13](#13-open-questions) #10. The v2.x arc (see [`docs/research/
 
 Concretely, the cases v2.x has no good answer for:
 
-- Is PR C's E4 test_crisis +0.282 c/L gain robust, or fold-specific?
+- Was the strongest test-fold lift in PR C robust, or fold-specific?
 - Would the candidates that didn't make the v1.5-era 15-col cut survive a different fold? (We curated by gain rank from a single 31-col fit.)
 - Would temporal-mode benefits (PR C E1) show up on different historical splits, or are they 2024-25 artefacts?
 - How much of any reported Δ MAE is real and how much is what a 6-fold mean ± stdev would call within-noise?
 
-The committed v2.x headline (PR B + augmentor v2.1.0): test_normal Δ MAE −0.239, test_crisis Δ MAE −0.321. None of PR C's 7 experiments beat this on both folds simultaneously — and the strongest crisis-fold result (E4 −0.603) cost the test_normal fold meaningfully. **The decision of which configuration to ship can't be made under the current methodology.**
+The committed v2.x single-split headline (PR B + augmentor v2.1.0) showed Model B beating Model A by 0.239 c/L on the 2024-25 test fold and 0.321 c/L on the 2026 fold. None of PR C's 7 experiments beat that on both single-split folds simultaneously, and the strongest single-fold result cost meaningfully on the other. **The decision of which configuration to ship can't be made under the current methodology.**
 
-### 15.2 Phase plan (sketch — to be detailed during planning session)
+### 15.2 Phase plan (locked-in)
 
-**Phase 1 — k-fold CV harness.** Replace the two-fold reporting (test_normal vs test_crisis) with a proper time-series k-fold across the full panel. Decisions needed:
+Decisions in this section are confirmed (2026-05-31 planning session). See [`docs/research/2026-05_v3.0_phase1_kfold_design.md`](docs/research/2026-05_v3.0_phase1_kfold_design.md) for full rationale + research synthesis + leakage analysis.
 
-- CV scheme: expanding-window (each fold's train = everything before its test window) vs rolling-origin (fixed-width train sliding through time). Expanding-window is the safer first cut for non-stationary signals.
-- Fold count: 6–10 across 2018–2026. Trade-off: more folds = tighter mean ± stdev but slower.
-- Gap-fold behaviour: should there be a small gap between train end and test start (typical for forecasting CV to avoid lag-feature leakage)? Probably yes — match the lag-window depth (~28 days from `lag_price_28`).
-- Crisis-fold handling: keep 2026-Q1 as a separate held-out "OOD verification" fold, OR fold it in to the rolling CV and lose the explicit OOD signal? Probably the former — crisis fold remains the headline robustness check, while CV runs on 2018-2025.
-- Reporting format: replace the single A-vs-B comparison.md with per-fold + aggregate mean/stdev/CI. `evaluate.compare` needs a refactor.
+**Phase 1 — k-fold CV harness.** Replaces single-split A-vs-B reporting with time-series k-fold CV across the full panel. Concrete config:
 
-**Phase 2 — Re-evaluation of the v2.x feature surface under k-fold CV.** Re-run the studies that the v2.x methodology couldn't cleanly attribute:
+- **Scheme:** expanding-window chronological (each fold's train = everything before its test window). Matches deployment.
+- **k = 6** folds, each with a **12-month test window**.
+- **`gap_days = 1`** between train end and test start, to prevent the `y_t1` target-shift leak (the same leak exists in the v2.x single-split setup today and gets fixed as a side-effect).
+- **No "crisis" concept** — the 2026 data is just another time period included in the rotating test windows. The v2.x `test_crisis` fold is deprecated; see §8.3.
+- **Per-fold val** = last 365 days of that fold's train portion. LightGBM early-stopping uses this val.
+- **Reporting:** merged per-fold + aggregate (mean ± stdev) report. No p-values (per-fold spread vs effect size is judgable by eye — see design doc §2.5 for why naive paired t-tests on k-fold scores are misleading).
 
-- PR A v2.0 bump — confirm it's actually a no-op or whether the previous "byte-identical" finding was fold-specific
-- PR B temporal-mode (SEIFA + ERP-total) — re-evaluate per-fold; does the static-vs-temporal trade-off hold across all folds or only the 2024-25 one?
-- PR C E1 (DSS temporal) — was the test_normal win general or 2024-25 specific?
-- PR C E4 / E4a / E4b — does the density column really drive the crisis-fold gain across all folds?
-- The v1.5-era 31 → 15 curation — would the cut survive a fold-by-fold gain analysis?
+**Fold geometry (k=6, 12-month windows ending at panel last date 2026-04):**
 
-Outcome should be a small set of robust feature recommendations + a clean "this is the v3.0 baseline" config.
+| Fold | Train window | Val window (last 365d of train) | Test window |
+|---|---|---|---|
+| 1 | 2017-01-01 → 2020-04-30 | 2019-05-01 → 2020-04-30 | 2020-05-01 → 2021-04-30 |
+| 2 | 2017-01-01 → 2021-04-30 | 2020-05-01 → 2021-04-30 | 2021-05-01 → 2022-04-30 |
+| 3 | 2017-01-01 → 2022-04-30 | 2021-05-01 → 2022-04-30 | 2022-05-01 → 2023-04-30 |
+| 4 | 2017-01-01 → 2023-04-30 | 2022-05-01 → 2023-04-30 | 2023-05-01 → 2024-04-30 |
+| 5 | 2017-01-01 → 2024-04-30 | 2023-05-01 → 2024-04-30 | 2024-05-01 → 2025-04-30 |
+| 6 | 2017-01-01 → 2025-04-30 | 2024-05-01 → 2025-04-30 | 2025-05-01 → 2026-04-30 |
 
-**Phase 3 — Docker handoff to home AMD server.** k-fold × multi-experiment retrain pattern is significantly more expensive than v2.x's single-fit (a 6-fold CV multiplies wall-clock by ~6 per experiment; PR C's 7 experiments × 30-60 min each at single-fit ≈ 5h becomes ~30h at 6-fold). To keep iteration practical:
+Notes: 2016-09 → 2016-12 stays as lag-feature warmup (excluded from all train sets — 4 months covers `lag_price_28` + `roll_price_mean_28` minperiods). `gap_days=1` is enforced by dropping train rows where `date + horizon ≥ test_start`. All of 2025 + 2026 are covered as test data (fold 5 takes 2025-Jan-Apr through fold 6 takes 2025-May-Dec + 2026-Jan-Apr).
 
-- Docker container wrapping the train + evaluate stages with the project's `uv.lock` baked in
-- Container reads features parquet from a mounted volume (or fetches from a bucket), writes models/predictions/comparison back the same way
-- Orchestrator on the laptop becomes "build features locally → ship features parquet to remote → trigger remote train → pull artefacts back" instead of running everything inline
+**Phase 2 — Re-evaluation of the v2.x feature surface under k-fold CV.** Re-run the studies that the v2.x methodology couldn't cleanly attribute. Each gets its own small PR with per-fold + aggregate output:
+
+- Committed PR B baseline (SEIFA + ERP-total temporal) — sets the new v3.0 headline
+- PR C E4 (new ERP density + 21-col curated SA2 block)
+- PR C E4a (density only) — ablation
+- PR C E1 (DSS temporal)
+- PR C E5 (DSS + curation combined) — was the destructive interaction fold-specific or robust?
+- v1.5-era 31 → 15 curation — would the cut survive a per-fold gain analysis?
+- PR A v2.0 augmentor pin bump — confirm the byte-identical finding holds
+
+Outcome: a small set of robust feature recommendations + a clean "this is the v3.0 baseline" config.
+
+**Phase 3 — Docker handoff to home AMD server.** k-fold × multi-experiment retrain is ~6× the wall-clock of v2.x single-fit (PR C's 7 experiments × 30-60 min each ≈ 5h becomes ~30h at 6-fold). Currently deferred — Phase 1 + Phase 2 run locally on the dev laptop, with the cost accepted. Phase 3 picks up only when iteration friction motivates it:
+
+- Docker container wrapping the train + evaluate stages with `uv.lock` baked in
+- Container reads features parquet from a mount / bucket, writes models/predictions/comparison back the same way
+- Orchestrator on the laptop becomes "build features locally → ship features parquet to remote → trigger remote train → pull artefacts back"
 - Possibly: distribute the k-fold loop across remote workers (one fold per worker)
 
-Decisions needed: container build (multi-stage with `uv sync --frozen`?); mount strategy (NFS share vs S3-like object store vs HTTPS file transfer); artefact return path; security (the AMD server is on a home LAN, likely no public exposure required).
+Decisions needed when Phase 3 actually starts: container build (multi-stage with `uv sync --frozen`?); mount strategy (NFS share vs S3-like object store vs HTTPS file transfer); artefact return path; security (AMD server on home LAN, likely no public exposure required).
 
-**Phase 4 — Documentation + retrospective.** Update `results/README.md` to reflect the new methodology and the re-evaluated headline. Spec §8.3 (folds) gets rewritten. The closing-summary doc gets an addendum on what survived the re-evaluation.
+**Phase 4 — Documentation + retrospective.** Update `results/README.md` to reflect the new methodology and re-evaluated headline; rewrite spec §8.3's v2.x scheme section to "historical only"; v2.x closing-summary doc gets an addendum on what survived the re-evaluation.
 
 ### 15.3 Out of scope for v3.0
 
@@ -950,13 +972,14 @@ Decisions needed: container build (multi-stage with `uv sync --frozen`?); mount 
 - New data sources. v3.0 works against the existing fetched data — no new fetchers, no new augmentor pin bumps (unless a fix lands that we explicitly want).
 - 7-day forecast horizon (§13.8). Still backlogged for a v4.0 or follow-up; v3.0 stays single-target (`y_t1`).
 - Self-hosted Open-Meteo (§13.9). Same — backlogged.
+- **Crisis fold as a separate concept.** The v2.x `test_crisis` fold is deprecated. 2026 data is rotated into the k-fold test windows alongside every other year. References to "crisis fold" in older docs (`docs/research/2026-05_v2_closing_summary.md`, `results/README.md`, historical research entries) are preserved as the v2.x record but no longer drive evaluation. Spec §8.3's v2.x scheme is kept for compat with old single-split tooling but isn't the default.
 
 ### 15.4 Branches + ship cadence
 
 - All v3.0 work on `claude/v3.0-*` branches off main
-- Phase 1 lands first as its own PR (k-fold CV harness + new evaluate.compare); a smoke retrain on the existing PR B baseline produces the first per-fold report
+- Phase 1 lands first as its own PR (k-fold CV harness + new `evaluate.compare_kfold`); a smoke retrain on the existing PR B baseline produces the first v3.0 per-fold report
 - Phase 2 lands as a series of small PRs, one per re-evaluated study
-- Phase 3 can run in parallel with Phase 2 once the Docker container builds cleanly against a baseline fit
+- Phase 3 sits until iteration friction motivates it; not scheduled
 - Phase 4 closes v3.0 and updates `results/README.md` to the new methodology headline
 
 ### 15.5 What's pinned at v2.x

@@ -106,71 +106,11 @@ def _ensure_columns_exist(stations: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _split_for_preset_collision(variables: dict[str, str]) -> list[dict[str, str]]:
-    """Group ``variables`` into augmentor-safe subsets.
-
-    See module docstring (UPSTREAM_GCP_COLLISION). When any direct
-    ``<NAMESPACE>.<field>`` ref (e.g. ``G01.Tot_P_P``, ``DSS.age_pension_recipients``)
-    appears in the source-field list of a requested ``PRESET.<id>``, a single
-    ``Pipeline.augment(...)`` call crashes inside the PRESET evaluator
-    with ``ValueError: cannot reindex on an axis with duplicate labels``
-    (or, in v1.4.2, inside ``_build_gcp_lookup``).
-
-    Originally observed for GCP-internal PRESETs (`pct_aged_65_plus` uses
-    `G04.*` codes that we also request directly). v2.0 PR #86 adds three
-    cross-dataset PRESETs (`pct_age_pension_recipients`, `pct_jobseeker_recipients`,
-    `welfare_density_index`) that use DSS sources we also request directly
-    — same collision pattern. The splitter is therefore namespace-agnostic
-    in v2.0: it inspects every non-PRESET ref against every PRESET's
-    declared source_fields().
-
-    The common (no collision) case returns ``[variables]`` — one group,
-    one augment call. Tests rely on this single-call behaviour via
-    their stub ``DIRECT_VARIABLES`` fixture.
-    """
-    try:
-        from census_augment.features import features
-    except ImportError:  # augmentor not installed (e.g. some test envs)
-        return [variables]
-
-    # Direct refs are anything that isn't a PRESET; we used to require a
-    # ``G\d+.`` prefix but v2.0's cross-dataset PRESETs collide with DSS
-    # too, so we look at every non-PRESET ref.
-    direct_refs: dict[str, str] = {}  # friendly -> "<NS>.<field>"
-    preset_ids: list[str] = []
-    for friendly, ref in variables.items():
-        if ref.startswith("PRESET."):
-            preset_ids.append(ref[len("PRESET.") :])
-        elif "." in ref:
-            direct_refs[friendly] = ref
-
-    if not direct_refs or not preset_ids:
-        return [variables]
-
-    colliding_friendlies: set[str] = set()
-    for preset_id in preset_ids:
-        try:
-            sources = set(features.get(preset_id).source_fields())
-        except KeyError:
-            continue
-        for friendly, ref in direct_refs.items():
-            if ref in sources:
-                colliding_friendlies.add(friendly)
-
-    if not colliding_friendlies:
-        return [variables]
-
-    pass_a = {f: r for f, r in variables.items() if f not in colliding_friendlies}
-    pass_b = {f: r for f, r in variables.items() if f in colliding_friendlies}
-    logger.info(
-        "augmentor split: %d non-colliding vars + %d colliding direct vars (%s) "
-        "to work around upstream PRESET-collision bug",
-        len(pass_a),
-        len(pass_b),
-        sorted(colliding_friendlies),
-    )
-    return [pass_a, pass_b]
-
+# Splitter lives in build._augmentor_helpers so build.enrich_panel_temporal
+# can use it too (same upstream bug fingerprint in both passes).
+from fuel_pred.build._augmentor_helpers import (  # noqa: E402
+    split_for_preset_collision as _split_for_preset_collision,
+)
 
 # Backwards-compat alias — tests in test_build_enrich_census.py import the
 # old name. Keep this until those tests migrate.
@@ -221,6 +161,8 @@ def _augment(
     column-wise; the first pass supplies ``sa2_code``/``sa2_name`` and
     the row scaffold.
     """
+    from fuel_pred.build._augmentor_helpers import merge_augmented_frames
+
     groups = _split_for_preset_collision(DIRECT_VARIABLES)
     frames = [
         _augment_one_pass(
@@ -228,15 +170,7 @@ def _augment(
         )
         for g in groups
     ]
-    if len(frames) == 1:
-        return frames[0]
-
-    merged = frames[0].copy()
-    for extra in frames[1:]:
-        for col in extra.columns:
-            if col.startswith("sa2_") and col not in {"sa2_code", "sa2_name"}:
-                merged[col] = extra[col].values
-    return merged
+    return merge_augmented_frames(frames)
 
 
 def _check_acceptance(stations: pd.DataFrame, threshold: float = 0.95) -> None:

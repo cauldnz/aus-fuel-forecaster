@@ -886,6 +886,19 @@ To be resolved during implementation, not blocking spec sign-off:
 
    **Status: backlog, no current action.** Revisit when (a) v2.1 multi-horizon modelling work begins and the §13.7 GFS pipeline's parse-time cost becomes painful, OR (b) we want the richer Open-Meteo derived variables. Either trigger justifies the infra investment; v2.0 alone does not.
 
+10. **Time-series k-fold cross-validation + remote training offload** — replace the current two-fold reporting (test_normal vs test_crisis) with a proper time-series k-fold CV across the full panel, so feature-engineering comparisons are robust to fold-specific noise instead of betting on a single 2024-25 / 2026 split. The PR C experiments (see [`results/pr_c_overnight_summary.md`](results/pr_c_overnight_summary.md)) made this gap concrete: E1 wins test_normal while losing test_crisis, E4 does the reverse, and E5's "combine the wins" hypothesis blew up — single-split deltas don't generalise predictably. A rolling-origin or expanding-window k-fold (e.g. 6-10 folds across 2018-2026) would give us a per-experiment mean ± stdev that says "this change is robustly an improvement" vs "this change traded one fold for another." Past studies (PR A v2.0 bump, PR B temporal-mode adoption, PR C ablations) should arguably be re-run under the new methodology — null results re-evaluated, surviving wins reconfirmed.
+
+    **Compute side** — k-fold × multi-experiment retrain pattern is significantly more expensive than today's single-fit. PR C's 7 experiments at ~30-60 min each fit a single CPU-bound LightGBM; a 6-fold CV would multiply that by 6 per experiment. To keep iteration practical, consider offloading training (and possibly feature build) to a home AMD server with substantially more cores + memory than the dev laptop. Implementation sketch:
+    - **Docker container** wrapping the train + evaluate stages with the project's `uv.lock` baked in, so the home server can pull + run without env setup
+    - Container reads features from a mounted volume (or fetches from a bucket), writes models/predictions/comparison back the same way
+    - Orchestrator on the laptop becomes "build features locally → ship features parquet to remote → trigger remote train → pull artefacts back" instead of running everything inline
+    - Possibly: distribute the k-fold loop across remote workers if k-fold becomes the standard pattern
+
+    **Status: backlog, plan-and-discuss.** Will need a dedicated session to:
+    (a) pick a CV scheme (expanding-window vs rolling-origin; fold count; gap-fold behaviour);
+    (b) decide whether to retrofit historical experiments or just start from now;
+    (c) design the Docker/remote-training handoff (container build, mount strategy, artefact return path, security).
+
 ## 14. References
 
 - `abs-census-augmentor`: https://github.com/cauldnz/abs-census-augmentor

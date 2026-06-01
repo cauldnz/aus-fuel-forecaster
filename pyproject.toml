@@ -33,27 +33,29 @@ dependencies = [
     "shapely>=2.0",
     # Plotting (notebooks pull this in)
     "matplotlib>=3.8",
-    # The augmentor itself. Pinned to commit 762a6a0f (post v2.0.0,
-    # 2026-05-30) — main with all three of our filed issues resolved
-    # plus a new ERP variable:
-    #   - cauldnz/abs-census-augmentor#92 (PR #95) — ERP temporal-release
-    #     resolution via historical-year projection.
-    #   - cauldnz/abs-census-augmentor#91 Stage 2 (PR #96) — per-release
-    #     `DataPacksDataSource` routing in temporal mode. GCP cross-edition
-    #     temporal lookups now route through the right DataPack per
-    #     release; the Stage-1 loud-error guard is no longer reachable
-    #     under normal use.
-    #   - cauldnz/abs-census-augmentor#99 (PR #100) — DSS XLSX parser now
-    #     handles pre-Q2-2023 releases (5-digit SA2 codes) end-to-end.
+    # The augmentor itself. Pinned to v2.1.0 (commit 2ea02fb8,
+    # 2026-05-31) — clean semver release that closes all four issues
+    # we filed during PR A/B/C plus carries the new ERP density column
+    # and historical-data expansion all the way to ASGS Edition 1 / 2011:
+    #   - #91 Stage 2 (PR #96) — per-release DataPacks routing in
+    #     temporal mode. GCP cross-edition temporal lookups now work.
+    #   - #92 (PR #95) — ERP temporal-release resolution via
+    #     historical-year projection.
+    #   - #99 (PR #100) — DSS XLSX parser handles pre-Q2-2023 releases
+    #     (5-digit SA2 codes). 8 more years of quarterly DSS now usable
+    #     in temporal mode (2014-Q3 through 2022-Q4 + everything after).
+    #   - #101 (PR #102) — null-geometry guard in compute_sa2_areas_km2.
+    #     Was previously crashing every Pipeline.create() since PR #97.
     #   - PR #97 — new `ERP.population_density_per_km2` column.
-    # Also picks up PR #89 (SEIFA 2011), PR #90 (4 more cross-dataset
-    # PRESETs), PR #93 (carer-payment PRESET).
+    #   - PR #89 — SEIFA 2011 + ASGS Edition 1 boundary support.
+    #   - PR #90 + #93 — 5 more cross-dataset PRESETs.
     #
     # PR C in this repo runs overnight experiments exercising the new
     # temporal-mode capabilities and adopts the new ERP density column.
-    # See docs/research/2026-05_abs_census_augmentor_v2.0_review.md for
-    # the spike + experiment summary.
-    "abs-census-augmentor @ git+https://github.com/cauldnz/abs-census-augmentor.git@762a6a0f15b7b8167a497ed78be001671ec0b7e8",
+    # See docs/research/2026-05_abs_census_augmentor_v2.0_review.md +
+    # results/pr_c_overnight_summary.md for the spike + experiment
+    # narrative.
+    "abs-census-augmentor @ git+https://github.com/cauldnz/abs-census-augmentor.git@2ea02fb864fa415c230df9bfb3d312d3405f0eab",
     "python-dotenv>=1.2.2",
     "cfgrib>=0.9.15.1",
     "eccodes>=2.47.0",

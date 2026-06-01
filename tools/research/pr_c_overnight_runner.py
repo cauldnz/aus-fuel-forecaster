@@ -40,6 +40,12 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# NOTE: an earlier version of this script installed a runtime monkey-
+# patch for `census_augment.spatial.compute_sa2_areas_km2` to work
+# around upstream #101 (null-geometry crash). That issue was fixed in
+# v2.1.0 (PR #102) which the project now pins to, so the workaround
+# is no longer needed and was removed.
+
 # We monkey-patch a lot. Stay close to the project root for tidy paths.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_RAW = REPO_ROOT / "data" / "raw"
@@ -87,10 +93,20 @@ GCP_FAMILY = (
     "pct_one_parent_family",
 )
 
-# DSS welfare — 13 vars currently cross-sectional pending #99 (now fixed).
+# DSS welfare — 13 vars in our cross-sectional set, but 4 of them
+# aren't universally available across the temporal release range
+# (per tools/research/dss_schema_probe.py against v2.1.0):
+#   - jobseeker_payment_recipients (missing in 2015-Q1 — pre-JobSeeker era)
+#   - commonwealth_rent_assistance_recipients (missing in 2015-Q1)
+#   - family_tax_benefit_a/b_recipients (missing in 2024-Q2)
+# The augmentor's temporal-mode validator rejects any column not present
+# in every release, so we exclude these 4 from the DSS-temporal pass and
+# leave them in cross-sectional. The remaining 9 DSS columns are temporal-
+# eligible. Move them back when upstream relaxes the validator (filed as
+# augmentor #XX-TBD: "DSS temporal-mode validator should accept per-release
+# column intersections rather than requiring universal presence").
 DSS_FAMILY = (
     "dss_age_pension_recipients",
-    "dss_jobseeker_payment_recipients",
     "dss_disability_support_pension_recipients",
     "dss_parenting_payment_single_recipients",
     "dss_parenting_payment_partnered_recipients",
@@ -98,10 +114,7 @@ DSS_FAMILY = (
     "dss_carer_allowance_recipients",
     "dss_youth_allowance_other_recipients",
     "dss_youth_allowance_student_and_apprentice_recipients",
-    "dss_commonwealth_rent_assistance_recipients",
     "dss_commonwealth_seniors_health_card_recipients",
-    "dss_family_tax_benefit_a_recipients",
-    "dss_family_tax_benefit_b_recipients",
 )
 
 # PR A's 5 unmodeled cross-sectional candidates + the new ERP density
@@ -115,10 +128,15 @@ CURATION_CANDIDATES = (
     "sa2_erp_population_density_per_km2",  # NEW in upstream PR #97
 )
 
-EXPERIMENTS = (
+# Round 1 (committed): E1-E4 ran in the first pass — see
+# pr_c_overnight_metrics.e1-e4.json + pr_c_overnight_summary.e1-e4.md
+# for the preserved results. We keep their `Experiment` defs in code as
+# documentation of what was run, but the tuple ROUND_1_EXPERIMENTS isn't
+# wired into `main()` anymore.
+ROUND_1_EXPERIMENTS = (
     Experiment(
         name="e1_dss_temporal",
-        description="Move 13 DSS variables to temporal pass (orig §7.7.2 motivation, unblocked by #99)",
+        description="Move 9 DSS variables to temporal (orig §7.7.2; trimmed from 13 to 9 to dodge cross-release schema gaps)",
         move_to_temporal=DSS_FAMILY,
     ),
     Experiment(
@@ -142,6 +160,55 @@ EXPERIMENTS = (
             "erp_population_density_per_km2": "ERP.population_density_per_km2",
         },
         add_to_sa2_model_block=CURATION_CANDIDATES,
+    ),
+)
+
+# Round 2 (current): E5 combines E1's two clear wins. E4a + E4b are an
+# ablation of E4's curation broadening to attribute the test_crisis
+# −0.282 c/L gain to either the new density column or the broader
+# curation. The summary writer merges Round 1 + Round 2 metrics from
+# pr_c_overnight_metrics.json so the final table shows all 7.
+EXPERIMENTS = (
+    Experiment(
+        name="e5_dss_temporal_plus_curation",
+        description=(
+            "Combine E1 (DSS temporal, 9 cols) + E4 (new ERP density + 21-col "
+            "curated SA2 block) — hypothesis: hit both the test_normal and "
+            "test_crisis wins simultaneously"
+        ),
+        move_to_temporal=DSS_FAMILY,
+        add_cross_sectional={
+            "erp_population_density_per_km2": "ERP.population_density_per_km2",
+        },
+        add_to_sa2_model_block=CURATION_CANDIDATES,
+    ),
+    Experiment(
+        name="e4a_density_only",
+        description=(
+            "Ablation: just the new ERP.population_density_per_km2 column, no "
+            "curation broadening. Tests whether the density column alone drives "
+            "the E4 crisis-fold gain (temporal pass = PR B baseline)"
+        ),
+        add_cross_sectional={
+            "erp_population_density_per_km2": "ERP.population_density_per_km2",
+        },
+        add_to_sa2_model_block=("sa2_erp_population_density_per_km2",),
+    ),
+    Experiment(
+        name="e4b_curation_only",
+        description=(
+            "Ablation: just the 5 PR-A unmodeled candidates added to "
+            "SA2_COLUMNS, NO new density column. Tests whether the curation "
+            "broadening alone drives the E4 crisis-fold gain (temporal pass = "
+            "PR B baseline)"
+        ),
+        add_to_sa2_model_block=(
+            "sa2_erp_population_65_plus",
+            "sa2_erp_median_age",
+            "sa2_pct_age_pension_recipients",
+            "sa2_pct_jobseeker_recipients",
+            "sa2_welfare_density_index",
+        ),
     ),
 )
 
@@ -351,16 +418,36 @@ def _run_experiment(modules, originals, exp: Experiment) -> dict:
 def _extract_headline_metrics(comparison_path: Path) -> dict:
     """Pull the test_normal / test_crisis Δ MAE from a comparison.md.
 
-    The comparison file's headline table follows the layout we control in
-    evaluate.compare:
+    Specifically the FIRST ``## Headline (overall) — A vs B`` table; the
+    file also has a ``## Headline (overall) — B vs B'`` table whose rows
+    also start with ``| test_normal |`` but use a different (Model B' vs
+    Model B) MAE convention. An earlier version of this function naively
+    matched any ``| test_normal |`` line and so picked up the LAST match
+    (the B-vs-B' row) overwriting the correct A-vs-B values. Be explicit.
+
+    Layout we expect from evaluate.compare:
+
+        ## Headline (overall) — A vs B
 
         | Fold | n | MAE A | MAE B | Δ MAE | RMSE A | RMSE B | MAPE A | MAPE B | Δ MAPE |
         | test_normal | ... | 6.373 | 6.134 | -0.239 | ... |
         | test_crisis | ... | 13.616 | 13.295 | -0.321 | ... |
     """
+    import re
+
     text = comparison_path.read_text(encoding="utf-8")
+    # Capture only the A-vs-B headline block (up to the next ## heading).
+    block_match = re.search(
+        r"## Headline \(overall\) [—-] A vs B(.*?)(?:## Headline|## Segmented|$)",
+        text,
+        re.DOTALL,
+    )
+    if not block_match:
+        logger.warning("no A-vs-B headline block found in %s", comparison_path)
+        return {}
+    block = block_match.group(1)
     metrics: dict = {}
-    for line in text.splitlines():
+    for line in block.splitlines():
         for fold in ("test_normal", "test_crisis"):
             if line.startswith(f"| {fold} |"):
                 parts = [p.strip() for p in line.split("|")]
@@ -404,10 +491,22 @@ def _write_summary(all_metrics: dict, baseline: dict) -> None:
         "| Experiment | test_normal Δ MAE | vs baseline | test_crisis Δ MAE | vs baseline | wall-clock |",
         "|------------|------------------:|------------:|------------------:|------------:|-----------:|",
     ])
-    for exp in EXPERIMENTS:
-        m = all_metrics.get(exp.name, {})
-        if not m:
-            lines.append(f"| **{exp.name}** | _(no data)_ | _(no data)_ | _(no data)_ | _(no data)_ | _(failed)_ |")
+    # Show all experiments — both this run's (EXPERIMENTS) and any
+    # preserved-from-prior-run entries that aren't in this tuple. Order:
+    # prior-run first (preserved), then current-run.
+    current_names = {e.name for e in EXPERIMENTS}
+    prior_names = [name for name in all_metrics if name not in current_names]
+    ordered_rows = [
+        (name, all_metrics.get(name, {})) for name in prior_names
+    ] + [
+        (exp.name, all_metrics.get(exp.name, {})) for exp in EXPERIMENTS
+    ]
+    for name, m in ordered_rows:
+        if not m or ("error" in m and "test_normal_delta_mae" not in m):
+            lines.append(
+                f"| **{name}** | _(no data)_ | _(no data)_ | _(no data)_ "
+                f"| _(no data)_ | _(failed)_ |"
+            )
             continue
         d_normal = m.get("test_normal_delta_mae", float("nan"))
         d_crisis = m.get("test_crisis_delta_mae", float("nan"))
@@ -417,7 +516,7 @@ def _write_summary(all_metrics: dict, baseline: dict) -> None:
         diff_crisis = d_crisis - baseline_crisis
         wall = m.get("wall_clock_min", float("nan"))
         lines.append(
-            f"| **{exp.name}** "
+            f"| **{name}** "
             f"| {d_normal:+.3f} "
             f"| {diff_normal:+.3f} "
             f"| {d_crisis:+.3f} "
@@ -479,7 +578,30 @@ def main() -> None:
     baseline = _extract_headline_metrics(baseline_path) if baseline_path.exists() else {}
     logger.info("baseline (PR B headline): %s", baseline)
 
+    # Seed all_metrics from the prior round's pr_c_overnight_metrics.json
+    # so the final summary table shows all experiments side-by-side.
+    # Only Round 1 entries that AREN'T in this round's EXPERIMENTS get
+    # preserved (this run will overwrite anything keyed by a current
+    # experiment name).
     all_metrics: dict = {}
+    metrics_path = RESULTS_DIR / "pr_c_overnight_metrics.json"
+    if metrics_path.exists():
+        try:
+            prior = json.loads(metrics_path.read_text(encoding="utf-8"))
+            preserved = prior.get("experiments", {})
+            current_names = {e.name for e in EXPERIMENTS}
+            for name, m in preserved.items():
+                if name not in current_names:
+                    all_metrics[name] = m
+            logger.info(
+                "preserved %d prior experiment(s) from %s: %s",
+                len(all_metrics),
+                metrics_path.name,
+                list(all_metrics),
+            )
+        except Exception as exc:
+            logger.warning("failed to read prior metrics from %s: %s", metrics_path, exc)
+
     for exp in EXPERIMENTS:
         try:
             # Each experiment starts from a clean baseline config.

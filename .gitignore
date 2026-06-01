@@ -9,6 +9,10 @@ data/processed/*
 # Trained models
 models/*
 !models/.gitkeep
+# Per-experiment model dirs (PR C orchestrator and similar). Same
+# rationale as models/* — large LightGBM pickles, easy to regenerate
+# from the committed features parquet + train config.
+models_*/
 
 # Results — keep the directory but not generated artefacts.
 # (You may want to commit comparison.md once it stabilises; uncomment as needed.)
@@ -17,6 +21,12 @@ results/*
 !results/shap/.gitkeep
 # README.md is hand-written documentation, not a generated artefact — track it.
 !results/README.md
+# PR C experiment artefacts — tracked so the multi-experiment narrative
+# (E1-E5 + E4a/b ablation) is reproducible from git, not only from a
+# local re-run. Includes the summary, raw metrics, per-experiment
+# comparison.md tables, and the preserved Round-1 backups.
+!results/pr_c_*.md
+!results/pr_c_*.json
 
 # Python
 __pycache__/

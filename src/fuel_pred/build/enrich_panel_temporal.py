@@ -99,7 +99,7 @@ def _load_unique_panel_keys(
     return keys
 
 
-def _build_temporal_pipeline(variables: dict[str, str]):
+def _build_temporal_pipeline(variables: dict[str, str]) -> object:
     """Construct a temporal-mode Pipeline with ``out_of_range='nearest'``.
 
     Extracted so each pass of the collision splitter can build its own
@@ -142,7 +142,7 @@ def _augment_one_pass(
     variables: dict[str, str],
     *,
     pipeline_factory: object | None = None,
-):
+) -> pd.DataFrame:
     """Single ``Pipeline.augment`` call in temporal mode. See ``_augment``
     for the multi-pass driver (collision-splitter aware).
     """

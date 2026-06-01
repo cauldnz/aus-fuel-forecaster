@@ -94,7 +94,7 @@ def merge_augmented_frames(
     frames: list,
     *,
     primary_key_cols: tuple[str, ...] = (),
-) -> "object":
+) -> object:
     """Column-wise merge a list of augmented DataFrames.
 
     The first frame is the canonical scaffold (provides ``sa2_code``,

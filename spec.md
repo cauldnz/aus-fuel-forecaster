@@ -892,6 +892,16 @@ To be resolved during implementation, not blocking spec sign-off:
 
 10. **Time-series k-fold cross-validation + remote training offload — PROMOTED to v3.0.** Originally filed as backlog after PR C's overnight experiments made the single-split methodology gap concrete (E1 wins test_normal while losing test_crisis, E4 does the reverse, E5's "combine the wins" hypothesis blew up). The full plan now lives at [§15](#15-v30-plan--methodology-overhaul) — it's the next major version's primary work, not deferred maintenance.
 
+11. **ABS Building Approvals (8731.0) as a candidate v3+ feature.** Upstream `abs-census-augmentor` v2.2.0 (2026-06-01) shipped `abs_building_approvals` — a SA2-native monthly dataset with 9 metric columns (new house / other residential / total dwelling counts + `$'000` values + alterations / non-residential / total building). Plausibly relevant to fuel-price prediction as a leading economic-activity proxy: areas with construction activity have construction-vehicle fuel demand + incoming-resident population growth. Monthly cadence means it's a candidate for both cross-sectional and temporal-mode inclusion.
+
+    **Status:** Don't add until v3.0 Phase 2 re-evaluation completes — adding new feature surface before the existing surface's robustness is known would muddy the methodology validation. After Phase 2: queue as a Phase 5-ish add-and-evaluate experiment under k-fold.
+
+12. **ASGS parent codes (sa3 / sa4 / gcc / ste) as a near-zero-cost categorical feature trial.** Upstream `abs-census-augmentor` v2.2.0 exposed `census_augment.spatial.compute_sa2_parent_codes()` — a pure dict lookup from the SA2 boundary file's attribute columns to SA3 / SA4 / GCC (Greater Capital City) / STE (state) codes. Adding these 4 as categorical features in our SA2 block is essentially free at data-fetch time (no new download) — only `enrich_census` needs to expose them and `feature_blocks.SA2_COLUMNS` needs the additions. LightGBM handles high-cardinality categoricals natively.
+
+    **Hypothesis worth testing:** the model currently learns per-station spatial patterns through `stn_*` features but has no explicit access to administrative geography above the SA2 level. Adding parent codes might let it pick up state-level price-cycle signals (e.g. NSW vs ACT vs the Greater Sydney bubble) without us having to engineer those features by hand. Single experiment under the v3.0 k-fold harness, ~22 min wall-clock — cheap to test, easy to drop if k-fold says it doesn't help robustly.
+
+    **Status:** queue for v3.0 Phase 2 (cheap to run alongside the existing re-evaluations) or Phase 5.
+
 ## 14. References
 
 - `abs-census-augmentor`: https://github.com/cauldnz/abs-census-augmentor

@@ -76,6 +76,8 @@ def train_kfold(
     save_predictions: bool = True,
     log_period: int = DEFAULT_LOG_PERIOD,
     n_estimators: int | None = None,
+    random_state: int | None = None,
+    models_to_fit: tuple[str, ...] = ("A", "B", "B_PRIME"),
 ) -> KFoldRunResult:
     """Run k-fold CV: fit A/B/B' once per fold; write per-fold artefacts.
 
@@ -84,8 +86,12 @@ def train_kfold(
         out_root: parent dir for per-fold subdirs. Created if missing.
         kfold_config: geometry; defaults to ``KFoldConfig.default()``
             (the spec §15.2 6-fold scheme).
-        target / save_predictions / log_period / n_estimators: forwarded
-            to ``_train_one_fold`` — same semantics as ``train()``.
+        target / save_predictions / log_period / n_estimators / random_state /
+            models_to_fit: forwarded to ``_train_one_fold`` — same semantics
+            as ``train()``. ``random_state`` and ``models_to_fit`` are used
+            by the v3.0 Phase 3 seed-noise experiment (next-step #2): pass
+            a per-run seed + ``("A",)`` to fit only Model A per seed-run,
+            cutting wall-clock by ~2/3.
 
     Returns:
         ``KFoldRunResult`` capturing per-fold ``FitResult`` dicts +
@@ -134,6 +140,8 @@ def train_kfold(
             save_predictions=save_predictions,
             log_period=log_period,
             n_estimators=n_estimators,
+            random_state=random_state,
+            models_to_fit=models_to_fit,
         )
         per_fold_results.append(result)
         per_fold_out_dirs.append(fold_out)

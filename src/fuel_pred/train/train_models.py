@@ -150,6 +150,8 @@ def _train_one_fold(
     save_predictions: bool = True,
     log_period: int = DEFAULT_LOG_PERIOD,
     n_estimators: int | None = None,
+    random_state: int | None = None,
+    models_to_fit: tuple[str, ...] = ("A", "B", "B_PRIME"),
 ) -> dict[str, FitResult]:
     """Fit A/B/B' on one fold's (train, val); predict each entry in test_folds.
 
@@ -169,10 +171,27 @@ def _train_one_fold(
         out_dir: persistence target. Created if missing.
         target / save_predictions / log_period / n_estimators: see
             ``train()`` docstring.
+        random_state: optional override of
+            ``config.LGBM_PARAMS["random_state"]`` (default 42). Used by
+            seed-noise experiments (v3.0 Phase 3 next-step #2) to estimate
+            LightGBM's seed-driven variance floor. When None, falls back
+            to the spec default.
+        models_to_fit: subset of ``("A", "B", "B_PRIME")`` to actually
+            train + persist. Defaults to all three (production behaviour).
+            Pass ``("A",)`` for seed-noise experiments that only need
+            Model A — skips ~2/3 of the per-fold compute.
 
     Returns:
+        Dict keyed by the entries of ``models_to_fit`` — typically
         ``{"A": FitResult, "B": FitResult, "B_PRIME": FitResult}``.
     """
+    valid_ids = {"A", "B", "B_PRIME"}
+    bad = [m for m in models_to_fit if m not in valid_ids]
+    if bad:
+        raise ValueError(
+            f"unknown model id(s) in models_to_fit={models_to_fit!r}: {bad}. "
+            f"Allowed: {sorted(valid_ids)}"
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # `work` for column-presence checks: the union of train + val + tests.
@@ -313,56 +332,86 @@ def _train_one_fold(
             spec_default,
             config.LGBM_PARAMS.get("early_stopping_rounds"),
         )
+    if random_state is not None:
+        spec_default_rs = config.LGBM_PARAMS.get("random_state")
+        fit_params["random_state"] = random_state
+        logger.info(
+            "random_state override: %d (spec default %s) — used for "
+            "seed-noise experiments (v3.0 Phase 3 next-step #2)",
+            random_state, spec_default_rs,
+        )
 
     # ---- Fit -------------------------------------------------------------
-    logger.info("fitting Model A (%d feature columns, no SA2 block)", len(cols_a))
-    fit_a = fit_lgbm(
-        X_train=train_eligible,
-        y_train=y_train,
-        X_val=val_eligible,
-        y_val=y_val,
-        feature_columns=cols_a,
-        categorical_columns=cat_a,
-        params=fit_params,
-        log_period=log_period,
-    )
-    logger.info("fitting Model B (%d feature columns, with SA2 block)", len(cols_b))
-    fit_b = fit_lgbm(
-        X_train=train_eligible,
-        y_train=y_train,
-        X_val=val_eligible,
-        y_val=y_val,
-        feature_columns=cols_b,
-        categorical_columns=cat_b,
-        params=fit_params,
-        log_period=log_period,
-    )
-    logger.info(
-        "fitting Model B' (%d feature columns, B + venue block — spec §13.6 Phase 1)",
-        len(cols_b_prime),
-    )
-    fit_b_prime = fit_lgbm(
-        X_train=train_eligible,
-        y_train=y_train,
-        X_val=val_eligible,
-        y_val=y_val,
-        feature_columns=cols_b_prime,
-        categorical_columns=cat_b_prime,
-        params=fit_params,
-        log_period=log_period,
-    )
+    # Conditional fits driven by ``models_to_fit`` — lets the seed-noise
+    # experiment (v3.0 Phase 3 #2) train only Model A per seed-run, cutting
+    # wall-clock by ~2/3.
+    fits: dict[str, FitResult] = {}
+    if "A" in models_to_fit:
+        logger.info("fitting Model A (%d feature columns, no SA2 block)", len(cols_a))
+        fits["A"] = fit_lgbm(
+            X_train=train_eligible,
+            y_train=y_train,
+            X_val=val_eligible,
+            y_val=y_val,
+            feature_columns=cols_a,
+            categorical_columns=cat_a,
+            params=fit_params,
+            log_period=log_period,
+        )
+    if "B" in models_to_fit:
+        logger.info("fitting Model B (%d feature columns, with SA2 block)", len(cols_b))
+        fits["B"] = fit_lgbm(
+            X_train=train_eligible,
+            y_train=y_train,
+            X_val=val_eligible,
+            y_val=y_val,
+            feature_columns=cols_b,
+            categorical_columns=cat_b,
+            params=fit_params,
+            log_period=log_period,
+        )
+    if "B_PRIME" in models_to_fit:
+        logger.info(
+            "fitting Model B' (%d feature columns, B + venue block — spec §13.6 Phase 1)",
+            len(cols_b_prime),
+        )
+        fits["B_PRIME"] = fit_lgbm(
+            X_train=train_eligible,
+            y_train=y_train,
+            X_val=val_eligible,
+            y_val=y_val,
+            feature_columns=cols_b_prime,
+            categorical_columns=cat_b_prime,
+            params=fit_params,
+            log_period=log_period,
+        )
 
     # ---- Persist ---------------------------------------------------------
-    _save_pickle(fit_a.model, out_dir / "model_a.pkl")
-    _save_pickle(fit_b.model, out_dir / "model_b.pkl")
-    _save_pickle(fit_b_prime.model, out_dir / "model_b_prime.pkl")
-    _save_feature_lists(out_dir / "feature_lists.json", fit_a, fit_b, fit_b_prime)
+    if "A" in fits:
+        _save_pickle(fits["A"].model, out_dir / "model_a.pkl")
+    if "B" in fits:
+        _save_pickle(fits["B"].model, out_dir / "model_b.pkl")
+    if "B_PRIME" in fits:
+        _save_pickle(fits["B_PRIME"].model, out_dir / "model_b_prime.pkl")
+    _save_feature_lists(
+        out_dir / "feature_lists.json",
+        fits.get("A"),
+        fits.get("B"),
+        fits.get("B_PRIME"),
+    )
 
     if save_predictions:
-        _save_predictions(folds, fit_a, fit_b, fit_b_prime, out_dir, target=target)
+        _save_predictions(
+            folds,
+            fits.get("A"),
+            fits.get("B"),
+            fits.get("B_PRIME"),
+            out_dir,
+            target=target,
+        )
 
     logger.info("wrote models + audit to %s", out_dir)
-    return {"A": fit_a, "B": fit_b, "B_PRIME": fit_b_prime}
+    return fits
 
 
 # ---- internals -------------------------------------------------------------
@@ -489,9 +538,9 @@ def _save_pickle(obj: object, path: Path) -> None:
 
 def _save_feature_lists(
     path: Path,
-    fit_a: FitResult,
-    fit_b: FitResult,
-    fit_b_prime: FitResult,
+    fit_a: FitResult | None,
+    fit_b: FitResult | None,
+    fit_b_prime: FitResult | None,
 ) -> None:
     """Serialise the feature lists + best-iteration audit trail.
 
@@ -499,42 +548,37 @@ def _save_feature_lists(
     (Phase 7 §9.3) recover exactly which columns each model used without
     re-loading the pickles. Includes Model B' (spec §13.6 Phase 1) under
     the ``"B_PRIME"`` key alongside ``"A"`` and ``"B"``.
+
+    Any of the three fits may be ``None`` — the caller passed a partial
+    ``models_to_fit`` subset (e.g. the seed-noise experiment trains only
+    Model A). Omitted models are simply absent from the audit payload.
     """
-    payload = {
-        "A": {
-            "feature_columns": fit_a.feature_columns,
-            "categorical_columns": fit_a.categorical_columns,
-            "best_iteration": fit_a.best_iteration,
-            "best_val_mae": fit_a.best_score,
+    def _serialise(fit: FitResult) -> dict[str, object]:
+        return {
+            "feature_columns": fit.feature_columns,
+            "categorical_columns": fit.categorical_columns,
+            "best_iteration": fit.best_iteration,
+            "best_val_mae": fit.best_score,
             # Per-feature importances (gain + split). Lets the
             # comparison report and the explainability notebook rank
             # features without re-loading the pickle.
-            "importance_gain": fit_a.importance_gain,
-            "importance_split": fit_a.importance_split,
-        },
-        "B": {
-            "feature_columns": fit_b.feature_columns,
-            "categorical_columns": fit_b.categorical_columns,
-            "best_iteration": fit_b.best_iteration,
-            "best_val_mae": fit_b.best_score,
-            "importance_gain": fit_b.importance_gain,
-            "importance_split": fit_b.importance_split,
-        },
-        "B_PRIME": {
-            "feature_columns": fit_b_prime.feature_columns,
-            "categorical_columns": fit_b_prime.categorical_columns,
-            "best_iteration": fit_b_prime.best_iteration,
-            "best_val_mae": fit_b_prime.best_score,
-            "importance_gain": fit_b_prime.importance_gain,
-            "importance_split": fit_b_prime.importance_split,
-        },
-        "config": {
-            # Snapshot the hyperparameters used so a future re-run can be
-            # diffed against this one.
-            "lgbm_params": {
-                k: (v if not isinstance(v, type) else str(v))
-                for k, v in config.LGBM_PARAMS.items()
-            },
+            "importance_gain": fit.importance_gain,
+            "importance_split": fit.importance_split,
+        }
+
+    payload: dict[str, object] = {}
+    if fit_a is not None:
+        payload["A"] = _serialise(fit_a)
+    if fit_b is not None:
+        payload["B"] = _serialise(fit_b)
+    if fit_b_prime is not None:
+        payload["B_PRIME"] = _serialise(fit_b_prime)
+    payload["config"] = {
+        # Snapshot the hyperparameters used so a future re-run can be
+        # diffed against this one.
+        "lgbm_params": {
+            k: (v if not isinstance(v, type) else str(v))
+            for k, v in config.LGBM_PARAMS.items()
         },
     }
     path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
@@ -543,9 +587,9 @@ def _save_feature_lists(
 
 def _save_predictions(
     folds: dict[str, pd.DataFrame],
-    fit_a: FitResult,
-    fit_b: FitResult,
-    fit_b_prime: FitResult,
+    fit_a: FitResult | None,
+    fit_b: FitResult | None,
+    fit_b_prime: FitResult | None,
     out_dir: Path,
     *,
     target: str,
@@ -561,24 +605,30 @@ def _save_predictions(
     y_pred_b_prime``. This is what ``evaluate.compare`` (single-split)
     and ``evaluate.compare_kfold`` (k-fold) consume — keeps eval fast
     and re-runnable without invoking LightGBM again.
+
+    Any of the three fits may be ``None`` (the caller used a partial
+    ``models_to_fit`` subset). Omitted models' ``y_pred_*`` columns are
+    simply absent from the output parquet.
     """
     for fold_name, df in folds.items():
         if df.empty:
             logger.warning("fold %s empty - skipping prediction parquet", fold_name)
             continue
-        rows = pd.DataFrame(
-            {
-                "station_id": df["station_id"].to_numpy(),
-                "fuel_code": df["fuel_code"].to_numpy(),
-                "date": df["date"].to_numpy(),
-                "y_true": df[target].to_numpy(),
-                "y_pred_a": fit_a.model.predict(df[fit_a.feature_columns]),
-                "y_pred_b": fit_b.model.predict(df[fit_b.feature_columns]),
-                "y_pred_b_prime": fit_b_prime.model.predict(
-                    df[fit_b_prime.feature_columns]
-                ),
-            }
-        )
+        cols: dict[str, object] = {
+            "station_id": df["station_id"].to_numpy(),
+            "fuel_code": df["fuel_code"].to_numpy(),
+            "date": df["date"].to_numpy(),
+            "y_true": df[target].to_numpy(),
+        }
+        if fit_a is not None:
+            cols["y_pred_a"] = fit_a.model.predict(df[fit_a.feature_columns])
+        if fit_b is not None:
+            cols["y_pred_b"] = fit_b.model.predict(df[fit_b.feature_columns])
+        if fit_b_prime is not None:
+            cols["y_pred_b_prime"] = fit_b_prime.model.predict(
+                df[fit_b_prime.feature_columns]
+            )
+        rows = pd.DataFrame(cols)
         path = out_dir / f"predictions_{fold_name}.parquet"
         rows.to_parquet(path, engine="pyarrow", compression="zstd", index=False)
         logger.info("wrote %s (%d rows)", path, len(rows))

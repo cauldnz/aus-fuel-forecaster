@@ -105,15 +105,26 @@ def _import_train_modules() -> tuple[Any, ...]:
 
 
 def _suggest_params(trial: optuna.Trial) -> dict[str, object]:
-    """Sample one point in the LightGBM hyperparameter space."""
+    """Sample one point in the LightGBM hyperparameter space.
+
+    Search space TIGHTENED 2026-06-09 after the first run hit pathological
+    combinations (num_leaves=255 + lr=0.014 ate 8h wall-clock for one
+    trial). Rationale:
+    - num_leaves max 127: 255 is overkill for 73 features; deeper trees
+      just overfit + are wall-clock slow.
+    - learning_rate min 0.01: lower LRs need too many rounds; the slowest
+      trial in run 1 (lr=0.006) took 24 min vs typical ~6 min.
+    - Per-trial wall-clock cap also added (objective closure) as a
+      backstop in case pruning misses a slow but mediocre trial.
+    """
     return {
         # Capacity / depth proxy. Categorical so TPE handles modes well
         # rather than treating it as a continuous integer.
-        "num_leaves": trial.suggest_categorical("num_leaves", [15, 31, 63, 127, 255]),
+        "num_leaves": trial.suggest_categorical("num_leaves", [15, 31, 63, 127]),
         # Regularization — larger = less overfitting on rare-feature splits.
         "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 50, 1000, log=True),
-        # Learning rate (log scale spans 30x — small to aggressive).
-        "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.15, log=True),
+        # Learning rate (log scale).
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
         # Column subsampling per tree.
         "feature_fraction": trial.suggest_float("feature_fraction", 0.4, 1.0),
         # Row subsampling.
@@ -124,6 +135,21 @@ def _suggest_params(trial: optuna.Trial) -> dict[str, object]:
         "lambda_l1": trial.suggest_float("lambda_l1", 1e-8, 10.0, log=True),
         "lambda_l2": trial.suggest_float("lambda_l2", 1e-8, 10.0, log=True),
     }
+
+
+# Per-trial wall-clock cap. Any trial that exceeds this gets pruned
+# regardless of MedianPruner's decision — defensive backstop against
+# pathological-but-slow-converging combos. Set to ~2x the typical
+# per-trial wall-clock (~6 min) so well-behaved trials don't get cut
+# short.
+PER_TRIAL_TIMEOUT_S = 12 * 60
+
+# Cap n_estimators per fit. Spec default is 2000; cap lower here because
+# Optuna's lr=0.01 floor still allows fairly slow convergence and we'd
+# rather early-stop earlier than spend the full 2000-round budget on
+# every trial. 1500 is enough that lr=0.01 + min_data=50 trees can still
+# converge before hitting the ceiling for most combos.
+TRIAL_N_ESTIMATORS_CAP = 1500
 
 
 def _objective_factory(
@@ -143,9 +169,12 @@ def _objective_factory(
         # Monkey-patch config.LGBM_PARAMS so _train_one_fold's
         # ``fit_params = dict(config.LGBM_PARAMS)`` pickup the new values.
         # Snapshot + restore in a finally clause so a crash doesn't leave
-        # config dirty for the next trial.
+        # config dirty for the next trial. Also force n_estimators down
+        # from the spec default (2000) to the trial cap (1500) — a
+        # backstop against trials that don't converge fast enough.
         snapshot = dict(config.LGBM_PARAMS)
         config.LGBM_PARAMS.update(suggested)
+        config.LGBM_PARAMS["n_estimators"] = TRIAL_N_ESTIMATORS_CAP
         # Log the trial start with a compact param summary
         compact = (
             f"nl={suggested['num_leaves']:>3d} "
@@ -182,8 +211,20 @@ def _objective_factory(
                 # Report to optuna for pruning — step is fold index, value
                 # is the running mean MAE across folds completed so far.
                 trial.report(running_mean, fold_idx)
+                elapsed = time.monotonic() - t_trial
+                # Hard wall-clock cap — defensive backstop independent of
+                # the MedianPruner. If a trial has eaten more than
+                # PER_TRIAL_TIMEOUT_S, prune it regardless of how its
+                # mean compares to peers.
+                if elapsed > PER_TRIAL_TIMEOUT_S:
+                    logger.warning(
+                        "trial %3d PRUNED at fold %d/%d — wall-clock cap "
+                        "exceeded (%.0fs > %ds, mean=%.4f)",
+                        trial.number, fold_idx, len(folds),
+                        elapsed, PER_TRIAL_TIMEOUT_S, running_mean,
+                    )
+                    raise optuna.TrialPruned()
                 if trial.should_prune():
-                    elapsed = time.monotonic() - t_trial
                     logger.info(
                         "trial %3d PRUNED at fold %d/%d (mean=%.4f, %.0fs)",
                         trial.number, fold_idx, len(folds),
@@ -423,10 +464,15 @@ def main() -> None:
     study = optuna.create_study(
         study_name=STUDY_NAME,
         storage=f"sqlite:///{STUDY_DB.as_posix()}",
-        sampler=TPESampler(seed=42, n_startup_trials=10),
-        # Don't prune the first 5 trials (need a reference distribution),
-        # and don't prune before fold 2 (1 fold isn't a stable signal).
-        pruner=MedianPruner(n_startup_trials=5, n_warmup_steps=2),
+        # n_startup_trials dropped 10 → 5 in run 2: TPE doesn't need a
+        # huge prior in this constrained space.
+        sampler=TPESampler(seed=42, n_startup_trials=5),
+        # n_startup_trials dropped 5 → 2 in run 2: median pruner kicks in
+        # as soon as we have 2 completed trials to compute median against.
+        # Combined with the per-trial wall-clock cap in the objective,
+        # this protects against the run-1 pathology where one slow trial
+        # eats all the wall-clock budget.
+        pruner=MedianPruner(n_startup_trials=2, n_warmup_steps=2),
         direction="minimize",
         load_if_exists=True,
     )

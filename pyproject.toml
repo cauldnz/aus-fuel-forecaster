@@ -60,6 +60,7 @@ dependencies = [
     "cfgrib>=0.9.15.1",
     "eccodes>=2.47.0",
     "xarray>=2026.4.0",
+    "optuna>=4.9.0",
 ]
 
 [project.optional-dependencies]

@@ -13,6 +13,8 @@ The project trains two LightGBM models with identical pipelines except for one f
 
 This is a methodology demonstration, not a production forecasting system.
 
+> **v3.0 closing (2026-06-08):** the methodology demonstration completed with an unexpected outcome — under proper time-series k-fold cross-validation, the augmentor surface produces **no robust lift** over Model A's lag-rich feature set (8 variants × 6 folds, all within or below the LightGBM seed-noise floor). Model A is the production model; Model B is research-only. The contribution becomes a **methodology study** (single-split misleads; k-fold + seed-noise floor + explicit-interaction probes triangulate). Full evidence: [§15.6](#156-v30-outcome--ship-model-a) + [`docs/research/2026-06_v3.0_phase3_closing_summary.md`](docs/research/2026-06_v3.0_phase3_closing_summary.md).
+
 ## 2. Acceptance Criteria
 
 The project is "done" when all of the following hold:
@@ -343,6 +345,8 @@ Note on leakage: v1 uses Historical Weather (ERA5 reanalysis) across the full sp
 
 ### 7.7 Demographic block (`sa2_*`) — the augmentor block
 
+> **v3.0 status (2026-06-08):** kept as a **research surface only**. The Phase 2.5 closing ([§15.6](#156-v30-outcome--ship-model-a) and [`docs/research/2026-06_v3.0_phase3_closing_summary.md`](docs/research/2026-06_v3.0_phase3_closing_summary.md)) found that across 8 augmentor variants × 6 folds, no configuration produces a robust win over Model A; even hand-crafted interactions made things worse. **Model B is no longer the production path.** The columns documented below remain in `features.parquet` for reproducibility + research, but the production model (Model A) does not consume them. Any future augmentor work must first clear v3.0 k-fold significance before going into production.
+
 ```
 # Census 2021 GCP — direct fields
 sa2_median_age                                    # G02.Median_age_persons
@@ -558,6 +562,8 @@ The v2.x "test_crisis" fold treated 2026's price-spike period as an out-of-distr
 **v3.0 scheme (current default):** 6-fold expanding-window CV with 12-month test windows ending at 2026-04 (the panel's last date), `gap_days=1` between train end and test start to prevent `y_t1` target leakage. Geometry table + full design in [§15.2](#152-phase-plan-locked-in--v30-phase-1-design-doc-for-rationale). No k-fold CV in v1/v2 — group-aware splitting is unnecessary because we never train on a station-day's future and predict its past; targets are strictly forward-shifted.
 
 ### 8.4 The A/B comparison
+
+> **v3.0 status (2026-06-08):** The A/B comparison ran as designed. Under the v3.0 k-fold methodology, **no Model B configuration produces a robust win** — see [§15.6](#156-v30-outcome--ship-model-a). The headline outcome is a null result. **Model A is the production model.** Model B remains buildable in code for research, but is not on the ship path.
 
 Two models, identical except for one feature block:
 
@@ -965,7 +971,18 @@ Notes: 2016-09 → 2016-12 stays as lag-feature warmup (excluded from all train 
 
 Outcome: a small set of robust feature recommendations + a clean "this is the v3.0 baseline" config.
 
-**Phase 3 — Docker handoff to home AMD server.** k-fold × multi-experiment retrain is ~6× the wall-clock of v2.x single-fit (PR C's 7 experiments × 30-60 min each ≈ 5h becomes ~30h at 6-fold). Currently deferred — Phase 1 + Phase 2 run locally on the dev laptop, with the cost accepted. Phase 3 picks up only when iteration friction motivates it:
+**Phase 2 outcome (2026-06-03):** ran 8 experiments (committed PR B + the 7 PR C variants). **0 of 8 produced a robust win** under the k-fold methodology. See [`docs/research/2026-06_v3.0_phase2_outcome.md`](docs/research/2026-06_v3.0_phase2_outcome.md) — best variant `pr_c_e4_density_plus_curation` lands at Mean Δ MAE −0.036 c/L with Stdev 0.396, well inside the noise band. Most variants have Model B *worse* on average. The v2.x "Model B beats Model A by 0.24-0.32 c/L" headline reverses to a flat-or-negative aggregate under rotating folds.
+
+**Phase 2.5 — Postmortem investigation (2026-06-08).** The Phase 2 outcome admitted three readings (genuinely flat / methodology too strict / wrong features). Four follow-up experiments tested the readings directly. See [`docs/research/2026-06_v3.0_phase3_closing_summary.md`](docs/research/2026-06_v3.0_phase3_closing_summary.md) for the full bundle:
+
+1. **Per-fold rank consistency across the 8 Phase 2 experiments** — Mean Spearman ρ +0.198, fold_6 alone = 61% of cross-experiment variance, no fold has unanimous sign. Partial Reading A; cluster pattern keeps Reading C alive at this stage.
+2. **Baseline-vs-baseline 6× seed-noise floor** — Mean per-fold seed-stdev 0.089 c/L; across-pairs Δ-stdev 0.136 c/L; ratio published/seed = **2.89×**. Folds 3 and 6 have 3-5× higher seed-stdev than the others — most of the cross-experiment "noise" is intrinsic LightGBM training-instability on those folds. **Reading A confirmed.**
+3. **Explicit SEIFA × day-of-fortnight interaction feature (Reading C2 test)** — Adding `sa2_seifa_x_dof = sa2_seifa_irsd_score * cal_day_of_fortnight` made things **3× worse** (Mean Δ MAE +0.670 c/L vs +0.215 baseline; nearly doubled the augmentor's harm on fold_6). LightGBM actively splits on the column (rank 46-58 by gain) but the splits don't generalise. **Reading C2 falsified.**
+4. **Optuna hyperparameter sweep on Model A (Reading C1 test)** — 200-trial Bayesian search over `num_leaves`, `min_data_in_leaf`, `learning_rate`, bagging/feature fractions, `lambda_l1`/`l2`. See [`results/v3_phase3_hyperopt_summary.md`](results/v3_phase3_hyperopt_summary.md). Outcome interpretation rules set ex-ante: improvement > 0.05 c/L → update §8.2; 0.01-0.05 → keep defaults; none → Reading C1 also falsified.
+
+**Phase 2.5 verdict: ship Model A.** The v2.x SA2 augmentor surface adds nothing detectable on top of the lag-rich feature space for this model class. The augmentor dependency is retired from the production path; Model B's role becomes research-only.
+
+**Phase 3 — Docker handoff to home AMD server.** k-fold × multi-experiment retrain is ~6× the wall-clock of v2.x single-fit (PR C's 7 experiments × 30-60 min each ≈ 5h becomes ~30h at 6-fold). Currently deferred — Phase 1 + Phase 2 + Phase 2.5 all ran locally on the dev laptop, with the cost accepted. Phase 3 picks up only when iteration friction motivates it:
 
 - Docker container wrapping the train + evaluate stages with `uv.lock` baked in
 - Container reads features parquet from a mount / bucket, writes models/predictions/comparison back the same way
@@ -974,11 +991,11 @@ Outcome: a small set of robust feature recommendations + a clean "this is the v3
 
 Decisions needed when Phase 3 actually starts: container build (multi-stage with `uv sync --frozen`?); mount strategy (NFS share vs S3-like object store vs HTTPS file transfer); artefact return path; security (AMD server on home LAN, likely no public exposure required).
 
-**Phase 4 — Documentation + retrospective.** Update `results/README.md` to reflect the new methodology and re-evaluated headline; rewrite spec §8.3's v2.x scheme section to "historical only"; v2.x closing-summary doc gets an addendum on what survived the re-evaluation.
+**Phase 4 — Documentation + retrospective.** Rewrite `results/README.md` to the new headline: methodology-validated Model A is the production model; the augmentor surface is a null-result research contribution. Mark spec §8.3's v2.x single-split scheme as "historical only". Mark spec §7.7 (SA2 block) as "research surface — not in production model path". Add the Phase 2.5 closing summary as the canonical "why we ship Model A" reference.
 
 ### 15.3 Out of scope for v3.0
 
-- Hyperparameter tuning. v2.x's LightGBM config (spec §8.2) stays unchanged through v3.0; we're testing methodology and features, not model.
+- ~~Hyperparameter tuning. v2.x's LightGBM config (spec §8.2) stays unchanged through v3.0~~ — *brought back in by Phase 2.5 #4 once the Phase 2 outcome forced the question of whether Model A itself was capacity-limited. The hyperparameter sweep is a Reading-C1 test, not a search for incremental gain. Results in [`results/v3_phase3_hyperopt_summary.md`](results/v3_phase3_hyperopt_summary.md).*
 - New data sources. v3.0 works against the existing fetched data — no new fetchers, no new augmentor pin bumps (unless a fix lands that we explicitly want).
 - 7-day forecast horizon (§13.8). Still backlogged for a v4.0 or follow-up; v3.0 stays single-target (`y_t1`).
 - Self-hosted Open-Meteo (§13.9). Same — backlogged.
@@ -995,3 +1012,23 @@ Decisions needed when Phase 3 actually starts: container build (multi-stage with
 ### 15.5 What's pinned at v2.x
 
 See [`docs/research/2026-05_v2_closing_summary.md`](docs/research/2026-05_v2_closing_summary.md). The v2.x state is the stable baseline v3.0 measures against — augmentor v2.1.0, NOAA GFS weather, split cross-sectional + temporal SA2 pass, 15-col model block, test_normal Δ MAE −0.239 / test_crisis Δ MAE −0.321.
+
+### 15.6 v3.0 outcome — ship Model A
+
+After Phase 1 (k-fold harness), Phase 2 (8 v2.x variants re-evaluated), and Phase 2.5 (4 postmortem investigations including hyperparameter tuning):
+
+- **Production model: Model A** (no SA2 block; lag + upstream + calendar + ctx + stn + wx).
+- **Model B and Model B'** are research artefacts. Kept in code for reproducibility; not built or evaluated in the production pipeline.
+- **Augmentor dependency** (`abs-census-augmentor`) is retired from the mainline path. The `sa2_*` columns can still be added back to the features parquet for follow-up research, but no production code consumes them.
+- **§7.7 (SA2 block)** stays in the spec as a research surface; no longer "the only difference between A and B" because there is no B in production.
+- **§8.4 (the A/B comparison)** is preserved as the original v1/v2 methodology study. The headline outcome of that study is now: **no robust lift across 8 variants × 6 folds, falling within the LightGBM seed-noise floor**.
+- **Future augmentor work** needs to first reproduce a Phase 2-style improvement that survives the v3.0 k-fold methodology before going into the production path. No v2.x variant cleared that bar; the explicit-interaction probe (Phase 2.5 #3) actively regressed.
+
+Headline numbers ([`docs/research/2026-06_v3.0_phase3_closing_summary.md`](docs/research/2026-06_v3.0_phase3_closing_summary.md) has the full evidence trail):
+
+| Question | v2.x answer (single-split) | v3.0 answer (6-fold k-fold) |
+|---|---|---|
+| Model B beats Model A? | by 0.239 c/L test_normal + 0.321 c/L test_crisis | no — 0 of 8 variants robust; PR B baseline mean +0.215 c/L (B *worse*) |
+| Is the spec §8.2 hyperparameter config near optimum? | untested | _see Phase 2.5 #4 outcome — `results/v3_phase3_hyperopt_summary.md`_ |
+| Where does the per-fold variance come from? | unmeasurable (single split) | folds 3 + 6 dominate; mostly intrinsic LightGBM seed-noise on those folds, not augmentor instability |
+| Would an explicit Centrelink × SEIFA interaction help? | hypothesised in §13 #3; never tested | no — adding `sa2_seifa_irsd_score * cal_day_of_fortnight` made Model B 3× worse |

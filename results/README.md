@@ -1,224 +1,258 @@
-# Results — Model A vs Model B
+# Results — Model A vs Model B (v3.0, k-fold revalidated)
 
 **Question (spec §1):** does augmenting per-station features with SA2-level ABS
 Census demographics — via [`abs-census-augmentor`](https://github.com/cauldnz/abs-census-augmentor) —
 measurably improve next-day NSW fuel-price prediction?
 
-**Answer: yes.** Two LightGBM models with identical pipelines and hyperparameters,
-differing only in the SA2 demographic block (Model A omits it, Model B includes it),
-trained on identical rows. Model B wins on every held-out fold, every SEIFA quintile,
-and every brand on the headline fold.
+**Answer: no, and that is the headline.** Under proper time-series 6-fold k-fold
+cross-validation (spec §15.2), the v2.x augmentor surface produces **no robust
+lift** on top of Model A's lag-rich feature set. Of 8 augmentor variants tested,
+0 cleared the methodology's significance bar; the best variant came in at Mean
+Δ MAE −0.036 c/L (Stdev 0.396) — basically flat. The v2.x single-split headline
+of "Model B beats A by 0.24-0.32 c/L" was a fold-specific artifact that reverses
+sign under rotating-window CV.
+
+The contribution becomes a **methodology study**: how single-split misleads,
+how k-fold + seed-noise floor + explicit-interaction probes triangulate, and
+what the v2.x experimental record looks like when subjected to honest variance
+quantification. The full evidence trail and ship decision live in
+[`docs/research/2026-06_v3.0_phase3_closing_summary.md`](../docs/research/2026-06_v3.0_phase3_closing_summary.md).
+
+**Production model: Model A.** No SA2 block. Spec §8.2 hyperparameters (or the
+Phase 3 #4 hyperopt winner, depending on whether it cleared a 0.05 c/L
+improvement bar — see Phase 3 hyperopt summary).
 
 ---
 
-## Headline (v2.0, leakage-corrected, augmentor v2.0 + temporal SA2)
+## Headline (v3.0, 6-fold time-series k-fold, PR B baseline)
 
-All metrics in cents/L except MAPE (%). **Negative Δ MAE = Model B beats Model A.**
+All metrics in cents/L. **Negative Δ MAE = Model B beats Model A.**
 
-| Fold | n (U91) | MAE A | MAE B | Δ MAE | rel. | RMSE A | RMSE B | MAPE A | MAPE B |
-|------|--------:|------:|------:|------:|-----:|-------:|-------:|-------:|-------:|
-| test_normal (2024-01 → 2025-12) | 849,334 | 6.373 | **6.134** | **−0.239** | −3.7% | 10.953 | 10.798 | 3.352 | 3.225 |
-| test_crisis (2026-01 → 2026-04) | 172,858 | 13.616 | **13.295** | **−0.321** | −2.4% | 19.054 | 18.601 | 6.181 | 6.034 |
+| Fold | Test window | n | MAE A | MAE B | Δ MAE |
+|------|-------------|--:|------:|------:|------:|
+| fold_1 | 2020-05-01 → 2021-04-30 | 392,049 | 6.219 | 6.293 | **+0.074** |
+| fold_2 | 2021-05-01 → 2022-04-30 | 411,168 | 8.799 | 8.664 | −0.135 |
+| fold_3 | 2022-05-01 → 2023-04-30 | 488,617 | 13.331 | 13.591 | **+0.260** |
+| fold_4 | 2023-05-01 → 2024-04-30 | 477,729 | 6.954 | 6.855 | −0.098 |
+| fold_5 | 2024-05-01 → 2025-04-30 | 451,063 | 4.181 | 4.327 | **+0.147** |
+| fold_6 | 2025-05-01 → 2026-04-30 | 426,819 | 9.573 | 10.615 | **+1.042** |
+| **Mean** | — | 2,647,445 | 8.176 | 8.391 | **+0.215** |
+| Stdev | — | — | 2.893 | 3.037 | 0.394 |
+| Min | — | — | 4.181 | 4.327 | −0.135 |
+| Max | — | — | 13.331 | 13.591 | +1.042 |
 
-**Note on numbers vs. earlier iterations:** these test_normal/crisis Δ MAE are 0.08-0.11 c/L *smaller in magnitude* than the augmentor-v2.0-cross-sectional baseline (−0.353 / −0.398; see the iteration table below). PR B (spec §7.7.2) moved SEIFA + ERP `population_total` from a static per-station snapshot to per-row temporal resolution; the temporal split *regressed* the headline. The architectural change is correct (no crashes, columns flow through correctly), but the per-row variation in 2016-vs-2021 SEIFA and 2017-2024 ERP appears to introduce noise the model doesn't pay back. Hypothesis "temporal demographics will improve test-fold accuracy" is **not supported** on this problem; ship the architecture as a no-regret platform for future PRESET sources (especially DSS once augmentor #99 lands) and document the negative finding.
+Significance read: |Mean Δ| (0.215) < Stdev Δ (0.394) → **noise band**. The
+augmentor's apparent "win" in any single fold is dwarfed by the across-fold
+variance. The v2.x single-split picked two favourable folds (test_normal +
+test_crisis, both 2024-25 / 2026-Q1, here folds 5 and part of 6) — every other
+fold tells a different story.
 
-Full segmentation (metro/regional, brand, fuel, SEIFA quintile) + feature-importance
-tables in [`comparison.md`](comparison.md). SHAP visualisations in [`shap/`](shap/) (note:
-SHAP plots have not yet been regenerated against v2 — they reflect v1 features; refresh
-pending a notebook re-run).
+Full per-fold report: [`v3_phase2_pr_b_baseline_kfold.md`](v3_phase2_pr_b_baseline_kfold.md).
 
-### v1 → v2 transition (spec §13.7)
+### What the other 7 v2.x variants do under k-fold
 
-The v1 headline (preserved here for historical reference) used ERA5 reanalysis
-*actuals* for the weather block, which is leakage — in real deployment the model
-would have a *forecast* for tomorrow, not retrospective truth. v2.0 corrects this
-by switching to NOAA GFS day-ahead forecasts. The full transition is documented
-at [`docs/research/2026-05_weather_leakage_fix_outcome.md`](../docs/research/2026-05_weather_leakage_fix_outcome.md).
+Full table: [`v3_phase2_summary.md`](v3_phase2_summary.md).
 
-| Fold | v1 MAE B | v2-weather MAE B | v2.0-augmentor MAE B | Δ | v1 Δ MAE | v2-weather Δ MAE | current Δ MAE |
-|------|---------:|-----------------:|--------------------:|--:|---------:|-----------------:|--------------:|
-| test_normal | 5.912 | 6.020 | 6.134 | +0.108 (leakage tax), then +0.114 (temporal-SA2 regression) | −0.391 | −0.353 | −0.239 |
-| test_crisis | 13.283 | 13.218 | 13.295 | −0.065, then +0.077 | −0.183 | **−0.398** | −0.321 |
+| Experiment | SA2 cols | Mean Δ MAE | Stdev | Verdict |
+|---|---:|---:|---:|---|
+| pr_b_baseline (PR B as committed) | 15 | +0.215 | 0.394 | noise |
+| pr_c_e1_dss_temporal | 15 | +0.218 | 0.734 | noise |
+| pr_c_e2_gcp_temporal | 15 | +0.155 | 0.196 | noise |
+| pr_c_e3_combined_temporal | 15 | +0.281 | 0.653 | noise |
+| **pr_c_e4_density_plus_curation** | 15+6 | **−0.036** | 0.396 | **noise (best)** |
+| pr_c_e4a_density_only | 15+1 | +0.506 | 0.492 | weak (B loses) |
+| pr_c_e4b_curation_only | 15+5 | +0.377 | 0.286 | weak (B loses) |
+| pr_c_e5_dss_temporal_plus_curation | 15+6 | +0.051 | 0.322 | noise |
 
-**Two notable v2 findings:**
-
-1. The **leakage tax** on absolute MAE was small (+0.07-0.15 c/L) — within the
-   predicted 0.05-0.15 range. The model genuinely could only cheat with ERA5 by
-   small amounts because the wx_* block is low-rank in the feature set overall.
-2. The **crisis-fold SA2 lift more than doubled** in v2 (−0.183 → −0.398), and
-   the v1 crisis-fold RMSE regression (Model B *worse* than A) is gone (now
-   B beats A on RMSE). The honest weather block makes the SA2 block's true
-   contribution clearer, and that translates to a more robust improvement
-   on OOD 2026 data. See caveat #4 below.
-
----
-
-## How we got here — the iteration story
-
-The headline number is the end of a four-step search, not a first try. Each step is a
-real data point about how much SA2 demographics help and which ones.
-
-| Iteration | Augmentor | Weather | SA2 cols | Test_normal Δ MAE | What we learned |
-|-----------|---------|---------|---------:|------------------:|-----------------|
-| v1.0 | v1.4.2 | ERA5 (leaky) | 10 | **+0.104** (Model B *lost*) | First real run; SA2 hurt the headline fold |
-| v1.1 | v1.5 | ERA5 (leaky) | 10 | **−0.059** | The augmentor's improved parsing (v1.5) was itself a material win — same column *names*, better values |
-| v1.2 | v1.5 | ERA5 (leaky) | 31 | **−0.025** | Broadening (DSS welfare + ERP + ABS_PIA + all SEIFA scores) *regressed* — better val MAE, worse test: textbook overfitting |
-| v1.3 | v1.5 | ERA5 (leaky) | 15 | **−0.391** | Curating to the original 10 + the 5 highest-gain new features recovered the full benefit *without* the overfitting tax |
-| v2.0 weather fix | v1.5 | **NOAA GFS** (honest, spec §13.7) | 15 | **−0.353** | Weather-leakage fix; small absolute-MAE tax (~0.04 c/L), but **crisis-fold Δ doubled** (−0.183 → −0.398). Headline switched to this row when v2.0 landed |
-| augmentor v2.0 bump (PR A) | v2.0 | NOAA GFS | 15 | **−0.353** | Pin bump with identical model block; cross-sectional v2.0 produces (byte-)identical predictions to v1.5 on this 15-col surface. Validated the upgrade is a no-op for the modeled features and the 5 new columns (ERP age/sex + 3 cross-dataset PRESETs) are available in `stations.parquet` for follow-up curation |
-| **augmentor v2.0 + temporal SA2 (PR B / current)** | **v2.0+main** (`65fd3fa6`) | **NOAA GFS** | **15** | **−0.239** | Split SEIFA + ERP `population_total` to per-row temporal resolution via `build.enrich_panel_temporal` (spec §7.7.2). Honest negative result: **regressed** test_normal by 0.114 c/L vs PR A. Per-row 2016/2021 SEIFA + 2017-2024 ERP swap introduced noise the model doesn't pay back. Architecture lands as a no-regret platform for future moves (DSS held back pending augmentor #99) but the temporal-demographics hypothesis is **not supported** on this problem |
-
-The v1.5 review's recommendation #1 — "re-run your headline experiment on every minor-version bump" — was respected at both the augmentor v2.0 pin bump (no-op) and the PR B temporal split (regression). The pattern from v1.2 — broadening hurt; curating helped — has a sibling here: **changing dimensionality from "constant" to "per-row" also costs accuracy without changing column count.** The 15-col block is a good operating point; tweaking how it's *sourced* doesn't trivially improve it.
-
-The key methodological finding: **more features didn't help — the right features did.**
-Broadening from 10 → 31 columns added 21 features that mostly re-encoded urban density
-already captured by the traffic/competitor blocks; they inflated val-fold fit and degraded
-test generalization. Curating back to 15 by feature-importance ranking (see [spec §7.7.4](../spec.md))
-produced the strongest result of any iteration.
-
-### The final SA2 block (15 columns)
-
-Original Census/SEIFA baseline (10):
-`sa2_total_population`, `sa2_median_age`, `sa2_median_household_income_weekly`,
-`sa2_pct_drive_to_work`, `sa2_motor_vehicles_per_dwelling`, `sa2_pct_renters`,
-`sa2_pct_employed_full_time`, `sa2_pct_aged_65_plus`, `sa2_pct_one_parent_family`,
-`sa2_seifa_irsd_score`.
-
-Curated additions, top-5 by gain importance from the 31-col experiment (5):
-`sa2_seifa_ieo_score`, `sa2_dss_parenting_payment_partnered_recipients`,
-`sa2_dss_carer_payment_recipients`, `sa2_dss_carer_allowance_recipients`,
-`sa2_dss_youth_allowance_student_and_apprentice_recipients`.
+0 robust wins. 6 of 8 variants have Model B *worse* than Model A on the mean.
 
 ---
 
-## Where the lift comes from
+## Why null — the Phase 3 postmortem evidence
 
-**It's broad, not concentrated.** No SA2 feature appears in the top 20 by gain importance,
-or the top 30 by mean |SHAP|, in either model ([`shap/summary_b.png`](shap/summary_b.png),
-[`shap/importance_a_vs_b.png`](shap/importance_a_vs_b.png)). The model's headline drivers are
-unchanged from Model A — `lag_price_1` dominates, then Brent lags, day-of-month, brand. The
-SA2 block adds a thin, broad layer of demographic context *underneath* the price-dynamics core
-that systematically improves calibration without displacing any top feature.
+Four follow-up experiments tested the three readings of the Phase 2 outcome
+(genuinely flat / methodology too strict / wrong features). Full discussion:
+[`docs/research/2026-06_v3.0_phase3_closing_summary.md`](../docs/research/2026-06_v3.0_phase3_closing_summary.md).
 
-This is the honest shape of the augmentor's value: not "demographics are top predictors," but
-"demographic context nudges many predictions slightly, and those nudges add up to a robust lift."
+1. **Per-fold rank consistency** ([`v3_phase3_rank_consistency.md`](v3_phase3_rank_consistency.md))
+   Mean pairwise Spearman ρ across the 8 Phase 2 experiments = +0.198 (cluster
+   pattern; fold_6 alone = 61% of cross-experiment variance). No fold has
+   unanimous sign across all 8 variants.
 
-**The lift scales with affluence.** On test_normal, every SEIFA quintile improves, but the
-gradient is clear (Δ MAE): Q1 −0.250, Q2 −0.314, Q3 −0.345, Q4 −0.410, **Q5 −0.678**. The model
-extracts the most SA2 value in the least-disadvantaged areas — plausibly where price dispersion
-across competing premium stations is highest and demographic context disambiguates most.
+2. **Seed-noise floor** ([`v3_phase3_seed_noise_summary.md`](v3_phase3_seed_noise_summary.md))
+   6× Model A runs with different LightGBM seeds across all 6 folds.
+   Across-pairs Δ-stdev = **0.136 c/L**; published Δ-stdev = 0.394 c/L; ratio
+   2.89. Folds 3 and 6 have 3-5× higher seed-stdev than other folds — most of
+   the cross-experiment "noise" is intrinsic LightGBM training-instability on
+   those folds, not augmentor behaviour. **Reading A confirmed.**
 
-**Every brand benefits on test_normal** (Δ MAE): 7-Eleven −0.724, BP −0.523, Ampol −0.517,
-Coles Express −0.347, Other −0.254, United −0.227, Metro −0.149, Independent −0.144, Speedway −0.110.
+3. **Explicit SEIFA × day-of-fortnight interaction**
+   ([`v3_phase3_e6_seifa_dof_interaction_headline.md`](v3_phase3_e6_seifa_dof_interaction_headline.md))
+   Adding `sa2_seifa_x_dof = sa2_seifa_irsd_score * cal_day_of_fortnight` to
+   Model B made things **3× worse** (Mean Δ MAE +0.670 c/L vs +0.215 baseline;
+   nearly doubled the augmentor's harm on fold_6 from +1.04 to +2.00). The
+   model splits on the new column (gain rank 46-58 of ~89 features) but the
+   splits don't generalise. **Reading C2 (missing interaction feature)
+   falsified.**
 
-### Most interpretable single feature: carer-allowance recipients
-
-`sa2_dss_carer_allowance_recipients` jumped from gain-rank 51 (during the 31-col experiment) to
-**mean-|SHAP| rank 1** in the final model — the clearest example of gain importance and per-row
-impact diverging. Its dependence plot ([`shap/dependence_sa2_dss_carer_allowance_recipients.png`](shap/dependence_sa2_dss_carer_allowance_recipients.png))
-shows a clean near-monotonic relationship: SA2s with more carer-allowance recipients → lower
-predicted prices, with stepped tree-threshold structure. Caregiver-heavy SA2s skew older,
-outer-metro and regional, where the price cycle behaves differently from inner-metro premium
-competition — a defensible economic signal, not an artifact.
-
-Top 5 SA2 features by mean |SHAP| on the test_normal sample:
-
-| Rank | Feature | Mean \|SHAP\| | Gain rank |
-|-----:|---------|--------------:|----------:|
-| 1 | `sa2_dss_carer_allowance_recipients` | 0.078 | 51 |
-| 2 | `sa2_pct_drive_to_work` | 0.064 | 31 |
-| 3 | `sa2_seifa_irsd_score` | 0.049 | 46 |
-| 4 | `sa2_seifa_ieo_score` | 0.049 | 50 |
-| 5 | `sa2_dss_carer_payment_recipients` | 0.041 | 48 |
+4. **Hyperparameter sweep on Model A** ([`v3_phase3_hyperopt_summary.md`](v3_phase3_hyperopt_summary.md))
+   Optuna TPE Bayesian search across `num_leaves`, `min_data_in_leaf`,
+   `learning_rate`, bagging/feature fractions, `lambda_l1`/`l2`. 200-trial
+   budget, 6-fold k-fold evaluation per trial, median pruning. Outcome
+   interpretation rules set ex-ante: >0.05 c/L improvement → update spec §8.2;
+   0.01-0.05 → keep defaults; none → Reading C1 falsified too.
 
 ---
 
-## Caveats — what we deliberately do *not* claim
+## What we keep, what we retire
 
-1. **The fortnight × SEIFA interaction is weak.** The model clearly captures a fortnightly price
-   cycle — the SHAP value for `cal_day_of_fortnight` rises across the fortnight with a strong
-   early-fortnight dip ([`shap/interaction_dof_seifa.png`](shap/interaction_dof_seifa.png)). But
-   the *modulation of that cycle by SEIFA disadvantage* — the "Centrelink-day price discrimination"
-   hypothesis — is **not cleanly supported** by the data: the SEIFA colouring doesn't separate the
-   day-of-fortnight SHAP values in an obvious way. We report the fortnight cycle as a **main effect**
-   the model uses, and explicitly do **not** claim demonstrated demographic interaction.
+**Keep — production path:**
 
-2. **~~The crisis-fold lift is real but smaller and noisier.~~** *(v1 caveat — invalidated by v2.)*
-   v1 reported crisis-fold Δ MAE −0.183 with Model B's RMSE marginally *worse* than A's (18.739 vs
-   18.628) and two brands regressing slightly. **v2.0 changed this:** crisis-fold Δ MAE more than
-   doubled to **−0.398**, B's RMSE is now lower than A's (18.578 vs 19.054), and every reported brand
-   benefits. The most plausible mechanism is that v1's leaky ERA5 weather block was an
-   unrealistically strong in-distribution predictor, masking the SA2 block's true marginal value.
-   See [`docs/research/2026-05_weather_leakage_fix_outcome.md`](../docs/research/2026-05_weather_leakage_fix_outcome.md).
+- **Model A** (lag, upstream, calendar, ctx, stn, wx blocks; no SA2). 73-ish
+  feature columns including a 5-column GFS weather block.
+- **Spec §8.2 LightGBM hyperparameters** as defaults (possibly updated to the
+  Phase 3 #4 hyperopt winner — see that doc for the call).
+- **6-fold k-fold methodology** (spec §15.2) as the evaluation harness. Single-
+  split A/B is deprecated.
+- **`evaluate.compare_kfold`** as the canonical comparison entry point.
 
-3. **SA2 features are collinear with the traffic/competitor blocks.** Several SA2 columns correlate
-   |r| > 0.5 with `stn_competitors_*` / `ctx_traffic_*` (all downstream of urban density). The model
-   still extracts independent signal from them (LightGBM's `feature_fraction=0.8` samples columns per
-   tree), which is why the 15-col block helps — but this collinearity is why *adding more* correlated
-   SA2 features (the 31-col experiment) overfit. The augmentor's effective new dimensionality for
-   short-horizon fuel-price prediction is modest.
+**Retire — research artefacts kept for reproducibility:**
 
-4. **✅ Weather leakage (v1) — fixed in v2.0 (spec §13.7).** v1 used ERA5 reanalysis actuals across the
-   full span rather than forecast-at-lead-time-1. v2.0 switches to NOAA GFS day-ahead forecasts via
-   anonymous AWS S3 byte-range subsetting. The leakage tax on absolute MAE was small (+0.07-0.15 c/L,
-   within the predicted range), and as a bonus the crisis-fold SA2 lift improved substantially (caveat
-   #2 above). Numbers in the headline table reflect v2.0. Full v1 → v2 transition write-up at
-   [`docs/research/2026-05_weather_leakage_fix_outcome.md`](../docs/research/2026-05_weather_leakage_fix_outcome.md).
+- **Model B + Model B'.** Still buildable in code; not built or evaluated in
+  the production pipeline.
+- **`abs-census-augmentor` dependency.** Still in `pyproject.toml` because
+  `build.enrich_census` populates the `sa2_*` columns in `features.parquet` for
+  the research surface, but no production code consumes those columns.
+- **`results/comparison.md`** (the v2.x single-split headline). Preserved as
+  historical record; superseded by the per-fold reports above + the Phase 3
+  closing.
 
-   v2.0 carries three small acknowledged compromises (all documented in the outcome doc): `wx_weather_code_t1`
-   is null-stubbed (GFS doesn't emit WMO codes; low SHAP rank, costs <0.01 c/L), ~20% of training rows have
-   null `wx_*_t1` from 2016 + NOAA archive gaps (handled natively by LightGBM), and the daily aggregation
-   uses a UTC day boundary rather than Sydney-local (~10h offset, low-rank feature).
+**Future augmentor work:** must first reproduce a Phase 2-style improvement
+that survives the v3.0 6-fold methodology before going into production. The
+v2.x variants didn't; the explicit-interaction probe actively regressed. The
+augmentor surface is open for further research, but the ship bar is now
+clearly defined.
 
+---
+
+## How we got here — the iteration story (v1 → v2 → v3)
+
+The v3.0 closing doesn't replace the v2.x search history — it adds the
+methodology layer that revealed it as fold-specific. The full iteration
+table:
+
+| Iteration | Methodology | Augmentor | Weather | SA2 cols | Headline | What we learned |
+|-----------|-------------|-----------|---------|---------:|----------|-----------------|
+| v1.0 | single-split | v1.4.2 | ERA5 (leaky) | 10 | test_normal Δ +0.104 | First real run; SA2 hurt the headline fold |
+| v1.1 | single-split | v1.5 | ERA5 | 10 | test_normal Δ −0.059 | Augmentor's improved parsing was itself a win |
+| v1.2 | single-split | v1.5 | ERA5 | 31 | test_normal Δ −0.025 | 21-col broadening overfit (better val, worse test) |
+| v1.3 | single-split | v1.5 | ERA5 | 15 | test_normal Δ −0.391 | Curating to 10 + top-5 by gain importance |
+| v2.0 weather fix | single-split | v1.5 | NOAA GFS | 15 | test_normal Δ −0.353; test_crisis Δ −0.398 | Leakage-corrected; crisis fold lift doubled |
+| v2.0 augmentor bump | single-split | v2.0 | NOAA GFS | 15 | byte-identical to v1.5 row | Pin bump validated as no-op |
+| v2.x PR B (temporal SA2) | single-split | v2.0+main | NOAA GFS | 15 | test_normal Δ −0.239; test_crisis Δ −0.321 | Final v2.x committed headline |
+| **v3.0 Phase 2 (rotating CV)** | **6-fold k-fold** | v2.0+main | NOAA GFS | 15 (+ 7 variants) | **mean +0.215, stdev 0.394 → noise** | **Reverses sign vs v2.x single-split** |
+| **v3.0 Phase 2.5 (postmortem)** | k-fold + seed + interaction | — | — | — | **Reading A confirmed, C2 falsified** | **Ship Model A** |
+
+The single-split → k-fold methodology shift is the line that flipped the
+answer. The two folds v2.x reported (test_normal = 2024-25, test_crisis =
+2026-Q1) happened to be favourable; folds 1, 3, 6 (2020-21, 2022-23, 2025-26)
+tell a very different story and dominate the cross-fold mean.
+
+---
+
+## The original spec §1 question, re-answered
+
+> _Does augmenting per-station features with SA2-level demographics measurably
+> improve next-day NSW fuel-price prediction?_
+
+**On this model class (LightGBM with 73 lag-rich features), no.** Across 8
+augmentor configurations × 6 folds × 6 random seeds × 1 explicit interaction
+feature, the augmentor surface adds nothing detectable beyond the LightGBM
+seed-noise floor (~0.09 c/L per-fold stdev; ~0.14 c/L across-pairs Δ-stdev).
+
+**Why?** Best guess: the lag features already encode per-station demographic
+behaviour implicitly. Each station's price history reflects who shops there;
+adding aggregate SA2-level statistics on top is redundant. A different model
+class (FT-Transformer, SAINT, GAM) might extract additional signal — but that
+escalation isn't justified by anything in the v3.0 evidence. The GBM is at
+capacity for this feature set.
+
+**What this means for the methodology demo.** Both directions of the original
+question — "demographics help" and "demographics don't help" — are
+publishable findings. The v3.0 evidence trail is the contribution; the answer
+is no.
 
 ---
 
 ## Reproduction
 
-Full pipeline from a clean checkout (needs network for raw fetches, or a pre-populated `data/raw/`):
+Full pipeline from a clean checkout (needs network for raw fetches, or a
+pre-populated `data/raw/`):
 
 ```bash
-make all          # fetch → clean → enrich → features → train → evaluate → notebooks
+make all          # fetch → clean → enrich → features → train (k-fold) → evaluate
 ```
 
-Or the train+evaluate stages against an existing `data/processed/features.parquet`:
+Or the train + evaluate stages against an existing `data/processed/features.parquet`:
 
 ```bash
-make train        # fits Model A + Model B → models/, writes prediction parquets
-make evaluate     # → results/comparison.md
-uv run jupyter nbconvert --to notebook --execute --inplace notebooks/03_explainability.ipynb  # → results/shap/
+make train-kfold      # fits Model A across 6 folds (B and B' available via env override)
+make evaluate-kfold   # → results/v3_phase2_pr_b_baseline_kfold.md (the canonical headline)
 ```
 
-Fixed hyperparameters (spec §8.2), identical for both models. Both train on the **identical row set** —
-the intersection where every SA2 column is non-null (~91% of U91 rows) — so the comparison isolates the
-SA2 block as the only difference. Folds are time-based (spec §8.3): train ≤ 2022, val 2023,
-test_normal 2024-25, test_crisis 2026.
+Spec §15.2 documents the fold geometry. Spec §8.2 documents the LightGBM
+hyperparameters. Spec §15.6 documents the ship-Model-A decision.
 
 ---
 
 ## Artifact index
 
+### v3.0 (current — canonical)
+
 | File | Contents |
 |------|----------|
-| [`comparison.md`](comparison.md) | Full metrics: headline + metro/brand/fuel/SEIFA-quintile segmentation + feature-importance + SA2↔non-SA2 correlation tables |
-| [`shap/summary_b.png`](shap/summary_b.png) | Model B top-30 features by mean \|SHAP\| |
-| [`shap/importance_a_vs_b.png`](shap/importance_a_vs_b.png) | Side-by-side gain importance, A vs B |
-| [`shap/dependence_*.png`](shap/) | Dependence plots, top-5 SA2 features by SHAP impact |
-| [`shap/interaction_dof_seifa.png`](shap/interaction_dof_seifa.png) | `cal_day_of_fortnight × sa2_seifa_irsd_score` interaction |
-| [`shap/case_studies_predictions.png`](shap/) | Predictions vs actuals, Q1/Q3/Q5 representative stations |
-| [`shap/waterfall_*.png`](shap/) | Per-prediction SHAP waterfalls, one per case-study station |
+| [`v3_phase2_summary.md`](v3_phase2_summary.md) | Cross-experiment k-fold summary (all 8 v2.x variants) |
+| [`v3_phase2_pr_b_baseline_kfold.md`](v3_phase2_pr_b_baseline_kfold.md) | PR B baseline full per-fold report (the headline above) |
+| [`v3_phase2_pr_c_*_kfold.md`](.) | Per-variant k-fold reports for the other 7 experiments |
+| [`v3_phase2_metrics.json`](v3_phase2_metrics.json) | Raw metrics dump for the 8 experiments |
+| [`v3_phase3_rank_consistency.md`](v3_phase3_rank_consistency.md) | Postmortem #1 — per-fold rank consistency |
+| [`v3_phase3_seed_noise_summary.md`](v3_phase3_seed_noise_summary.md) | Postmortem #2 — 6× seed-noise floor |
+| [`v3_phase3_e6_seifa_dof_interaction_headline.md`](v3_phase3_e6_seifa_dof_interaction_headline.md) | Postmortem #3 — explicit interaction (falsified Reading C2) |
+| [`v3_phase3_hyperopt_summary.md`](v3_phase3_hyperopt_summary.md) | Postmortem #4 — Optuna hyperparameter sweep |
+| [`v3_phase1_smoke_kfold.md`](v3_phase1_smoke_kfold.md) | Initial k-fold smoke milestone (Phase 1) |
+| [`../docs/research/2026-06_v3.0_phase3_closing_summary.md`](../docs/research/2026-06_v3.0_phase3_closing_summary.md) | **Phase 3 closing summary — start here for the full v3.0 story** |
+
+### v2.x (historical — preserved for reproducibility)
+
+| File | Contents |
+|------|----------|
+| [`comparison.md`](comparison.md) | v2.x committed single-split headline (test_normal + test_crisis) |
+| [`pr_c_overnight_summary.md`](pr_c_overnight_summary.md) | PR C 4-experiment overnight run summary |
+| [`pr_c_*_comparison.md`](.) | Per-experiment v2.x single-split comparison reports |
+| [`shap/`](shap/) | v1 SHAP plots (not refreshed against v3.0 — kept for historical reference) |
 
 ---
 
 ## Limitations & future work
 
-- **Augmentor signal looks near-exhausted.** Three iterations converged on a 15-column sweet spot;
-  the 31-col broadening overfit and the headline interaction hypothesis came back weak. Further SA2
-  feature selection is unlikely to move the headline materially.
-- **Temporal DSS deferred (spec §7.7.2).** DSS welfare data is pinned to a single latest-quarter
-  snapshot. Per-row temporal resolution (the augmentor v1.5 capability) was deprioritised after static
-  DSS features contributed only modestly — the temporal-only delta is unlikely to justify the
-  panel-level augmentation refactor it requires.
-- **Weather leakage (above)** is the clearest absolute-accuracy caveat for v2.
-- **`stn_is_metro` is a name-heuristic**, and the metro/regional segmentation is heavily imbalanced
-  (2,998 metro vs 846,336 regional rows on test_normal) — read that split with caution.
+- **Augmentor surface tested in depth, not exhausted.** The v3.0 evidence is for
+  *this model class on this feature set*. A different model class (NN with
+  explicit feature interactions; GAM with SEIFA × cycle terms) might extract
+  signal GBM can't. Not justified by current evidence; on the backlog as a v4.0
+  research direction.
+- **Hyperparameter sweep is on Model A only.** Phase 3 #4 didn't re-sweep Model
+  B's hyperparams under the new search space. Argument against doing so: the
+  explicit-interaction experiment already showed adding a feature LightGBM
+  could use (and did use, mid-pack by gain) doesn't generalise. Capacity isn't
+  the constraint.
+- **Single horizon.** v3.0 maintains the `y_t1` single-day target. The 7-day
+  forecast horizon (spec §13.8) remains backlogged; Model B's relative value
+  could differ at longer horizons (the lag advantage decays, the demographic
+  context stays static).
+- **Weather block.** Still NOAA GFS day-ahead with v2.0's compromises (`weather_code`
+  null-stubbed, ~20% of training rows missing wx_* from archive gaps, UTC day
+  boundary). Documented in
+  [`docs/research/2026-05_weather_leakage_fix_outcome.md`](../docs/research/2026-05_weather_leakage_fix_outcome.md).
+  These are stable across v2/v3 and don't bias the A/B comparison either way.
+- **NSW only.** Spec §3 in-scope; the v3.0 ship-Model-A decision is for NSW
+  fuel prices. Other-state generalisation hasn't been tested.

@@ -1021,6 +1021,13 @@ Outcome: a small set of robust feature recommendations + a clean "this is the v3
 
 **Phase 2.5 verdict: ship Model A.** The v2.x SA2 augmentor surface adds nothing detectable on top of the lag-rich feature space for this model class. The augmentor dependency is retired from the production path; Model B's role becomes research-only.
 
+**Post-v3.0 follow-ups (v4 + v5, 2026-06-11).** Three further investigations hardened the null rather than overturning it. See [`docs/research/2026-06_v4_fold_instability_closing.md`](docs/research/2026-06_v4_fold_instability_closing.md) and [`docs/research/2026-06_v5_7day_horizon_outcome.md`](docs/research/2026-06_v5_7day_horizon_outcome.md):
+
+- **v4 — fold-instability features.** Tried fuel-excise, Brent realized-volatility, and return-kurtosis/skew features to fix the seed-unstable folds 3 + 6. All three either falsified or merely *relocated* instability between folds (a regime feature's value is per-fold, not global). The Phase 3 #4 retune had already done the real stabilisation work. **Ship nothing from v4.**
+- **v5 — 7-day horizon.** Re-ran A-vs-B at the `y_t1_t7` target (the strongest "maybe it helps at a longer horizon" objection). Mean Δ MAE +0.041, Stdev 0.370 → **noise, same as t+1**. The augmentor null now holds at **two independent horizons**. A latent `horizon_days` train/test-gap leak in the k-fold harness was fixed as a prerequisite (`folds.py`).
+
+The cumulative picture: the null survives six distinct rescue attempts — k-fold methodology, seed-noise significance floor, explicit interaction feature, hyperparameter sweep, three unstable-fold feature families, and a second forecast horizon. The externally-facing methodology write-up is at [`docs/methodology_writeup.md`](docs/methodology_writeup.md).
+
 **Phase 3 — Docker handoff to home AMD server.** k-fold × multi-experiment retrain is ~6× the wall-clock of v2.x single-fit (PR C's 7 experiments × 30-60 min each ≈ 5h becomes ~30h at 6-fold). Currently deferred — Phase 1 + Phase 2 + Phase 2.5 all ran locally on the dev laptop, with the cost accepted. Phase 3 picks up only when iteration friction motivates it:
 
 - Docker container wrapping the train + evaluate stages with `uv.lock` baked in

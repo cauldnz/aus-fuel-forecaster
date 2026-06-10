@@ -170,8 +170,12 @@ class KFoldConfig:
       target leakage that the v2.x scheme has today (see spec §8.3 and
       the v3.0 Phase 1 design doc §3.1).
     - ``horizon_days``: target horizon (1 for ``y_t1``, 7 for
-      ``y_t1_t7``). Used together with ``gap_days`` to compute the
-      effective train cutoff.
+      ``y_t1_t7``). Pulls the train cutoff back by ``horizon_days - 1``
+      additional days on top of ``gap_days``, so a multi-day target's
+      forward reach can't overlap the test window. For ``y_t1_t7`` set
+      ``horizon_days=7`` — the last train row's
+      ``mean(price[t+1..t+7])`` target then lands entirely in the gap,
+      not in test. Default 1 (``y_t1``) is a no-op on the geometry.
     - ``warmup_end``: date string; rows on or before this stay in
       ``features.parquet`` for lag computation but never appear in
       any train fold. Default ``2016-12-31`` (4 months covers
@@ -222,8 +226,19 @@ class KFoldConfig:
                 - pd.DateOffset(months=self.test_window_months)
                 + pd.Timedelta(days=1)
             )
-            # gap_days between last train day and first test day.
-            train_val_end = test_start - pd.Timedelta(days=1 + self.gap_days)
+            # Gap between last train day and first test day. The offset
+            # is ``1`` (test_start is the day *after* the gap window) +
+            # ``gap_days`` (the explicit buffer) + ``horizon_days - 1``
+            # (the target's forward reach beyond one day). The last term
+            # is what prevents the target leak for multi-day horizons:
+            # a train row at ``train_val_end`` has a target spanning
+            # ``[train_val_end+1, train_val_end+horizon_days]``; without
+            # the ``horizon_days - 1`` term that target would overlap the
+            # test window. For ``horizon_days=1`` (the y_t1 default) the
+            # term is 0 — fully backward-compatible with the v3.0 geometry.
+            train_val_end = test_start - pd.Timedelta(
+                days=1 + self.gap_days + (self.horizon_days - 1)
+            )
             val_start = train_val_end - pd.Timedelta(days=self.val_window_days - 1)
             bounds.append(
                 (train_start, val_start, train_val_end, test_start, test_end)

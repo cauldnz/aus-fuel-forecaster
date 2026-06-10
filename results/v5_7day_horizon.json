@@ -1,0 +1,55 @@
+{
+  "target": "y_t1_t7",
+  "horizon_days": 7,
+  "per_fold": [
+    {
+      "fold": 1,
+      "mae_a": 8.217,
+      "mae_b": 8.211,
+      "delta_mae": -0.007
+    },
+    {
+      "fold": 2,
+      "mae_a": 13.835,
+      "mae_b": 14.172,
+      "delta_mae": 0.337
+    },
+    {
+      "fold": 3,
+      "mae_a": 25.157,
+      "mae_b": 25.217,
+      "delta_mae": 0.06
+    },
+    {
+      "fold": 4,
+      "mae_a": 16.162,
+      "mae_b": 16.752,
+      "delta_mae": 0.59
+    },
+    {
+      "fold": 5,
+      "mae_a": 8.817,
+      "mae_b": 8.666,
+      "delta_mae": -0.152
+    },
+    {
+      "fold": 6,
+      "mae_a": 18.807,
+      "mae_b": 18.222,
+      "delta_mae": -0.585
+    }
+  ],
+  "aggregate": {
+    "mean_delta_mae": 0.041,
+    "stdev_delta_mae": 0.37,
+    "min_delta_mae": -0.585,
+    "max_delta_mae": 0.59
+  },
+  "verdict": "noise",
+  "t1_reference": {
+    "mean_delta_mae": 0.215,
+    "stdev_delta_mae": 0.394,
+    "min_delta_mae": -0.135,
+    "max_delta_mae": 1.042
+  }
+}

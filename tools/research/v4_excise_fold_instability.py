@@ -56,7 +56,17 @@ RESULTS_DIR = REPO_ROOT / "results"
 SEEDS = (42, 1, 7, 13, 99, 123)
 INPUT_FEATURES = DATA_PROCESSED / "features.parquet"
 OUTPUT_FEATURES = DATA_PROCESSED / "features_v4_excise.parquet"
-BASELINE_SEED_JSON = RESULTS_DIR / "v3_phase3_seed_noise.json"
+# Baseline: the hyperopt validation per-seed per-fold MAE under the NEW
+# tuned defaults but WITHOUT the excise feature. This is the only fair
+# comparison — same hyperparameters on both sides, the only experimental
+# difference is the new feature. Using v3_phase3_seed_noise.json (the OLD
+# spec-defaults baseline) instead conflates two effects (the hyperparameter
+# retune AND the new feature). The hyperopt validation file gives us per-
+# seed per-fold MAE under the new defaults without excise — that's the
+# clean baseline.
+BASELINE_SEED_JSON = RESULTS_DIR / "v3_phase3_hyperopt_validation.json"
+# Kept around for explicit-comparison reporting.
+OLD_DEFAULTS_BASELINE_JSON = RESULTS_DIR / "v3_phase3_seed_noise.json"
 
 LOG_PATH = REPO_ROOT / "tools" / "research" / "v4_excise_fold_instability.log"
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -269,10 +279,33 @@ def _per_fold_mae_a_from_audit(audit_path: Path) -> dict[str, float]:
 
 
 def _load_baseline_per_seed() -> dict[int, dict[str, float]]:
-    """Phase 3 #2 spec-default seed-noise — per-seed per-fold MAE_A."""
+    """Hyperopt-validation baseline — per-seed per-fold MAE_A under the NEW
+    tuned defaults WITHOUT the excise feature. Same hyperparameters as this
+    experiment minus the new feature.
+    """
     if not BASELINE_SEED_JSON.exists():
-        raise RuntimeError(f"{BASELINE_SEED_JSON} missing")
+        raise RuntimeError(
+            f"{BASELINE_SEED_JSON} missing — run "
+            f"tools/research/v3_phase3_hyperopt_validation.py first"
+        )
     data = json.loads(BASELINE_SEED_JSON.read_text(encoding="utf-8"))
+    # The hyperopt validation JSON uses key 'per_seed_per_fold_mae_a_NEW'
+    # to reflect "new tuned defaults without excise".
+    raw = data["per_seed_per_fold_mae_a_NEW"]
+    return {int(k): {fk: float(v) for fk, v in d.items() if fk.startswith("fold_")}
+            for k, d in raw.items()}
+
+
+def _load_old_defaults_baseline() -> dict[int, dict[str, float]]:
+    """Phase 3 #2 OLD spec-defaults baseline — kept for explicit comparison.
+
+    Used in the report to show the *total* improvement (retune + feature)
+    against the original baseline, separately from the clean
+    feature-only comparison.
+    """
+    if not OLD_DEFAULTS_BASELINE_JSON.exists():
+        return {}
+    data = json.loads(OLD_DEFAULTS_BASELINE_JSON.read_text(encoding="utf-8"))
     raw = data["per_seed_per_fold_mae_a"]
     return {int(k): {fk: float(v) for fk, v in d.items() if fk.startswith("fold_")}
             for k, d in raw.items()}
@@ -281,6 +314,7 @@ def _load_baseline_per_seed() -> dict[int, dict[str, float]]:
 def _write_summary(
     new_per_seed: dict[int, dict[str, float]],
     baseline_per_seed: dict[int, dict[str, float]],
+    old_defaults_per_seed: dict[int, dict[str, float]] | None = None,
 ) -> None:
     """Compute per-fold seed-stdev under new feature, compare to baseline."""
     summary_md = RESULTS_DIR / "v4_excise_fold_instability_summary.md"
@@ -302,6 +336,10 @@ def _write_summary(
 
     new_stats = _per_fold_seed_stats(new_per_seed)
     base_stats = _per_fold_seed_stats(baseline_per_seed)
+    old_stats = (
+        _per_fold_seed_stats(old_defaults_per_seed)
+        if old_defaults_per_seed else {}
+    )
 
     # Per-fold stdev change: new - baseline. Negative = improved (lower
     # stdev = more stable).
@@ -346,13 +384,20 @@ def _write_summary(
     payload = {
         "seeds": list(new_per_seed.keys()),
         "new_feature": "cal_fuel_excise_cents_per_litre",
-        "per_seed_per_fold_mae_a_NEW": new_per_seed,
-        "per_fold_seed_stats_NEW": new_stats,
-        "per_fold_seed_stats_BASELINE": base_stats,
-        "stdev_deltas_NEW_minus_BASELINE": stdev_deltas,
-        "mae_deltas_NEW_minus_BASELINE": mae_deltas,
+        "per_seed_per_fold_mae_a_NEW_with_excise": new_per_seed,
+        "per_fold_seed_stats_NEW_with_excise": new_stats,
+        "per_fold_seed_stats_BASELINE_hyperopt_no_excise": base_stats,
+        "per_fold_seed_stats_OLD_DEFAULTS_no_excise": old_stats,
+        "stdev_deltas_FEATURE_ONLY": stdev_deltas,  # NEW - HYPEROPT_BASELINE
+        "mae_deltas_FEATURE_ONLY": mae_deltas,
         "fold_verdicts": fold_verdicts,
         "hypothesis_verdict": hypothesis_verdict,
+        "comparison_note": (
+            "stdev_deltas_FEATURE_ONLY uses the hyperopt-validation baseline "
+            "(new tuned defaults, no excise feature) — this isolates the "
+            "feature's effect from the retune's effect. The OLD_DEFAULTS "
+            "stats are kept for the cumulative comparison (retune + feature)."
+        ),
     }
     summary_json.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     logger.info("wrote %s", summary_json)
@@ -361,28 +406,58 @@ def _write_summary(
     lines.append("# v4 hypothesis test — fuel excise feature → fold-3 stability")
     lines.append("")
     lines.append(
-        "Adds ``cal_fuel_excise_cents_per_litre`` to the calendar block "
-        "and re-runs the Phase 3 #2 seed-noise protocol (6 seeds × Model A "
-        "across 6 folds). Tests whether fold_3's seed-instability — Phase 3 "
-        "#2 measured per-fold seed-stdev = 0.163 c/L, 3-5× higher than "
-        "the other folds — is the model failing to extrapolate over the "
-        "Sept 28, 2022 fuel excise restoration."
+        "Adds ``cal_fuel_excise_cents_per_litre`` to the calendar block and "
+        "re-runs the Phase 3 #2 seed-noise protocol. Tests whether fold_3's "
+        "seed-instability (Phase 3 #2: 0.163 c/L stdev, 3-5× higher than "
+        "the other folds) is the model failing to extrapolate over the "
+        "Sept 28 2022 fuel excise restoration."
+    )
+    lines.append("")
+    lines.append(
+        "**Methodology note (corrected 2026-06-10):** the clean comparison "
+        "is **against the hyperopt-validation baseline** (new tuned defaults "
+        "WITHOUT the excise feature) — same hyperparameters on both sides, "
+        "feature is the only experimental difference. The initial version "
+        "of this script compared to the Phase 3 #2 OLD-defaults baseline, "
+        "which conflated the retune's effect with the feature's effect. "
+        "The OLD-defaults numbers are kept below as the **cumulative** "
+        "(retune + feature) view for context."
     )
     lines.append("")
 
-    lines.append("## Per-fold seed-stdev — new (with excise) vs baseline (Phase 3 #2)")
+    lines.append("## Clean comparison — excise feature ONLY (new tuned defaults both sides)")
     lines.append("")
-    lines.append("| Fold | Baseline stdev | New stdev | Δ stdev | Verdict |")
-    lines.append("|------|--------------:|----------:|--------:|---------|")
+    lines.append("Per-fold seed-stdev under the new tuned defaults, with and without the excise feature:")
+    lines.append("")
+    lines.append("| Fold | WITHOUT excise | WITH excise | Δ stdev | Δ % | Verdict |")
+    lines.append("|------|---------------:|------------:|--------:|----:|---------|")
     for fk in fold_keys:
         if fk not in new_stats or fk not in base_stats:
             continue
         b = base_stats[fk]["stdev"]
         n = new_stats[fk]["stdev"]
         d = stdev_deltas[fk]
+        pct = 100 * d / b if b else 0
         v = fold_verdicts[fk]
-        lines.append(f"| {fk} | {b:.4f} | {n:.4f} | {d:+.4f} | {v} |")
+        lines.append(f"| {fk} | {b:.4f} | {n:.4f} | {d:+.4f} | {pct:+5.0f}% | {v} |")
     lines.append("")
+
+    if old_stats:
+        lines.append("## Cumulative comparison — retune + excise feature (vs Phase 3 #2 OLD defaults)")
+        lines.append("")
+        lines.append("Shows the *total* improvement when both the hyperparameter retune "
+                     "AND the excise feature are added, vs the original v1/v2 spec defaults. "
+                     "This is the picture against the **original** Phase 3 #2 baseline.")
+        lines.append("")
+        lines.append("| Fold | OLD defaults stdev | NEW (retune + excise) stdev | Δ stdev |")
+        lines.append("|------|-------------------:|----------------------------:|--------:|")
+        for fk in fold_keys:
+            if fk not in new_stats or fk not in old_stats:
+                continue
+            o = old_stats[fk]["stdev"]
+            n = new_stats[fk]["stdev"]
+            lines.append(f"| {fk} | {o:.4f} | {n:.4f} | {n-o:+.4f} |")
+        lines.append("")
 
     lines.append("## Per-fold seed-mean MAE — new vs baseline")
     lines.append("")
@@ -464,8 +539,12 @@ def _write_summary(
     lines.append("## Sources")
     lines.append("")
     lines.append("- `tools/research/v4_excise_fold_instability.py` — this script")
-    lines.append("- `results/v3_phase3_seed_noise.json` — baseline per-seed per-fold MAE")
-    lines.append("- `docs/research/2026-06_v3.0_phase3_closing_summary.md` — Phase 3 #2 finding")
+    lines.append("- `results/v3_phase3_hyperopt_validation.json` — CLEAN baseline "
+                 "(new tuned defaults, no excise) — the fair feature-only comparison")
+    lines.append("- `results/v3_phase3_seed_noise.json` — OLD-defaults baseline "
+                 "(cumulative retune+feature comparison)")
+    lines.append("- `docs/research/2026-06_v3.0_phase3_closing_summary.md` — Phase 3 #2 + #4")
+    lines.append("- `docs/research/2026-06_v4_fold_instability_excise_outcome.md` — narrative")
     lines.append("")
     lines.append("**Excise schedule sources:** Australian Government Federal "
                  "Treasury, March 2022 budget papers; ATO indexation tables.")
@@ -488,8 +567,17 @@ def main() -> None:
     _build_features()
     _patch_calendar_block()
     baseline_per_seed = _load_baseline_per_seed()
-    logger.info("loaded baseline (Phase 3 #2 spec defaults) per-seed per-fold MAE for %d seeds",
-                len(baseline_per_seed))
+    logger.info(
+        "loaded CLEAN baseline (hyperopt val: new tuned defaults WITHOUT excise) "
+        "for %d seeds", len(baseline_per_seed),
+    )
+    old_defaults_per_seed = _load_old_defaults_baseline()
+    if old_defaults_per_seed:
+        logger.info(
+            "loaded OLD-defaults baseline (Phase 3 #2: original v1/v2 spec defaults) "
+            "for %d seeds — kept for cumulative comparison",
+            len(old_defaults_per_seed),
+        )
 
     new_per_seed: dict[int, dict[str, float]] = {}
     for seed in SEEDS:
@@ -500,7 +588,7 @@ def main() -> None:
             new_per_seed[seed] = {"error": f"{type(exc).__name__}: {exc}"}  # type: ignore[dict-item]
         valid = {s: d for s, d in new_per_seed.items() if "error" not in d}
         if len(valid) >= 2:
-            _write_summary(valid, baseline_per_seed)
+            _write_summary(valid, baseline_per_seed, old_defaults_per_seed)
 
     logger.info("v4 fold instability experiment complete")
 

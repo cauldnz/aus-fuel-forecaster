@@ -25,6 +25,15 @@ v1/v2 defaults (WEAK WIN, |mean|/stdev ratio 1.29). The new defaults are
 smaller, more-regularized trees with no row bagging (see spec §8.2 for the
 full table). The v1/v2 defaults were over-fitting.
 
+**Stronger validation post-retune (2026-06-10):** when the v2.x single-split
+A/B comparison is re-run with the new tuned defaults, **Model A now beats
+Model B on both v2.x test folds** (test_normal Δ MAE +0.236 c/L, test_crisis
+Δ MAE +0.316 c/L — both Model B *worse* — vs the v2.x committed numbers of
+−0.239 and −0.321 where Model B won). The augmentor's apparent "win" in v2.x
+was partly an artefact of the under-tuned baseline; once Model A is properly
+regularized, the SA2 block adds nothing even on the original v2.x folds.
+This is exactly the failure mode the v3.0 methodology was designed to catch.
+
 ---
 
 ## Headline (v3.0, 6-fold time-series k-fold, PR B baseline)

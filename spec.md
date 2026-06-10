@@ -13,6 +13,8 @@ The project trains two LightGBM models with identical pipelines except for one f
 
 This is a methodology demonstration, not a production forecasting system.
 
+> **v3.0 closing (2026-06-08):** the methodology demonstration completed with an unexpected outcome — under proper time-series k-fold cross-validation, the augmentor surface produces **no robust lift** over Model A's lag-rich feature set (8 variants × 6 folds, all within or below the LightGBM seed-noise floor). Model A is the production model; Model B is research-only. The contribution becomes a **methodology study** (single-split misleads; k-fold + seed-noise floor + explicit-interaction probes triangulate). Full evidence: [§15.6](#156-v30-outcome--ship-model-a) + [`docs/research/2026-06_v3.0_phase3_closing_summary.md`](docs/research/2026-06_v3.0_phase3_closing_summary.md).
+
 ## 2. Acceptance Criteria
 
 The project is "done" when all of the following hold:
@@ -343,6 +345,8 @@ Note on leakage: v1 uses Historical Weather (ERA5 reanalysis) across the full sp
 
 ### 7.7 Demographic block (`sa2_*`) — the augmentor block
 
+> **v3.0 status (2026-06-08):** kept as a **research surface only**. The Phase 2.5 closing ([§15.6](#156-v30-outcome--ship-model-a) and [`docs/research/2026-06_v3.0_phase3_closing_summary.md`](docs/research/2026-06_v3.0_phase3_closing_summary.md)) found that across 8 augmentor variants × 6 folds, no configuration produces a robust win over Model A; even hand-crafted interactions made things worse. **Model B is no longer the production path.** The columns documented below remain in `features.parquet` for reproducibility + research, but the production model (Model A) does not consume them. Any future augmentor work must first clear v3.0 k-fold significance before going into production.
+
 ```
 # Census 2021 GCP — direct fields
 sa2_median_age                                    # G02.Median_age_persons
@@ -519,18 +523,31 @@ target is null (end-of-series) are dropped before training.
 
 LightGBM regressor (`lightgbm.LGBMRegressor`), tabular tree-based model. Sufficient for the data size and handles nulls + categoricals natively.
 
-### 8.2 Hyperparameters (v1, fixed)
+### 8.2 Hyperparameters
+
+> **v3.0 update (2026-06-09):** these defaults were re-tuned via Optuna TPE
+> Bayesian search (200 trials, 6-fold k-fold objective, see Phase 3 #4 in
+> [§15.6](#156-v30-outcome--ship-model-a) and
+> [`docs/research/2026-06_v3.0_phase3_closing_summary.md`](docs/research/2026-06_v3.0_phase3_closing_summary.md)).
+> The winning combination was validated across 6 seeds (mean improvement
+> 0.170 c/L vs the original v1/v2 defaults; |mean|/stdev ratio 1.29 → WEAK
+> WIN per the v3.0 significance heuristic). Validated improvements:
+> 5 of 6 folds improve clearly; fold_2 is dead-flat; biggest wins on the
+> volatile folds (fold_3 −0.38, fold_4 −0.23, fold_1 −0.21, fold_6 −0.18).
+> Full validation: [`results/v3_phase3_hyperopt_validation.md`](results/v3_phase3_hyperopt_validation.md).
 
 ```python
 LGBM_PARAMS = dict(
     objective="regression_l1",       # MAE-aligned loss
     metric="mae",
-    learning_rate=0.05,
-    num_leaves=63,
-    min_data_in_leaf=200,
-    feature_fraction=0.8,
-    bagging_fraction=0.8,
-    bagging_freq=5,
+    learning_rate=0.028,             # v3.0 tuned (was 0.05)
+    num_leaves=31,                   # v3.0 tuned — smaller trees (was 63)
+    min_data_in_leaf=544,            # v3.0 tuned — heavier leaf reg (was 200)
+    feature_fraction=0.85,           # v3.0 tuned — more features per tree (was 0.8)
+    bagging_fraction=0.69,           # v3.0 tuned (was 0.8)
+    bagging_freq=0,                  # v3.0 tuned — NO row bagging (was 5)
+    lambda_l1=0.059,                 # v3.0 tuned — small L1 (was 0)
+    lambda_l2=0.0,                   # unchanged
     n_estimators=2000,
     early_stopping_rounds=100,
     verbose=-1,
@@ -538,22 +555,54 @@ LGBM_PARAMS = dict(
 )
 ```
 
-These are deliberately reasonable defaults. **Hyperparameter tuning is out of scope for v1** — the experiment compares Model A vs Model B at fixed hyperparameters.
+**Pattern of the v3.0 retune** vs the v1/v2 defaults: smaller, more-
+regularized trees (num_leaves 63→31, min_data_in_leaf 200→544), with
+more features per split (feature_fraction 0.8→0.85), no row bagging
+(bagging_freq 5→0), slower learning (learning_rate 0.05→0.028), and a
+small L1 penalty. The original v1/v2 defaults were over-fitting — the
+tuned config trades tree capacity for stronger regularization and lets
+more features into each split.
+
+**Original v1/v2 defaults** (preserved here for historical reference,
+and what the v3.0 closing baseline was measured against):
+
+| Param | v1/v2 | v3.0 tuned |
+|-------|------:|-----------:|
+| learning_rate | 0.05 | 0.028 |
+| num_leaves | 63 | 31 |
+| min_data_in_leaf | 200 | 544 |
+| feature_fraction | 0.8 | 0.85 |
+| bagging_fraction | 0.8 | 0.69 |
+| bagging_freq | 5 | 0 |
+| lambda_l1 | 0 | 0.059 |
+| lambda_l2 | 0 | 0 |
+
+**Tuning was OUT of scope for v1/v2.** The v3.0 Phase 2.5 postmortem
+(spec §15.2 / §15.6) brought it back in as a Reading-C1 test once the
+augmentor surface produced a null result and the question shifted to
+"is Model A itself at capacity?" The answer turned out to be no —
+there was a measurable ~0.17 c/L improvement to unlock by retuning.
 
 ### 8.3 Validation strategy
 
-Time-based, no shuffling. Splits:
+**Status:** v2.x ran the single-split scheme below; v3.0 ([§15](#15-v30-plan--methodology-overhaul)) replaces it with **time-series k-fold CV** that treats every date range as a rotating test window — no separate "crisis" fold. Both the §8.3 v2.x scheme and the v3.0 k-fold scheme live in `train.folds`; the runner picks per CLI flag.
+
+**v2.x scheme (historical, still supported for compat):** time-based, no shuffling, four folds.
 
 | Fold | Date range | Use |
 |---|---|---|
 | Train | 2016-09-01 → 2022-12-31 | Fit |
 | Validation | 2023-01-01 → 2023-12-31 | Early stopping |
 | Test (normal) | 2024-01-01 → 2025-12-31 | Headline metrics |
-| Test (crisis) | 2026-01-01 → end of data | Reported separately as out-of-distribution |
+| Test (crisis) | 2026-01-01 → end of data | Reported separately — **deprecated in v3.0** |
 
-No k-fold CV in v1 — the time-based holdout is the validation. Group-aware splitting is unnecessary because we never train on a station-day's future and predict its past; targets are strictly forward-shifted.
+The v2.x "test_crisis" fold treated 2026's price-spike period as an out-of-distribution holdout, separate from the in-distribution test_normal headline. v3.0 drops the separation: 2026 is just another time period in the rotating CV.
+
+**v3.0 scheme (current default):** 6-fold expanding-window CV with 12-month test windows ending at 2026-04 (the panel's last date), `gap_days=1` between train end and test start to prevent `y_t1` target leakage. Geometry table + full design in [§15.2](#152-phase-plan-locked-in--v30-phase-1-design-doc-for-rationale). No k-fold CV in v1/v2 — group-aware splitting is unnecessary because we never train on a station-day's future and predict its past; targets are strictly forward-shifted.
 
 ### 8.4 The A/B comparison
+
+> **v3.0 status (2026-06-08):** The A/B comparison ran as designed. Under the v3.0 k-fold methodology, **no Model B configuration produces a robust win** — see [§15.6](#156-v30-outcome--ship-model-a). The headline outcome is a null result. **Model A is the production model.** Model B remains buildable in code for research, but is not on the ship path.
 
 Two models, identical except for one feature block:
 
@@ -888,6 +937,16 @@ To be resolved during implementation, not blocking spec sign-off:
 
 10. **Time-series k-fold cross-validation + remote training offload — PROMOTED to v3.0.** Originally filed as backlog after PR C's overnight experiments made the single-split methodology gap concrete (E1 wins test_normal while losing test_crisis, E4 does the reverse, E5's "combine the wins" hypothesis blew up). The full plan now lives at [§15](#15-v30-plan--methodology-overhaul) — it's the next major version's primary work, not deferred maintenance.
 
+11. **ABS Building Approvals (8731.0) as a candidate v3+ feature.** Upstream `abs-census-augmentor` v2.2.0 (2026-06-01) shipped `abs_building_approvals` — a SA2-native monthly dataset with 9 metric columns (new house / other residential / total dwelling counts + `$'000` values + alterations / non-residential / total building). Plausibly relevant to fuel-price prediction as a leading economic-activity proxy: areas with construction activity have construction-vehicle fuel demand + incoming-resident population growth. Monthly cadence means it's a candidate for both cross-sectional and temporal-mode inclusion.
+
+    **Status:** Don't add until v3.0 Phase 2 re-evaluation completes — adding new feature surface before the existing surface's robustness is known would muddy the methodology validation. After Phase 2: queue as a Phase 5-ish add-and-evaluate experiment under k-fold.
+
+12. **ASGS parent codes (sa3 / sa4 / gcc / ste) as a near-zero-cost categorical feature trial.** Upstream `abs-census-augmentor` v2.2.0 exposed `census_augment.spatial.compute_sa2_parent_codes()` — a pure dict lookup from the SA2 boundary file's attribute columns to SA3 / SA4 / GCC (Greater Capital City) / STE (state) codes. Adding these 4 as categorical features in our SA2 block is essentially free at data-fetch time (no new download) — only `enrich_census` needs to expose them and `feature_blocks.SA2_COLUMNS` needs the additions. LightGBM handles high-cardinality categoricals natively.
+
+    **Hypothesis worth testing:** the model currently learns per-station spatial patterns through `stn_*` features but has no explicit access to administrative geography above the SA2 level. Adding parent codes might let it pick up state-level price-cycle signals (e.g. NSW vs ACT vs the Greater Sydney bubble) without us having to engineer those features by hand. Single experiment under the v3.0 k-fold harness, ~22 min wall-clock — cheap to test, easy to drop if k-fold says it doesn't help robustly.
+
+    **Status:** queue for v3.0 Phase 2 (cheap to run alongside the existing re-evaluations) or Phase 5.
+
 ## 14. References
 
 - `abs-census-augmentor`: https://github.com/cauldnz/abs-census-augmentor
@@ -906,59 +965,109 @@ Promoted from [§13](#13-open-questions) #10. The v2.x arc (see [`docs/research/
 
 Concretely, the cases v2.x has no good answer for:
 
-- Is PR C's E4 test_crisis +0.282 c/L gain robust, or fold-specific?
+- Was the strongest test-fold lift in PR C robust, or fold-specific?
 - Would the candidates that didn't make the v1.5-era 15-col cut survive a different fold? (We curated by gain rank from a single 31-col fit.)
 - Would temporal-mode benefits (PR C E1) show up on different historical splits, or are they 2024-25 artefacts?
 - How much of any reported Δ MAE is real and how much is what a 6-fold mean ± stdev would call within-noise?
 
-The committed v2.x headline (PR B + augmentor v2.1.0): test_normal Δ MAE −0.239, test_crisis Δ MAE −0.321. None of PR C's 7 experiments beat this on both folds simultaneously — and the strongest crisis-fold result (E4 −0.603) cost the test_normal fold meaningfully. **The decision of which configuration to ship can't be made under the current methodology.**
+The committed v2.x single-split headline (PR B + augmentor v2.1.0) showed Model B beating Model A by 0.239 c/L on the 2024-25 test fold and 0.321 c/L on the 2026 fold. None of PR C's 7 experiments beat that on both single-split folds simultaneously, and the strongest single-fold result cost meaningfully on the other. **The decision of which configuration to ship can't be made under the current methodology.**
 
-### 15.2 Phase plan (sketch — to be detailed during planning session)
+### 15.2 Phase plan (locked-in)
 
-**Phase 1 — k-fold CV harness.** Replace the two-fold reporting (test_normal vs test_crisis) with a proper time-series k-fold across the full panel. Decisions needed:
+Decisions in this section are confirmed (2026-05-31 planning session). See [`docs/research/2026-05_v3.0_phase1_kfold_design.md`](docs/research/2026-05_v3.0_phase1_kfold_design.md) for full rationale + research synthesis + leakage analysis.
 
-- CV scheme: expanding-window (each fold's train = everything before its test window) vs rolling-origin (fixed-width train sliding through time). Expanding-window is the safer first cut for non-stationary signals.
-- Fold count: 6–10 across 2018–2026. Trade-off: more folds = tighter mean ± stdev but slower.
-- Gap-fold behaviour: should there be a small gap between train end and test start (typical for forecasting CV to avoid lag-feature leakage)? Probably yes — match the lag-window depth (~28 days from `lag_price_28`).
-- Crisis-fold handling: keep 2026-Q1 as a separate held-out "OOD verification" fold, OR fold it in to the rolling CV and lose the explicit OOD signal? Probably the former — crisis fold remains the headline robustness check, while CV runs on 2018-2025.
-- Reporting format: replace the single A-vs-B comparison.md with per-fold + aggregate mean/stdev/CI. `evaluate.compare` needs a refactor.
+**Phase 1 — k-fold CV harness.** Replaces single-split A-vs-B reporting with time-series k-fold CV across the full panel. Concrete config:
 
-**Phase 2 — Re-evaluation of the v2.x feature surface under k-fold CV.** Re-run the studies that the v2.x methodology couldn't cleanly attribute:
+- **Scheme:** expanding-window chronological (each fold's train = everything before its test window). Matches deployment.
+- **k = 6** folds, each with a **12-month test window**.
+- **`gap_days = 1`** between train end and test start, to prevent the `y_t1` target-shift leak (the same leak exists in the v2.x single-split setup today and gets fixed as a side-effect).
+- **No "crisis" concept** — the 2026 data is just another time period included in the rotating test windows. The v2.x `test_crisis` fold is deprecated; see §8.3.
+- **Per-fold val** = last 365 days of that fold's train portion. LightGBM early-stopping uses this val.
+- **Reporting:** merged per-fold + aggregate (mean ± stdev) report. No p-values (per-fold spread vs effect size is judgable by eye — see design doc §2.5 for why naive paired t-tests on k-fold scores are misleading).
 
-- PR A v2.0 bump — confirm it's actually a no-op or whether the previous "byte-identical" finding was fold-specific
-- PR B temporal-mode (SEIFA + ERP-total) — re-evaluate per-fold; does the static-vs-temporal trade-off hold across all folds or only the 2024-25 one?
-- PR C E1 (DSS temporal) — was the test_normal win general or 2024-25 specific?
-- PR C E4 / E4a / E4b — does the density column really drive the crisis-fold gain across all folds?
-- The v1.5-era 31 → 15 curation — would the cut survive a fold-by-fold gain analysis?
+**Fold geometry (k=6, 12-month windows ending at panel last date 2026-04):**
 
-Outcome should be a small set of robust feature recommendations + a clean "this is the v3.0 baseline" config.
+| Fold | Train window | Val window (last 365d of train) | Test window |
+|---|---|---|---|
+| 1 | 2017-01-01 → 2020-04-30 | 2019-05-01 → 2020-04-30 | 2020-05-01 → 2021-04-30 |
+| 2 | 2017-01-01 → 2021-04-30 | 2020-05-01 → 2021-04-30 | 2021-05-01 → 2022-04-30 |
+| 3 | 2017-01-01 → 2022-04-30 | 2021-05-01 → 2022-04-30 | 2022-05-01 → 2023-04-30 |
+| 4 | 2017-01-01 → 2023-04-30 | 2022-05-01 → 2023-04-30 | 2023-05-01 → 2024-04-30 |
+| 5 | 2017-01-01 → 2024-04-30 | 2023-05-01 → 2024-04-30 | 2024-05-01 → 2025-04-30 |
+| 6 | 2017-01-01 → 2025-04-30 | 2024-05-01 → 2025-04-30 | 2025-05-01 → 2026-04-30 |
 
-**Phase 3 — Docker handoff to home AMD server.** k-fold × multi-experiment retrain pattern is significantly more expensive than v2.x's single-fit (a 6-fold CV multiplies wall-clock by ~6 per experiment; PR C's 7 experiments × 30-60 min each at single-fit ≈ 5h becomes ~30h at 6-fold). To keep iteration practical:
+Notes: 2016-09 → 2016-12 stays as lag-feature warmup (excluded from all train sets — 4 months covers `lag_price_28` + `roll_price_mean_28` minperiods). `gap_days=1` is enforced by dropping train rows where `date + horizon ≥ test_start`. All of 2025 + 2026 are covered as test data (fold 5 takes 2025-Jan-Apr through fold 6 takes 2025-May-Dec + 2026-Jan-Apr).
 
-- Docker container wrapping the train + evaluate stages with the project's `uv.lock` baked in
-- Container reads features parquet from a mounted volume (or fetches from a bucket), writes models/predictions/comparison back the same way
-- Orchestrator on the laptop becomes "build features locally → ship features parquet to remote → trigger remote train → pull artefacts back" instead of running everything inline
+**Phase 2 — Re-evaluation of the v2.x feature surface under k-fold CV.** Re-run the studies that the v2.x methodology couldn't cleanly attribute. Each gets its own small PR with per-fold + aggregate output:
+
+- Committed PR B baseline (SEIFA + ERP-total temporal) — sets the new v3.0 headline
+- PR C E4 (new ERP density + 21-col curated SA2 block)
+- PR C E4a (density only) — ablation
+- PR C E1 (DSS temporal)
+- PR C E5 (DSS + curation combined) — was the destructive interaction fold-specific or robust?
+- v1.5-era 31 → 15 curation — would the cut survive a per-fold gain analysis?
+- PR A v2.0 augmentor pin bump — confirm the byte-identical finding holds
+
+Outcome: a small set of robust feature recommendations + a clean "this is the v3.0 baseline" config.
+
+**Phase 2 outcome (2026-06-03):** ran 8 experiments (committed PR B + the 7 PR C variants). **0 of 8 produced a robust win** under the k-fold methodology. See [`docs/research/2026-06_v3.0_phase2_outcome.md`](docs/research/2026-06_v3.0_phase2_outcome.md) — best variant `pr_c_e4_density_plus_curation` lands at Mean Δ MAE −0.036 c/L with Stdev 0.396, well inside the noise band. Most variants have Model B *worse* on average. The v2.x "Model B beats Model A by 0.24-0.32 c/L" headline reverses to a flat-or-negative aggregate under rotating folds.
+
+**Phase 2.5 — Postmortem investigation (2026-06-08).** The Phase 2 outcome admitted three readings (genuinely flat / methodology too strict / wrong features). Four follow-up experiments tested the readings directly. See [`docs/research/2026-06_v3.0_phase3_closing_summary.md`](docs/research/2026-06_v3.0_phase3_closing_summary.md) for the full bundle:
+
+1. **Per-fold rank consistency across the 8 Phase 2 experiments** — Mean Spearman ρ +0.198, fold_6 alone = 61% of cross-experiment variance, no fold has unanimous sign. Partial Reading A; cluster pattern keeps Reading C alive at this stage.
+2. **Baseline-vs-baseline 6× seed-noise floor** — Mean per-fold seed-stdev 0.089 c/L; across-pairs Δ-stdev 0.136 c/L; ratio published/seed = **2.89×**. Folds 3 and 6 have 3-5× higher seed-stdev than the others — most of the cross-experiment "noise" is intrinsic LightGBM training-instability on those folds. **Reading A confirmed.**
+3. **Explicit SEIFA × day-of-fortnight interaction feature (Reading C2 test)** — Adding `sa2_seifa_x_dof = sa2_seifa_irsd_score * cal_day_of_fortnight` made things **3× worse** (Mean Δ MAE +0.670 c/L vs +0.215 baseline; nearly doubled the augmentor's harm on fold_6). LightGBM actively splits on the column (rank 46-58 by gain) but the splits don't generalise. **Reading C2 falsified.**
+4. **Optuna hyperparameter sweep on Model A (Reading C1 test)** — 200-trial Bayesian search over `num_leaves`, `min_data_in_leaf`, `learning_rate`, bagging/feature fractions, `lambda_l1`/`l2`. See [`results/v3_phase3_hyperopt_summary.md`](results/v3_phase3_hyperopt_summary.md). Outcome interpretation rules set ex-ante: improvement > 0.05 c/L → update §8.2; 0.01-0.05 → keep defaults; none → Reading C1 also falsified.
+
+**Phase 2.5 verdict: ship Model A.** The v2.x SA2 augmentor surface adds nothing detectable on top of the lag-rich feature space for this model class. The augmentor dependency is retired from the production path; Model B's role becomes research-only.
+
+**Phase 3 — Docker handoff to home AMD server.** k-fold × multi-experiment retrain is ~6× the wall-clock of v2.x single-fit (PR C's 7 experiments × 30-60 min each ≈ 5h becomes ~30h at 6-fold). Currently deferred — Phase 1 + Phase 2 + Phase 2.5 all ran locally on the dev laptop, with the cost accepted. Phase 3 picks up only when iteration friction motivates it:
+
+- Docker container wrapping the train + evaluate stages with `uv.lock` baked in
+- Container reads features parquet from a mount / bucket, writes models/predictions/comparison back the same way
+- Orchestrator on the laptop becomes "build features locally → ship features parquet to remote → trigger remote train → pull artefacts back"
 - Possibly: distribute the k-fold loop across remote workers (one fold per worker)
 
-Decisions needed: container build (multi-stage with `uv sync --frozen`?); mount strategy (NFS share vs S3-like object store vs HTTPS file transfer); artefact return path; security (the AMD server is on a home LAN, likely no public exposure required).
+Decisions needed when Phase 3 actually starts: container build (multi-stage with `uv sync --frozen`?); mount strategy (NFS share vs S3-like object store vs HTTPS file transfer); artefact return path; security (AMD server on home LAN, likely no public exposure required).
 
-**Phase 4 — Documentation + retrospective.** Update `results/README.md` to reflect the new methodology and the re-evaluated headline. Spec §8.3 (folds) gets rewritten. The closing-summary doc gets an addendum on what survived the re-evaluation.
+**Phase 4 — Documentation + retrospective.** Rewrite `results/README.md` to the new headline: methodology-validated Model A is the production model; the augmentor surface is a null-result research contribution. Mark spec §8.3's v2.x single-split scheme as "historical only". Mark spec §7.7 (SA2 block) as "research surface — not in production model path". Add the Phase 2.5 closing summary as the canonical "why we ship Model A" reference.
 
 ### 15.3 Out of scope for v3.0
 
-- Hyperparameter tuning. v2.x's LightGBM config (spec §8.2) stays unchanged through v3.0; we're testing methodology and features, not model.
+- ~~Hyperparameter tuning. v2.x's LightGBM config (spec §8.2) stays unchanged through v3.0~~ — *brought back in by Phase 2.5 #4 once the Phase 2 outcome forced the question of whether Model A itself was capacity-limited. The hyperparameter sweep is a Reading-C1 test, not a search for incremental gain. Results in [`results/v3_phase3_hyperopt_summary.md`](results/v3_phase3_hyperopt_summary.md).*
 - New data sources. v3.0 works against the existing fetched data — no new fetchers, no new augmentor pin bumps (unless a fix lands that we explicitly want).
 - 7-day forecast horizon (§13.8). Still backlogged for a v4.0 or follow-up; v3.0 stays single-target (`y_t1`).
 - Self-hosted Open-Meteo (§13.9). Same — backlogged.
+- **Crisis fold as a separate concept.** The v2.x `test_crisis` fold is deprecated. 2026 data is rotated into the k-fold test windows alongside every other year. References to "crisis fold" in older docs (`docs/research/2026-05_v2_closing_summary.md`, `results/README.md`, historical research entries) are preserved as the v2.x record but no longer drive evaluation. Spec §8.3's v2.x scheme is kept for compat with old single-split tooling but isn't the default.
 
 ### 15.4 Branches + ship cadence
 
 - All v3.0 work on `claude/v3.0-*` branches off main
-- Phase 1 lands first as its own PR (k-fold CV harness + new evaluate.compare); a smoke retrain on the existing PR B baseline produces the first per-fold report
+- Phase 1 lands first as its own PR (k-fold CV harness + new `evaluate.compare_kfold`); a smoke retrain on the existing PR B baseline produces the first v3.0 per-fold report
 - Phase 2 lands as a series of small PRs, one per re-evaluated study
-- Phase 3 can run in parallel with Phase 2 once the Docker container builds cleanly against a baseline fit
+- Phase 3 sits until iteration friction motivates it; not scheduled
 - Phase 4 closes v3.0 and updates `results/README.md` to the new methodology headline
 
 ### 15.5 What's pinned at v2.x
 
 See [`docs/research/2026-05_v2_closing_summary.md`](docs/research/2026-05_v2_closing_summary.md). The v2.x state is the stable baseline v3.0 measures against — augmentor v2.1.0, NOAA GFS weather, split cross-sectional + temporal SA2 pass, 15-col model block, test_normal Δ MAE −0.239 / test_crisis Δ MAE −0.321.
+
+### 15.6 v3.0 outcome — ship Model A
+
+After Phase 1 (k-fold harness), Phase 2 (8 v2.x variants re-evaluated), and Phase 2.5 (4 postmortem investigations including hyperparameter tuning):
+
+- **Production model: Model A** (no SA2 block; lag + upstream + calendar + ctx + stn + wx).
+- **Model B and Model B'** are research artefacts. Kept in code for reproducibility; not built or evaluated in the production pipeline.
+- **Augmentor dependency** (`abs-census-augmentor`) is retired from the mainline path. The `sa2_*` columns can still be added back to the features parquet for follow-up research, but no production code consumes them.
+- **§7.7 (SA2 block)** stays in the spec as a research surface; no longer "the only difference between A and B" because there is no B in production.
+- **§8.4 (the A/B comparison)** is preserved as the original v1/v2 methodology study. The headline outcome of that study is now: **no robust lift across 8 variants × 6 folds, falling within the LightGBM seed-noise floor**.
+- **Future augmentor work** needs to first reproduce a Phase 2-style improvement that survives the v3.0 k-fold methodology before going into the production path. No v2.x variant cleared that bar; the explicit-interaction probe (Phase 2.5 #3) actively regressed.
+
+Headline numbers ([`docs/research/2026-06_v3.0_phase3_closing_summary.md`](docs/research/2026-06_v3.0_phase3_closing_summary.md) has the full evidence trail):
+
+| Question | v2.x answer (single-split) | v3.0 answer (6-fold k-fold) |
+|---|---|---|
+| Model B beats Model A? | by 0.239 c/L test_normal + 0.321 c/L test_crisis | no — 0 of 8 variants robust; PR B baseline mean +0.215 c/L (B *worse*) |
+| Is the spec §8.2 hyperparameter config near optimum? | untested | no — Optuna sweep found a 0.170 c/L improvement (WEAK WIN, validated across 6 seeds). New defaults locked in spec §8.2. |
+| Where does the per-fold variance come from? | unmeasurable (single split) | folds 3 + 6 dominate; mostly intrinsic LightGBM seed-noise on those folds, not augmentor instability |
+| Would an explicit Centrelink × SEIFA interaction help? | hypothesised in §13 #3; never tested | no — adding `sa2_seifa_irsd_score * cal_day_of_fortnight` made Model B 3× worse |

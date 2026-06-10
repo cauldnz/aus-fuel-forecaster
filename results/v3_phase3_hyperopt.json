@@ -1,0 +1,154 @@
+{
+  "study_name": "phase3_model_a_hyperopt",
+  "n_trials_total": 44,
+  "n_completed": 8,
+  "n_pruned": 36,
+  "n_failed": 0,
+  "best_value": 4.861244996193644,
+  "best_params": {
+    "num_leaves": 31,
+    "min_data_in_leaf": 544,
+    "learning_rate": 0.027943464520269076,
+    "feature_fraction": 0.8507466937465737,
+    "bagging_fraction": 0.6904543002414409,
+    "bagging_freq": 0,
+    "lambda_l1": 0.05903301062687141,
+    "lambda_l2": 1.0126240435725705e-07
+  },
+  "reference_default_params": {
+    "objective": "regression_l1",
+    "metric": "mae",
+    "learning_rate": 0.05,
+    "num_leaves": 63,
+    "min_data_in_leaf": 200,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "n_estimators": 2000,
+    "early_stopping_rounds": 100,
+    "verbose": -1,
+    "random_state": 42
+  },
+  "completed_trials": [
+    {
+      "number": 15,
+      "value": 4.861244996193644,
+      "params": {
+        "num_leaves": 31,
+        "min_data_in_leaf": 544,
+        "learning_rate": 0.027943464520269076,
+        "feature_fraction": 0.8507466937465737,
+        "bagging_fraction": 0.6904543002414409,
+        "bagging_freq": 0,
+        "lambda_l1": 0.05903301062687141,
+        "lambda_l2": 1.0126240435725705e-07
+      },
+      "duration_s": 686.818925
+    },
+    {
+      "number": 14,
+      "value": 4.864738437384291,
+      "params": {
+        "num_leaves": 31,
+        "min_data_in_leaf": 542,
+        "learning_rate": 0.027757584202403367,
+        "feature_fraction": 0.8770135797724246,
+        "bagging_fraction": 0.5937238766599506,
+        "bagging_freq": 0,
+        "lambda_l1": 0.03387557668886888,
+        "lambda_l2": 3.7662049268475284e-06
+      },
+      "duration_s": 685.11186
+    },
+    {
+      "number": 39,
+      "value": 4.903510674609733,
+      "params": {
+        "num_leaves": 15,
+        "min_data_in_leaf": 88,
+        "learning_rate": 0.1169898666604023,
+        "feature_fraction": 0.9489890090263943,
+        "bagging_fraction": 0.43464785453184795,
+        "bagging_freq": 0,
+        "lambda_l1": 1.0936304934860628,
+        "lambda_l2": 1.6499309203686571e-06
+      },
+      "duration_s": 304.567735
+    },
+    {
+      "number": 6,
+      "value": 4.9064963771890096,
+      "params": {
+        "num_leaves": 31,
+        "min_data_in_leaf": 978,
+        "learning_rate": 0.04948255557785274,
+        "feature_fraction": 0.7169169932916925,
+        "bagging_fraction": 0.421217375710437,
+        "bagging_freq": 0,
+        "lambda_l1": 0.00021730362290175328,
+        "lambda_l2": 2.634153800648804e-08
+      },
+      "duration_s": 603.997378
+    },
+    {
+      "number": 32,
+      "value": 4.909374265727108,
+      "params": {
+        "num_leaves": 31,
+        "min_data_in_leaf": 230,
+        "learning_rate": 0.06336289616560267,
+        "feature_fraction": 0.9511534287080549,
+        "bagging_fraction": 0.5209777116821823,
+        "bagging_freq": 0,
+        "lambda_l1": 0.014924079371685434,
+        "lambda_l2": 0.000186673787014042
+      },
+      "duration_s": 689.050178
+    },
+    {
+      "number": 13,
+      "value": 4.922734433814171,
+      "params": {
+        "num_leaves": 31,
+        "min_data_in_leaf": 217,
+        "learning_rate": 0.03404680915871835,
+        "feature_fraction": 0.878435298769916,
+        "bagging_fraction": 0.5439312753567199,
+        "bagging_freq": 0,
+        "lambda_l1": 0.006155322362608117,
+        "lambda_l2": 7.280485183681547e-06
+      },
+      "duration_s": 620.955428
+    },
+    {
+      "number": 3,
+      "value": 4.9317391454378585,
+      "params": {
+        "num_leaves": 31,
+        "min_data_in_leaf": 126,
+        "learning_rate": 0.04089285700048085,
+        "feature_fraction": 0.7280261676059678,
+        "bagging_fraction": 0.5109126733153162,
+        "bagging_freq": 0,
+        "lambda_l1": 0.002404915432737351,
+        "lambda_l2": 1.9809253750493907
+      },
+      "duration_s": 624.800962
+    },
+    {
+      "number": 2,
+      "value": 4.953447703798124,
+      "params": {
+        "num_leaves": 63,
+        "min_data_in_leaf": 60,
+        "learning_rate": 0.13060986669773664,
+        "feature_fraction": 0.9793792198447356,
+        "bagging_fraction": 0.8850384088698766,
+        "bagging_freq": 5,
+        "lambda_l1": 1.254134495897175e-07,
+        "lambda_l2": 0.00028614897264046574
+      },
+      "duration_s": 301.085002
+    }
+  ]
+}

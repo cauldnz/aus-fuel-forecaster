@@ -80,6 +80,33 @@ def test_kfold_config_fold_bounds_gap_days_separate_train_and_test() -> None:
         )
 
 
+def test_kfold_config_fold_bounds_horizon_days_widens_gap() -> None:
+    """horizon_days pulls the train cutoff back by (horizon_days - 1) extra
+    days, so a multi-day target can't leak into the test window.
+
+    For y_t1_t7 (horizon_days=7) the gap between train_val_end and
+    test_start must be at least 7 days, so the last train row's
+    mean(price[t+1..t+7]) target lands entirely in the gap.
+    """
+    cfg_h1 = KFoldConfig(horizon_days=1, gap_days=1)
+    cfg_h7 = KFoldConfig(horizon_days=7, gap_days=1)
+    for fold_idx in range(cfg_h1.k):
+        _, _, tve1, ts1, _ = cfg_h1.fold_bounds()[fold_idx]
+        _, _, tve7, ts7, _ = cfg_h7.fold_bounds()[fold_idx]
+        gap1 = (ts1 - tve1).days
+        gap7 = (ts7 - tve7).days
+        # horizon=1: gap == 1 + gap_days == 2 (backward-compatible)
+        assert gap1 == 1 + cfg_h1.gap_days
+        # horizon=7: gap == 1 + gap_days + (7 - 1) == 8 days
+        assert gap7 == 1 + cfg_h7.gap_days + (cfg_h7.horizon_days - 1), (
+            f"fold {fold_idx + 1}: horizon=7 gap should be "
+            f"{1 + cfg_h7.gap_days + 6}, got {gap7}"
+        )
+        # The 7-day target's forward reach (train_val_end + 7) must land
+        # strictly before test_start (i.e. in the gap, not in test).
+        assert tve7 + pd.Timedelta(days=cfg_h7.horizon_days) < ts7
+
+
 def test_kfold_config_fold_bounds_train_start_after_warmup() -> None:
     """Every fold's train starts the day after warmup_end."""
     cfg = KFoldConfig.default()

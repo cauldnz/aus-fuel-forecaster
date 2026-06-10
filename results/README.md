@@ -16,7 +16,17 @@ The contribution becomes a **methodology study**: how single-split misleads,
 how k-fold + seed-noise floor + explicit-interaction probes triangulate, and
 what the v2.x experimental record looks like when subjected to honest variance
 quantification. The full evidence trail and ship decision live in
-[`docs/research/2026-06_v3.0_phase3_closing_summary.md`](../docs/research/2026-06_v3.0_phase3_closing_summary.md).
+[`docs/research/2026-06_v3.0_phase3_closing_summary.md`](../docs/research/2026-06_v3.0_phase3_closing_summary.md);
+the externally-facing write-up (including the v4/v5 follow-ups) is at
+[`docs/methodology_writeup.md`](../docs/methodology_writeup.md).
+
+**The null holds at a second horizon (v5, 2026-06-11).** Re-running the A-vs-B
+comparison at the **7-day** target (`y_t1_t7`) gives Mean Δ MAE +0.041, Stdev
+0.370 — the same noise-band verdict as t+1. The 7-day target is genuinely harder
+(per-fold MAE 8-25 c/L vs 4-13 at t+1; lag features weaker), so the gap the
+augmentor could fill really existed — it just didn't fill it. A two-horizon
+null closes the "maybe the horizon was wrong" objection. See
+[`docs/research/2026-06_v5_7day_horizon_outcome.md`](../docs/research/2026-06_v5_7day_horizon_outcome.md).
 
 **Production model: Model A on v3.0-tuned hyperparameters.** No SA2 block.
 Spec §8.2's hyperparameters were re-tuned via Optuna TPE (Phase 3 #4) and

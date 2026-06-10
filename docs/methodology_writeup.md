@@ -310,6 +310,86 @@ ship with Model A.
    bound) makes it a methodology contribution that generalises beyond
    the specific augmentor / dataset.
 
+## The follow-ups — what the seed-noise floor opened up (v4 + v5)
+
+The Phase 2.5 seed-noise experiment threw off two side-observations that
+turned into their own investigations, and a horizon challenge closed the
+loop. All three deepen the methodology more than the feature set.
+
+### v4 — chasing the unstable folds (and learning that features *relocate* instability)
+
+The seed-noise floor showed folds 3 (2022-23) and 6 (2025-26) were 3-5×
+more seed-unstable than the others. I ran three feature hypotheses to fix
+them:
+
+- **Fuel excise** (fold 3 spans the 2022 excise cut + restoration) →
+  **falsified**. The instability was a *regularization* problem, not a
+  missing-feature one — the hyperparameter retune had already fixed it
+  (fold 3 seed-stdev 0.163 → 0.044). Adding the excise rate made things
+  worse, because the rate is near-constant within most folds' test
+  windows: a feature that doesn't vary in a fold adds tree capacity
+  without signal, and the spare capacity fits seed noise.
+- **Brent realized volatility** (fold 6 is the 2026 oil shock) →
+  **partial but not shippable**. Volatility genuinely halves fold 6's
+  instability (−50%, confirmed across 6 seeds), but it *destabilises*
+  fold 3 (+91%) — broad vol "lights up" in both the 2022 and 2026 shock
+  periods, stabilising one while wrecking the other. Net aggregate: flat.
+- **Return kurtosis / skew** (a reviewer's pointer — jump risk, a 4th
+  moment vol misses) → **neutral beyond vol**. Sound idea, well-formed
+  feature, but kurtosis and vol carry overlapping regime signal; vol got
+  there first. The interesting twist: kurtosis has *different* fold
+  sensitivity (it undoes vol's fold-3 damage but creates new fold-4
+  damage). Every feature just *relocates* instability to a different
+  fold; none reduces it in aggregate.
+
+**The durable lesson: a regime feature's value is per-fold, not global.**
+A feature that helps your target fold can silently hurt another. Always
+read the full per-fold vector *and* the aggregate — never just the fold
+you set out to fix. The corollary (the "near-constant-within-fold"
+trap) is that a feature can be informative globally yet harmful on the
+specific folds where it doesn't vary.
+
+A second, sharper lesson came from my own mistakes here: **per-fold
+stdev is wildly unreliable below ~5 seeds.** Fold 6 read −94% stabilisation
+at 2 seeds and converged to −50% by 6. I called "CONFIRMED" early on two
+separate experiments and had to walk it back both times. And any
+feature-vs-baseline comparison must hold the seed count *fixed* — one of
+my scripts compared a partial run against a full 6-seed baseline and
+spuriously reported a win. Match the denominator; wait for the seeds.
+
+### v5 — the horizon challenge: does the null generalise?
+
+The strongest "but maybe it helps *elsewhere*" objection to a feature
+null is horizon: at a longer forecast horizon the lag features carry less
+information (tomorrow's price ≈ today's, but the 7-day mean is harder to
+pin from recent lags), so static context might finally win where the lag
+advantage decays.
+
+I re-ran the A-vs-B comparison at the 7-day target (`y_t1_t7`). The
+target *is* genuinely harder — per-fold MAE 8-25 c/L vs 4-13 at t+1, lag
+features demonstrably weaker — so the gap the augmentor could fill really
+existed. It didn't fill it: **Mean Δ MAE +0.041, Stdev 0.370 → noise**,
+the same verdict as t+1. The null now holds at **two independent
+horizons**, which is far harder to dismiss than a single-horizon null.
+
+(A prerequisite fix fell out of this: the k-fold harness's `horizon_days`
+parameter was documented but never actually widened the train/test gap —
+a latent target leak for any multi-day horizon. Fixing it was necessary
+to run v5 honestly, and it's a correctness improvement for any future
+multi-horizon work.)
+
+### The meta-lesson
+
+Each follow-up tried to rescue or extend the feature and instead
+*hardened the null*. That's the shape of a robust negative result: it
+survives not just the original test but every plausible "you tested it
+wrong" objection — wrong methodology (k-fold), wrong significance bar
+(seed-noise floor), missing interaction (explicit feature), wrong model
+capacity (hyperparameter sweep), wrong unstable-fold features (excise /
+vol / kurtosis), and wrong horizon (t+7). A null that survives six
+distinct rescue attempts is worth more than a marginal positive that
+survived none.
+
 ## The protocol, distilled
 
 If you're about to ship a feature ablation based on a single-split A/B

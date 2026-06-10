@@ -523,18 +523,31 @@ target is null (end-of-series) are dropped before training.
 
 LightGBM regressor (`lightgbm.LGBMRegressor`), tabular tree-based model. Sufficient for the data size and handles nulls + categoricals natively.
 
-### 8.2 Hyperparameters (v1, fixed)
+### 8.2 Hyperparameters
+
+> **v3.0 update (2026-06-09):** these defaults were re-tuned via Optuna TPE
+> Bayesian search (200 trials, 6-fold k-fold objective, see Phase 3 #4 in
+> [§15.6](#156-v30-outcome--ship-model-a) and
+> [`docs/research/2026-06_v3.0_phase3_closing_summary.md`](docs/research/2026-06_v3.0_phase3_closing_summary.md)).
+> The winning combination was validated across 6 seeds (mean improvement
+> 0.170 c/L vs the original v1/v2 defaults; |mean|/stdev ratio 1.29 → WEAK
+> WIN per the v3.0 significance heuristic). Validated improvements:
+> 5 of 6 folds improve clearly; fold_2 is dead-flat; biggest wins on the
+> volatile folds (fold_3 −0.38, fold_4 −0.23, fold_1 −0.21, fold_6 −0.18).
+> Full validation: [`results/v3_phase3_hyperopt_validation.md`](results/v3_phase3_hyperopt_validation.md).
 
 ```python
 LGBM_PARAMS = dict(
     objective="regression_l1",       # MAE-aligned loss
     metric="mae",
-    learning_rate=0.05,
-    num_leaves=63,
-    min_data_in_leaf=200,
-    feature_fraction=0.8,
-    bagging_fraction=0.8,
-    bagging_freq=5,
+    learning_rate=0.028,             # v3.0 tuned (was 0.05)
+    num_leaves=31,                   # v3.0 tuned — smaller trees (was 63)
+    min_data_in_leaf=544,            # v3.0 tuned — heavier leaf reg (was 200)
+    feature_fraction=0.85,           # v3.0 tuned — more features per tree (was 0.8)
+    bagging_fraction=0.69,           # v3.0 tuned (was 0.8)
+    bagging_freq=0,                  # v3.0 tuned — NO row bagging (was 5)
+    lambda_l1=0.059,                 # v3.0 tuned — small L1 (was 0)
+    lambda_l2=0.0,                   # unchanged
     n_estimators=2000,
     early_stopping_rounds=100,
     verbose=-1,
@@ -542,7 +555,33 @@ LGBM_PARAMS = dict(
 )
 ```
 
-These are deliberately reasonable defaults. **Hyperparameter tuning is out of scope for v1** — the experiment compares Model A vs Model B at fixed hyperparameters.
+**Pattern of the v3.0 retune** vs the v1/v2 defaults: smaller, more-
+regularized trees (num_leaves 63→31, min_data_in_leaf 200→544), with
+more features per split (feature_fraction 0.8→0.85), no row bagging
+(bagging_freq 5→0), slower learning (learning_rate 0.05→0.028), and a
+small L1 penalty. The original v1/v2 defaults were over-fitting — the
+tuned config trades tree capacity for stronger regularization and lets
+more features into each split.
+
+**Original v1/v2 defaults** (preserved here for historical reference,
+and what the v3.0 closing baseline was measured against):
+
+| Param | v1/v2 | v3.0 tuned |
+|-------|------:|-----------:|
+| learning_rate | 0.05 | 0.028 |
+| num_leaves | 63 | 31 |
+| min_data_in_leaf | 200 | 544 |
+| feature_fraction | 0.8 | 0.85 |
+| bagging_fraction | 0.8 | 0.69 |
+| bagging_freq | 5 | 0 |
+| lambda_l1 | 0 | 0.059 |
+| lambda_l2 | 0 | 0 |
+
+**Tuning was OUT of scope for v1/v2.** The v3.0 Phase 2.5 postmortem
+(spec §15.2 / §15.6) brought it back in as a Reading-C1 test once the
+augmentor surface produced a null result and the question shifted to
+"is Model A itself at capacity?" The answer turned out to be no —
+there was a measurable ~0.17 c/L improvement to unlock by retuning.
 
 ### 8.3 Validation strategy
 
@@ -1029,6 +1068,6 @@ Headline numbers ([`docs/research/2026-06_v3.0_phase3_closing_summary.md`](docs/
 | Question | v2.x answer (single-split) | v3.0 answer (6-fold k-fold) |
 |---|---|---|
 | Model B beats Model A? | by 0.239 c/L test_normal + 0.321 c/L test_crisis | no — 0 of 8 variants robust; PR B baseline mean +0.215 c/L (B *worse*) |
-| Is the spec §8.2 hyperparameter config near optimum? | untested | _see Phase 2.5 #4 outcome — `results/v3_phase3_hyperopt_summary.md`_ |
+| Is the spec §8.2 hyperparameter config near optimum? | untested | no — Optuna sweep found a 0.170 c/L improvement (WEAK WIN, validated across 6 seeds). New defaults locked in spec §8.2. |
 | Where does the per-fold variance come from? | unmeasurable (single split) | folds 3 + 6 dominate; mostly intrinsic LightGBM seed-noise on those folds, not augmentor instability |
 | Would an explicit Centrelink × SEIFA interaction help? | hypothesised in §13 #3; never tested | no — adding `sa2_seifa_irsd_score * cal_day_of_fortnight` made Model B 3× worse |

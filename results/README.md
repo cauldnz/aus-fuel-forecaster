@@ -18,9 +18,12 @@ what the v2.x experimental record looks like when subjected to honest variance
 quantification. The full evidence trail and ship decision live in
 [`docs/research/2026-06_v3.0_phase3_closing_summary.md`](../docs/research/2026-06_v3.0_phase3_closing_summary.md).
 
-**Production model: Model A.** No SA2 block. Spec §8.2 hyperparameters (or the
-Phase 3 #4 hyperopt winner, depending on whether it cleared a 0.05 c/L
-improvement bar — see Phase 3 hyperopt summary).
+**Production model: Model A on v3.0-tuned hyperparameters.** No SA2 block.
+Spec §8.2's hyperparameters were re-tuned via Optuna TPE (Phase 3 #4) and
+validated across 6 seeds — mean improvement 0.170 c/L over the original
+v1/v2 defaults (WEAK WIN, |mean|/stdev ratio 1.29). The new defaults are
+smaller, more-regularized trees with no row bagging (see spec §8.2 for the
+full table). The v1/v2 defaults were over-fitting.
 
 ---
 
@@ -95,12 +98,17 @@ Four follow-up experiments tested the three readings of the Phase 2 outcome
    splits don't generalise. **Reading C2 (missing interaction feature)
    falsified.**
 
-4. **Hyperparameter sweep on Model A** ([`v3_phase3_hyperopt_summary.md`](v3_phase3_hyperopt_summary.md))
-   Optuna TPE Bayesian search across `num_leaves`, `min_data_in_leaf`,
-   `learning_rate`, bagging/feature fractions, `lambda_l1`/`l2`. 200-trial
-   budget, 6-fold k-fold evaluation per trial, median pruning. Outcome
-   interpretation rules set ex-ante: >0.05 c/L improvement → update spec §8.2;
-   0.01-0.05 → keep defaults; none → Reading C1 falsified too.
+4. **Hyperparameter sweep on Model A** — **WEAK WIN, new defaults locked**
+   ([`v3_phase3_hyperopt_summary.md`](v3_phase3_hyperopt_summary.md) +
+   [`v3_phase3_hyperopt_validation.md`](v3_phase3_hyperopt_validation.md))
+   Optuna TPE Bayesian search → trial 15 winner (num_leaves=31, min_data=544,
+   lr=0.028, ff=0.85, bf=0.69/freq=0, l1=0.059). 6-seed validation: mean
+   improvement **0.170 c/L** across folds, stdev **0.132**, ratio 1.29 →
+   WEAK WIN (>1.0). 5 of 6 folds improve clearly; fold_2 dead-flat; biggest
+   wins on fold_3 (−0.38), fold_4 (−0.23), fold_1 (−0.21), fold_6 (−0.18).
+   Reading C1 partially confirmed — v1/v2 defaults were over-fitting; new
+   smaller-trees + more-regularization config unlocks ~0.17 c/L. New
+   defaults committed to spec §8.2 + `src/fuel_pred/config.py`.
 
 ---
 
@@ -110,8 +118,11 @@ Four follow-up experiments tested the three readings of the Phase 2 outcome
 
 - **Model A** (lag, upstream, calendar, ctx, stn, wx blocks; no SA2). 73-ish
   feature columns including a 5-column GFS weather block.
-- **Spec §8.2 LightGBM hyperparameters** as defaults (possibly updated to the
-  Phase 3 #4 hyperopt winner — see that doc for the call).
+- **Spec §8.2 LightGBM hyperparameters (v3.0 tuned)** — Optuna-tuned via Phase
+  3 #4: num_leaves 31, min_data_in_leaf 544, learning_rate 0.028,
+  feature_fraction 0.85, bagging_fraction 0.69, bagging_freq 0 (no row
+  bagging), lambda_l1 0.059. Validated across 6 seeds: 0.170 c/L improvement
+  over the original v1/v2 defaults.
 - **6-fold k-fold methodology** (spec §15.2) as the evaluation harness. Single-
   split A/B is deprecated.
 - **`evaluate.compare_kfold`** as the canonical comparison entry point.

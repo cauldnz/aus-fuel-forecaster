@@ -146,12 +146,20 @@ def resolve_weather_source() -> Literal["gfs", "openmeteo"]:
 LGBM_PARAMS: dict[str, object] = {
     "objective": "regression_l1",
     "metric": "mae",
-    "learning_rate": 0.05,
-    "num_leaves": 63,
-    "min_data_in_leaf": 200,
-    "feature_fraction": 0.8,
-    "bagging_fraction": 0.8,
-    "bagging_freq": 5,
+    # v3.0 tuned defaults from Optuna TPE sweep (Phase 3 #4, 200 trials,
+    # 6-fold k-fold objective). Validated across 6 seeds: mean improvement
+    # 0.170 c/L (WEAK WIN, |mean|/stdev = 1.29) vs the original v1/v2
+    # defaults. See spec §8.2 + results/v3_phase3_hyperopt_validation.md.
+    # Pattern: smaller more-regularized trees with more features per split
+    # and no row bagging — model was over-fitting at the v1/v2 defaults.
+    "learning_rate": 0.028,       # v3.0 (was 0.05)
+    "num_leaves": 31,             # v3.0 (was 63)
+    "min_data_in_leaf": 544,      # v3.0 (was 200)
+    "feature_fraction": 0.85,     # v3.0 (was 0.8)
+    "bagging_fraction": 0.69,     # v3.0 (was 0.8)
+    "bagging_freq": 0,            # v3.0 (was 5) — no row bagging
+    "lambda_l1": 0.059,           # v3.0 (was 0)
+    "lambda_l2": 0.0,             # unchanged
     "n_estimators": 2000,
     "early_stopping_rounds": 100,
     "verbose": -1,

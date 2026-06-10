@@ -30,6 +30,9 @@ results/*
 # v3.0 smoke + Phase 2 re-eval reports — same rationale.
 !results/v3_*.md
 !results/v3_*.json
+# v4 fold-instability experiment reports — same rationale.
+!results/v4_*.md
+!results/v4_*.json
 
 # Python
 __pycache__/

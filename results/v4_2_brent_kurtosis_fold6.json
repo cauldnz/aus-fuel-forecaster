@@ -1,0 +1,176 @@
+{
+  "seeds": [
+    42,
+    1,
+    7,
+    13,
+    99,
+    123
+  ],
+  "new_features_total": [
+    "upstream_brent_realized_vol_14d",
+    "upstream_brent_realized_vol_30d",
+    "upstream_brent_vol_ratio_14_90",
+    "upstream_brent_return_skew_30d",
+    "upstream_brent_return_kurt_30d",
+    "upstream_brent_return_kurt_60d"
+  ],
+  "new_features_vs_v41": [
+    "upstream_brent_return_skew_30d",
+    "upstream_brent_return_kurt_30d",
+    "upstream_brent_return_kurt_60d"
+  ],
+  "per_seed_per_fold_mae_a_NEW": {
+    "42": {
+      "fold_1": 5.364611629781016,
+      "fold_2": 4.808638250693065,
+      "fold_3": 5.973481215298204,
+      "fold_4": 5.060394487079858,
+      "fold_5": 4.363845742106412,
+      "fold_6": 3.5734986001850535,
+      "wall_clock_min": 0.0,
+      "resumed_from_cache": true
+    },
+    "1": {
+      "fold_1": 5.283834337584947,
+      "fold_2": 4.830728748199016,
+      "fold_3": 6.114641535422304,
+      "fold_4": 5.059626697491225,
+      "fold_5": 4.372175816088607,
+      "fold_6": 3.5195815261119328,
+      "wall_clock_min": 0.0,
+      "resumed_from_cache": true
+    },
+    "7": {
+      "fold_1": 5.31146277782018,
+      "fold_2": 4.817508539165669,
+      "fold_3": 6.022705372660041,
+      "fold_4": 5.202166735257397,
+      "fold_5": 4.396622023650516,
+      "fold_6": 3.5489565835387187,
+      "wall_clock_min": 0.0,
+      "resumed_from_cache": true
+    },
+    "13": {
+      "fold_1": 5.374802790035406,
+      "fold_2": 4.8220898334309075,
+      "fold_3": 6.029960997630062,
+      "fold_4": 5.145952741035929,
+      "fold_5": 4.2933428518168375,
+      "fold_6": 3.6824865083874356,
+      "wall_clock_min": 0.0,
+      "resumed_from_cache": true
+    },
+    "99": {
+      "fold_1": 5.331691254721384,
+      "fold_2": 4.820933773969813,
+      "fold_3": 6.071954371855539,
+      "fold_4": 4.997823610101125,
+      "fold_5": 4.385322316080994,
+      "fold_6": 3.49537318329825,
+      "wall_clock_min": 0.0,
+      "resumed_from_cache": true
+    },
+    "123": {
+      "fold_1": 5.298598317156176,
+      "fold_2": 4.820030788599138,
+      "fold_3": 6.074755152515522,
+      "fold_4": 4.99604021767188,
+      "fold_5": 4.464872069375011,
+      "fold_6": 3.698075844248303,
+      "wall_clock_min": 0.0,
+      "resumed_from_cache": true
+    }
+  },
+  "per_fold_seed_stats_NEW_vol_plus_moments": {
+    "fold_1": {
+      "mean": 5.327500184516518,
+      "stdev": 0.03324550963831392
+    },
+    "fold_2": {
+      "mean": 4.819988322342934,
+      "stdev": 0.006527406703635231
+    },
+    "fold_3": {
+      "mean": 6.0479164408969455,
+      "stdev": 0.04518291624058975
+    },
+    "fold_4": {
+      "mean": 5.077000748106236,
+      "stdev": 0.07508012817366404
+    },
+    "fold_5": {
+      "mean": 4.379363469853063,
+      "stdev": 0.050558703649229556
+    },
+    "fold_6": {
+      "mean": 3.5863287076282826,
+      "stdev": 0.07748454270810913
+    }
+  },
+  "per_fold_seed_stats_CLEAN_baseline": {
+    "fold_1": {
+      "mean": 5.3334591881462865,
+      "stdev": 0.019096332600456
+    },
+    "fold_2": {
+      "mean": 4.762371548111166,
+      "stdev": 0.030690191528889157
+    },
+    "fold_3": {
+      "mean": 6.089815810644325,
+      "stdev": 0.043640149197229736
+    },
+    "fold_4": {
+      "mean": 5.001545604134007,
+      "stdev": 0.039763315166416624
+    },
+    "fold_5": {
+      "mean": 4.411549334413461,
+      "stdev": 0.04541875835201002
+    },
+    "fold_6": {
+      "mean": 3.545327146361215,
+      "stdev": 0.10021547324474771
+    }
+  },
+  "per_fold_seed_stats_V41_vol_only": {
+    "fold_1": {
+      "mean": 5.3365979207641665,
+      "stdev": 0.03158284704188628
+    },
+    "fold_2": {
+      "mean": 4.777679036852384,
+      "stdev": 0.018683998970045933
+    },
+    "fold_3": {
+      "mean": 6.095341928195257,
+      "stdev": 0.08317032635476329
+    },
+    "fold_4": {
+      "mean": 5.077157839590858,
+      "stdev": 0.03950737752478045
+    },
+    "fold_5": {
+      "mean": 4.465759595266909,
+      "stdev": 0.04990526204481598
+    },
+    "fold_6": {
+      "mean": 3.4948376593677413,
+      "stdev": 0.05057907590333569
+    }
+  },
+  "fold6_stdev_clean_baseline": 0.10021547324474771,
+  "fold6_stdev_v41_vol_only": 0.05057907590333569,
+  "fold6_stdev_v42_vol_plus_moments": 0.07748454270810913,
+  "marginal_verdict_vs_v41": "HIGHER MOMENTS HURT (beyond vol)",
+  "comparison_seeds_matched": [
+    1,
+    7,
+    13,
+    42,
+    99,
+    123
+  ],
+  "comparison_note": "All three configs' stdevs are computed over the SAME seeds ([1, 7, 13, 42, 99, 123]) \u2014 matched-denominator comparison. Verdict is trustworthy only at the full 6-seed sweep; per-fold stdev is unstable below ~5 seeds."
+}

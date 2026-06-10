@@ -261,9 +261,21 @@ def _write_summary(
     summary_json = RESULTS_DIR / "v4_2_brent_kurtosis_fold6.json"
     fold_keys = [f"fold_{i+1}" for i in range(6)]
 
+    # APPLES-TO-APPLES: restrict the clean baseline and v4.1 to the SAME
+    # seeds present in the current v4.2 run before computing stdevs.
+    # Otherwise we'd compare v4.2-at-N-seeds against v4.1's full 6-seed
+    # stdev — a mismatched denominator that made early interim summaries
+    # spuriously read "HIGHER MOMENTS HELP" (seed-sparsity in v4.2's own
+    # numbers, not a real marginal effect). Per-fold stdev is very
+    # sensitive to seed count at small N, so the comparison MUST hold N
+    # fixed across configs.
+    common_seeds = set(new_per_seed.keys())
+    clean_base_matched = {s: d for s, d in clean_base.items() if s in common_seeds}
+    v41_matched = {s: d for s, d in v41.items() if s in common_seeds}
+
     new_stats = _stats(new_per_seed)
-    base_stats = _stats(clean_base)
-    v41_stats = _stats(v41)
+    base_stats = _stats(clean_base_matched)
+    v41_stats = _stats(v41_matched)
 
     # Marginal effect (v4.2 vs v4.1) keyed on fold_6 stdev.
     f6_base = base_stats.get("fold_6", {}).get("stdev", float("nan"))
@@ -293,6 +305,13 @@ def _write_summary(
         "fold6_stdev_v41_vol_only": f6_v41,
         "fold6_stdev_v42_vol_plus_moments": f6_new,
         "marginal_verdict_vs_v41": verdict,
+        "comparison_seeds_matched": sorted(common_seeds),
+        "comparison_note": (
+            "All three configs' stdevs are computed over the SAME seeds "
+            f"({sorted(common_seeds)}) — matched-denominator comparison. "
+            "Verdict is trustworthy only at the full 6-seed sweep; per-fold "
+            "stdev is unstable below ~5 seeds."
+        ),
     }
     summary_json.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     logger.info("wrote %s", summary_json)
@@ -308,6 +327,10 @@ def _write_summary(
     lines.append("")
 
     lines.append("## fold_6 seed-stdev — the three-way comparison")
+    lines.append("")
+    lines.append(f"_All stdevs over the same {len(common_seeds)} seeds "
+                 f"({sorted(common_seeds)}) — matched-denominator. "
+                 "Trustworthy only at the full 6-seed sweep._")
     lines.append("")
     lines.append("| Config | fold_6 seed-stdev |")
     lines.append("|--------|------------------:|")

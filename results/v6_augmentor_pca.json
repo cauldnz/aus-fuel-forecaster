@@ -1,0 +1,482 @@
+{
+  "source": "data/interim/stations.parquet (full augmentor surface)",
+  "n_unique_sa2": 580,
+  "n_columns": 37,
+  "columns": [
+    "sa2_total_population",
+    "sa2_median_age",
+    "sa2_median_household_income_weekly",
+    "sa2_pct_drive_to_work",
+    "sa2_motor_vehicles_per_dwelling",
+    "sa2_pct_renters",
+    "sa2_pct_employed_full_time",
+    "sa2_pct_aged_65_plus",
+    "sa2_pct_one_parent_family",
+    "sa2_seifa_irsd_score",
+    "sa2_seifa_irsad_score",
+    "sa2_seifa_ier_score",
+    "sa2_seifa_ieo_score",
+    "sa2_erp_population_total",
+    "sa2_pia_median_total_income",
+    "sa2_pia_mean_total_income",
+    "sa2_pia_income_earners_count",
+    "sa2_pia_median_age_of_earners",
+    "sa2_dss_age_pension_recipients",
+    "sa2_dss_jobseeker_payment_recipients",
+    "sa2_dss_disability_support_pension_recipients",
+    "sa2_dss_parenting_payment_single_recipients",
+    "sa2_dss_parenting_payment_partnered_recipients",
+    "sa2_dss_carer_payment_recipients",
+    "sa2_dss_carer_allowance_recipients",
+    "sa2_dss_youth_allowance_other_recipients",
+    "sa2_dss_youth_allowance_student_and_apprentice_recipients",
+    "sa2_dss_commonwealth_rent_assistance_recipients",
+    "sa2_dss_commonwealth_seniors_health_card_recipients",
+    "sa2_dss_family_tax_benefit_a_recipients",
+    "sa2_dss_family_tax_benefit_b_recipients",
+    "sa2_erp_population_65_plus",
+    "sa2_erp_median_age",
+    "sa2_pct_age_pension_recipients",
+    "sa2_pct_jobseeker_recipients",
+    "sa2_welfare_density_index",
+    "sa2_erp_population_density_per_km2"
+  ],
+  "pca_components_for_variance": {
+    "0.8": 4,
+    "0.9": 6,
+    "0.95": 10,
+    "0.99": 20
+  },
+  "explained_variance_ratio": [
+    0.39939240254272784,
+    0.23959152072372278,
+    0.12900665240658096,
+    0.07010951795081577,
+    0.04598717586809488,
+    0.025679351297419495,
+    0.012275260738933898,
+    0.011880135149394674,
+    0.010615001917202667,
+    0.007664568899136399,
+    0.007345482402434522,
+    0.006000708653266989,
+    0.005073776525044931,
+    0.004088198527812148,
+    0.003925052916803416,
+    0.0035229982436264557,
+    0.003039440217345297,
+    0.0024030814862841,
+    0.0021831785271820407,
+    0.0016578728992978256,
+    0.0015959519220035685,
+    0.0011912587511921258,
+    0.0010768258633611287,
+    0.0009133529045453997,
+    0.0007576853542732206,
+    0.0006276367970248572,
+    0.0005216159094439236,
+    0.0005067184539077168,
+    0.0003600273749482807,
+    0.0002530103254423862,
+    0.00018114683277119475,
+    0.00015256853099808554,
+    0.00013009044907451737,
+    0.0001247832110463526,
+    8.86715424407696e-05,
+    5.449115814654616e-05,
+    2.278672625293963e-05
+  ],
+  "cumulative_variance": [
+    0.39939240254272784,
+    0.6389839232664506,
+    0.7679905756730315,
+    0.8381000936238473,
+    0.8840872694919422,
+    0.9097666207893617,
+    0.9220418815282956,
+    0.9339220166776903,
+    0.9445370185948929,
+    0.9522015874940293,
+    0.9595470698964638,
+    0.9655477785497307,
+    0.9706215550747757,
+    0.9747097536025878,
+    0.9786348065193913,
+    0.9821578047630177,
+    0.985197244980363,
+    0.9876003264666471,
+    0.9897835049938292,
+    0.991441377893127,
+    0.9930373298151306,
+    0.9942285885663227,
+    0.9953054144296838,
+    0.9962187673342292,
+    0.9969764526885024,
+    0.9976040894855273,
+    0.9981257053949711,
+    0.9986324238488788,
+    0.9989924512238272,
+    0.9992454615492695,
+    0.9994266083820407,
+    0.9995791769130388,
+    0.9997092673621133,
+    0.9998340505731597,
+    0.9999227221156004,
+    0.999977213273747,
+    0.9999999999999999
+  ],
+  "leave_one_out_r2": [
+    {
+      "column": "sa2_total_population",
+      "r2_ridge": 0.9896170238843972,
+      "r2_gbm": 0.9770085309471208
+    },
+    {
+      "column": "sa2_median_age",
+      "r2_ridge": 0.9896207836392389,
+      "r2_gbm": 0.9787116704706029
+    },
+    {
+      "column": "sa2_median_household_income_weekly",
+      "r2_ridge": 0.955612890740146,
+      "r2_gbm": 0.9556354404825604
+    },
+    {
+      "column": "sa2_pct_drive_to_work",
+      "r2_ridge": 0.832754535828202,
+      "r2_gbm": 0.8585202182411015
+    },
+    {
+      "column": "sa2_motor_vehicles_per_dwelling",
+      "r2_ridge": 0.9335090813817917,
+      "r2_gbm": 0.9213143448711408
+    },
+    {
+      "column": "sa2_pct_renters",
+      "r2_ridge": 0.9348399600064046,
+      "r2_gbm": 0.8999795071307444
+    },
+    {
+      "column": "sa2_pct_employed_full_time",
+      "r2_ridge": 0.7241230717409314,
+      "r2_gbm": 0.8459306341075228
+    },
+    {
+      "column": "sa2_pct_aged_65_plus",
+      "r2_ridge": 0.9562833435329884,
+      "r2_gbm": 0.9288843921540494
+    },
+    {
+      "column": "sa2_pct_one_parent_family",
+      "r2_ridge": 0.8289537349716042,
+      "r2_gbm": 0.8266437545820148
+    },
+    {
+      "column": "sa2_seifa_irsd_score",
+      "r2_ridge": 0.9770625639124242,
+      "r2_gbm": 0.965932025302007
+    },
+    {
+      "column": "sa2_seifa_irsad_score",
+      "r2_ridge": 0.9961660047455438,
+      "r2_gbm": 0.9868682865792626
+    },
+    {
+      "column": "sa2_seifa_ier_score",
+      "r2_ridge": 0.9834143834205561,
+      "r2_gbm": 0.9518233483601541
+    },
+    {
+      "column": "sa2_seifa_ieo_score",
+      "r2_ridge": 0.9858847486727733,
+      "r2_gbm": 0.9708248990482948
+    },
+    {
+      "column": "sa2_erp_population_total",
+      "r2_ridge": 0.9808046122218931,
+      "r2_gbm": 0.974551515425488
+    },
+    {
+      "column": "sa2_pia_median_total_income",
+      "r2_ridge": 0.9225431246755447,
+      "r2_gbm": 0.9339605729906542
+    },
+    {
+      "column": "sa2_pia_mean_total_income",
+      "r2_ridge": 0.8833239309475968,
+      "r2_gbm": 0.8826549753896573
+    },
+    {
+      "column": "sa2_pia_income_earners_count",
+      "r2_ridge": 0.9901648554876287,
+      "r2_gbm": 0.9780917114533658
+    },
+    {
+      "column": "sa2_pia_median_age_of_earners",
+      "r2_ridge": 0.9576391930164867,
+      "r2_gbm": 0.9394887740176394
+    },
+    {
+      "column": "sa2_dss_age_pension_recipients",
+      "r2_ridge": 0.9809357434458519,
+      "r2_gbm": 0.9719312471410516
+    },
+    {
+      "column": "sa2_dss_jobseeker_payment_recipients",
+      "r2_ridge": 0.9738219442925603,
+      "r2_gbm": 0.9602858512096315
+    },
+    {
+      "column": "sa2_dss_disability_support_pension_recipients",
+      "r2_ridge": 0.9501832824108506,
+      "r2_gbm": 0.9344107407048222
+    },
+    {
+      "column": "sa2_dss_parenting_payment_single_recipients",
+      "r2_ridge": 0.9802195139507391,
+      "r2_gbm": 0.9379004876754458
+    },
+    {
+      "column": "sa2_dss_parenting_payment_partnered_recipients",
+      "r2_ridge": 0.9035766381912229,
+      "r2_gbm": 0.8381570655406995
+    },
+    {
+      "column": "sa2_dss_carer_payment_recipients",
+      "r2_ridge": 0.9811494651311257,
+      "r2_gbm": 0.8957604459952396
+    },
+    {
+      "column": "sa2_dss_carer_allowance_recipients",
+      "r2_ridge": 0.9893939329619943,
+      "r2_gbm": 0.9355345713423482
+    },
+    {
+      "column": "sa2_dss_youth_allowance_other_recipients",
+      "r2_ridge": 0.917244479166895,
+      "r2_gbm": 0.9083141292010387
+    },
+    {
+      "column": "sa2_dss_youth_allowance_student_and_apprentice_recipients",
+      "r2_ridge": 0.7808287615958692,
+      "r2_gbm": 0.6671413439201442
+    },
+    {
+      "column": "sa2_dss_commonwealth_rent_assistance_recipients",
+      "r2_ridge": 0.9201810457879335,
+      "r2_gbm": 0.8805960102026971
+    },
+    {
+      "column": "sa2_dss_commonwealth_seniors_health_card_recipients",
+      "r2_ridge": 0.9431385445365429,
+      "r2_gbm": 0.911339750029884
+    },
+    {
+      "column": "sa2_dss_family_tax_benefit_a_recipients",
+      "r2_ridge": 0.9976022778446815,
+      "r2_gbm": 0.9894096207413089
+    },
+    {
+      "column": "sa2_dss_family_tax_benefit_b_recipients",
+      "r2_ridge": 0.9981488582453546,
+      "r2_gbm": 0.9887928897935104
+    },
+    {
+      "column": "sa2_erp_population_65_plus",
+      "r2_ridge": 0.9881929981756562,
+      "r2_gbm": 0.9654127722942324
+    },
+    {
+      "column": "sa2_erp_median_age",
+      "r2_ridge": 0.9854418614377318,
+      "r2_gbm": 0.976219137655575
+    },
+    {
+      "column": "sa2_pct_age_pension_recipients",
+      "r2_ridge": 0.9073112548631419,
+      "r2_gbm": 0.8673314328628455
+    },
+    {
+      "column": "sa2_pct_jobseeker_recipients",
+      "r2_ridge": 0.954481485405754,
+      "r2_gbm": 0.9145796948058853
+    },
+    {
+      "column": "sa2_welfare_density_index",
+      "r2_ridge": 0.9832603447699263,
+      "r2_gbm": 0.949393196896646
+    },
+    {
+      "column": "sa2_erp_population_density_per_km2",
+      "r2_ridge": 0.7935857837961408,
+      "r2_gbm": 0.7497883109656843
+    }
+  ],
+  "mean_r2_ridge": 0.939216650238814,
+  "mean_r2_gbm": 0.919435764879245,
+  "median_r2_gbm": 0.9355345713423482,
+  "n_gbm_r2_over_0.5": 37,
+  "n_gbm_r2_over_0.9": 26,
+  "max_abs_corr_per_col": {
+    "sa2_total_population": 0.9765316660144956,
+    "sa2_median_age": 0.9900816876401338,
+    "sa2_median_household_income_weekly": 0.8978885190957364,
+    "sa2_pct_drive_to_work": 0.7722318892088001,
+    "sa2_motor_vehicles_per_dwelling": 0.8541067113802935,
+    "sa2_pct_renters": 0.8541067113802935,
+    "sa2_pct_employed_full_time": 0.6820218888581085,
+    "sa2_pct_aged_65_plus": 0.9368592945572435,
+    "sa2_pct_one_parent_family": 0.83131849697689,
+    "sa2_seifa_irsd_score": 0.900736236323137,
+    "sa2_seifa_irsad_score": 0.9494220113078737,
+    "sa2_seifa_ier_score": 0.7721494567255694,
+    "sa2_seifa_ieo_score": 0.9494220113078737,
+    "sa2_erp_population_total": 0.9765316660144956,
+    "sa2_pia_median_total_income": 0.8526585104611273,
+    "sa2_pia_mean_total_income": 0.8176354622025577,
+    "sa2_pia_income_earners_count": 0.9587642545981401,
+    "sa2_pia_median_age_of_earners": 0.9167587040690413,
+    "sa2_dss_age_pension_recipients": 0.8993918633652472,
+    "sa2_dss_jobseeker_payment_recipients": 0.9204501312707435,
+    "sa2_dss_disability_support_pension_recipients": 0.9204501312707435,
+    "sa2_dss_parenting_payment_single_recipients": 0.9317781651275702,
+    "sa2_dss_parenting_payment_partnered_recipients": 0.8271559115528062,
+    "sa2_dss_carer_payment_recipients": 0.9502351038459427,
+    "sa2_dss_carer_allowance_recipients": 0.9502351038459427,
+    "sa2_dss_youth_allowance_other_recipients": 0.9317781651275702,
+    "sa2_dss_youth_allowance_student_and_apprentice_recipients": 0.6789245637131556,
+    "sa2_dss_commonwealth_rent_assistance_recipients": 0.9008152089430448,
+    "sa2_dss_commonwealth_seniors_health_card_recipients": 0.7718967943576989,
+    "sa2_dss_family_tax_benefit_a_recipients": 0.9965573583640754,
+    "sa2_dss_family_tax_benefit_b_recipients": 0.9965573583640754,
+    "sa2_erp_population_65_plus": 0.8993918633652472,
+    "sa2_erp_median_age": 0.9900816876401338,
+    "sa2_pct_age_pension_recipients": 0.7816302867798011,
+    "sa2_pct_jobseeker_recipients": 0.9039559475121582,
+    "sa2_welfare_density_index": 0.9039559475121582,
+    "sa2_erp_population_density_per_km2": 0.7138209187598247
+  },
+  "mean_max_abs_corr": 0.8853591267253986,
+  "pc_loadings_top": [
+    {
+      "pc": 1,
+      "evr": 0.39939240254272784,
+      "top": [
+        [
+          "sa2_dss_jobseeker_payment_recipients",
+          0.2336799535168915
+        ],
+        [
+          "sa2_dss_disability_support_pension_recipients",
+          0.23198333319139466
+        ],
+        [
+          "sa2_dss_family_tax_benefit_b_recipients",
+          0.2282995441988645
+        ],
+        [
+          "sa2_dss_youth_allowance_other_recipients",
+          0.22674519358662534
+        ],
+        [
+          "sa2_dss_commonwealth_rent_assistance_recipients",
+          0.22572394854862735
+        ],
+        [
+          "sa2_dss_family_tax_benefit_a_recipients",
+          0.22474622864238603
+        ]
+      ]
+    },
+    {
+      "pc": 2,
+      "evr": 0.23959152072372278,
+      "top": [
+        [
+          "sa2_pia_income_earners_count",
+          -0.27580658623509513
+        ],
+        [
+          "sa2_erp_population_total",
+          -0.26776076507953206
+        ],
+        [
+          "sa2_erp_median_age",
+          0.25894229929049173
+        ],
+        [
+          "sa2_total_population",
+          -0.25610450019265346
+        ],
+        [
+          "sa2_median_age",
+          0.25479871128611065
+        ],
+        [
+          "sa2_pct_aged_65_plus",
+          0.24422206149372078
+        ]
+      ]
+    },
+    {
+      "pc": 3,
+      "evr": 0.12900665240658096,
+      "top": [
+        [
+          "sa2_dss_commonwealth_seniors_health_card_recipients",
+          0.38108989123489817
+        ],
+        [
+          "sa2_erp_population_65_plus",
+          0.3662652290718943
+        ],
+        [
+          "sa2_pia_median_age_of_earners",
+          0.2847146880389613
+        ],
+        [
+          "sa2_dss_age_pension_recipients",
+          0.26866108584716747
+        ],
+        [
+          "sa2_pct_renters",
+          -0.2531366824096035
+        ],
+        [
+          "sa2_seifa_ier_score",
+          0.24121694053280796
+        ]
+      ]
+    },
+    {
+      "pc": 4,
+      "evr": 0.07010951795081577,
+      "top": [
+        [
+          "sa2_motor_vehicles_per_dwelling",
+          -0.47439309872794344
+        ],
+        [
+          "sa2_seifa_ier_score",
+          -0.3437284059209987
+        ],
+        [
+          "sa2_erp_population_density_per_km2",
+          0.30343587249430143
+        ],
+        [
+          "sa2_pct_renters",
+          0.3016203943150795
+        ],
+        [
+          "sa2_pct_aged_65_plus",
+          0.2282385320344977
+        ],
+        [
+          "sa2_pct_drive_to_work",
+          -0.22340087628815813
+        ]
+      ]
+    }
+  ]
+}

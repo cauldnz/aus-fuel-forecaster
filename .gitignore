@@ -36,6 +36,9 @@ results/*
 # v5 7-day horizon experiment reports — same rationale.
 !results/v5_*.md
 !results/v5_*.json
+# v6 augmentor intrinsic-dimensionality reports — same rationale.
+!results/v6_*.md
+!results/v6_*.json
 
 # Python
 __pycache__/

@@ -77,6 +77,17 @@ The augmentor's 37 columns encode only **~4 real degrees of freedom** — broad,
 
 If the augmentor were ever to be used, this says **don't feed it 15-37 raw, mutually-redundant columns** — feed it its first ~3-4 principal components (or a hand-picked representative per axis: one SEIFA score, one age measure, one welfare measure, one density measure). That would deliver essentially all the augmentor's information at a fraction of the model-capacity cost — and would have avoided the overfitting that the broadened 31-col v1.x experiment ran into. (It still wouldn't beat Model A on *this* problem — the fuel null stands — but it's the right shape for any future task where demographic context genuinely has no implicit proxy.)
 
+## v6.1 follow-up — the PC representation tested, and it confirms the null
+
+The prediction above ("a PC-compressed block still wouldn't beat Model A") was tested directly. We projected the full 37-col surface to its top 4 PCs (83.8% variance), joined them onto the panel as the SA2 block, and re-ran Model A vs Model B-PC under the 6-fold harness. See [`results/v6_1_pc_model_b_headline.md`](../../results/v6_1_pc_model_b_headline.md).
+
+| Config | Mean Δ MAE | Stdev | Verdict |
+|---|---:|---:|---|
+| Raw 15-col SA2 block (v3.0) | +0.215 | 0.394 | noise |
+| **4-PC compressed block** | **−0.005** | 0.233 | **noise** |
+
+**Dead flat (−0.005 c/L).** The orthogonal encoding *did* reduce the noise (stdev 0.394 → 0.233 — the overfitting tax is real and the PCs remove it), but it doesn't translate to a win: Model B-PC ≈ Model A. This closes the last loophole — the null is not an artifact of *how* the augmentor is fed (raw redundant columns vs clean orthogonal PCs). It's the **information content**: the augmentor's ~4 socioeconomic gradients are genuinely redundant with what the lag features already encode, in every representation we can construct. The reproducible runner is `tools/research/v6_1_pc_model_b.py`.
+
 ## What's pinned
 
 - `tools/research/v6_augmentor_pca.py` — the analysis
